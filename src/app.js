@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-
+import db from "./api/db.routes.js";
 import sync from "./api/sync.routes.js";
 import companies from "./api/companies.routes.js";
 import ledgers from "./api/ledgers.routes.js";
@@ -15,5 +15,6 @@ app.use("/api/sync", sync);
 app.use("/api/companies", companies);
 app.use("/api/ledgers", ledgers);
 app.use("/api/products", products);
+app.use("/api/db", db);
 
 export default app;

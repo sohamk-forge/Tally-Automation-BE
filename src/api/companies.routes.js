@@ -1,33 +1,30 @@
 import express from "express";
-import { sendToTally } from "../services/tallyClient.js";
-import { getCompaniesXML } from "../services/xmlBuilder.js";
-import { parseXML } from "../services/parser.js";
+import pool from "../db/index.js";
 
 const router = express.Router();
 
+/* GET Companies From PostgreSQL */
 router.get("/", async (req, res) => {
   try {
-    const xml = getCompaniesXML();
-    const responseXML = await sendToTally(xml);
-    const result = parseXML(responseXML);
-
-    const company =
-      result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
+    const result = await pool.query(`
+      SELECT id, name, created_at
+      FROM companies
+      ORDER BY created_at DESC
+    `);
 
     res.json({
       status: "success",
       message: "Companies fetched successfully",
-      data: [
-        {
-          name: company.NAME
-        }
-      ]
+      count: result.rows.length,
+      data: result.rows
     });
 
   } catch (err) {
+    console.error("Companies Error:", err);
+
     res.status(500).json({
       status: "error",
-      message: err.message
+      message: err.message || "Database error"
     });
   }
 });

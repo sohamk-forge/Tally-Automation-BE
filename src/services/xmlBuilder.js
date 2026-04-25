@@ -57,3 +57,22 @@ export function getProductsXML(companyName = "") {
  </BODY>
 </ENVELOPE>`;
 }
+export function getVouchersXML(companyName = "") {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Data</TYPE>
+  <ID>Day Book</ID>
+ </HEADER>
+
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+  </DESC>
+ </BODY>
+</ENVELOPE>`;
+}
