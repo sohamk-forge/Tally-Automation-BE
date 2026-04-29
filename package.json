@@ -14,7 +14,8 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "fast-xml-parser": "^5.3.0",
-    "pg": "^8.16.3"
+    "knex": "^3.2.9",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
