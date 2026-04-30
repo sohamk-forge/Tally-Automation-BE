@@ -123,6 +123,8 @@ base_url = http://localhost:5000
 * Invoice / Challan automation
 * Multi-company support
 
-## Author
+# Architecture:
+Tally → BullMQ Worker → PostgreSQL → API
 
-Rohan Patil
+# Auto Sync:
+Runs every 5 minutes using BullMQ repeatable jobs
