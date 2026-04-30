@@ -1,35 +1,46 @@
 import express from "express";
-import { sendToTally } from "../services/tallyClient.js";
-import { getProductsXML } from "../services/xmlBuilder.js";
-import { parseXML } from "../services/parser.js";
+import pool from "../db/index.js";
 
 const router = express.Router();
 
+// GET /api/products
 router.get("/", async (req, res) => {
   try {
-    const company = req.query.company || "";
+    const search = req.query.search || "";
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
 
-    if (!company) {
-      return res.status(400).json({
-        status: "error",
-        message: "Company name required"
-      });
-    }
+    const offset = (page - 1) * limit;
 
-    const xml = getProductsXML(company);
-    const responseXML = await sendToTally(xml);
-    const data = parseXML(responseXML);
+    const result = await pool.query(
+      `
+      SELECT id, name, created_at
+      FROM products
+      WHERE name ILIKE $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3
+      `,
+      [`%${search}%`, limit, offset]
+    );
+
+    // ✅ CLEAN DATA (important)
+    const cleanData = result.rows.map((item) => ({
+      ...item,
+      name: item.name.replace(/&#13;&#10;|\r|\n/g, "").trim(),
+    }));
 
     res.json({
       status: "success",
-      message: "Products fetched successfully",
-      data
+      page,
+      limit,
+      count: cleanData.length,
+      data: cleanData,
     });
 
   } catch (err) {
     res.status(500).json({
       status: "error",
-      message: err.message
+      message: err.message,
     });
   }
 });

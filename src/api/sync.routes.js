@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
+import { runProductSync } from "../jobs/syncJob.js";
 import {
   getCompaniesXML,
   getLedgersXML,
@@ -22,6 +23,32 @@ router.get("/health", async (req, res) => {
     res.status(500).json({
       status: "error",
       message: err.message || "Unknown error"
+    });
+  }
+});
+/* Trigger BullMQ Sync (NEW) */
+router.get("/products-queue", async (req, res) => {
+  try {
+    const company = req.query.company;
+
+    if (!company) {
+      return res.status(400).json({
+        status: "error",
+        message: "company query required"
+      });
+    }
+
+    await runProductSync(company);
+
+    res.json({
+      status: "success",
+      message: "Product sync job added to queue"
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      status: "error",
+      message: err.message
     });
   }
 });
