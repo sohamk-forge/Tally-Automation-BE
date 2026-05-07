@@ -3,19 +3,33 @@ import pool from "../db/index.js";
 
 const router = express.Router();
 
-// GET /api/products
+/**
+ * GET /api/products
+ * Supports:
+ * - search
+ * - pagination
+ */
 router.get("/", async (req, res) => {
   try {
-    const search = req.query.search || "";
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    let search = (req.query.search || "").trim();
+
+    let page = parseInt(req.query.page);
+    let limit = parseInt(req.query.limit);
+
+    // ✅ validation + defaults
+    page = isNaN(page) || page < 1 ? 1 : page;
+    limit = isNaN(limit) || limit < 1 ? 20 : limit;
+
+    // ✅ prevent overload
+    if (limit > 100) limit = 100;
 
     const offset = (page - 1) * limit;
 
+    // 🔹 Fetch data
     const result = await pool.query(
       `
       SELECT id, name, created_at
-      FROM products
+      FROM app.stock_items
       WHERE name ILIKE $1
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
@@ -23,24 +37,42 @@ router.get("/", async (req, res) => {
       [`%${search}%`, limit, offset]
     );
 
-    // ✅ CLEAN DATA (important)
+    // 🔹 Clean data (IMPORTANT)
     const cleanData = result.rows.map((item) => ({
       ...item,
-      name: item.name.replace(/&#13;&#10;|\r|\n/g, "").trim(),
+      name: item.name
+        ?.replace(/&#13;&#10;|\r|\n/g, "")
+        .trim(),
     }));
 
+    // 🔹 Total count (for pagination)
+    const countResult = await pool.query(
+      `
+      SELECT COUNT(*) FROM app.stock_items
+      WHERE name ILIKE $1
+      `,
+      [`%${search}%`]
+    );
+
+    const total = parseInt(countResult.rows[0].count);
+
+    // 🔹 Response
     res.json({
       status: "success",
+      message: "Products fetched successfully",
       page,
       limit,
+      total,
       count: cleanData.length,
       data: cleanData,
     });
 
   } catch (err) {
+    console.error("❌ Products API Error:", err);
+
     res.status(500).json({
       status: "error",
-      message: err.message,
+      message: err.message || "Internal server error",
     });
   }
 });

@@ -11,17 +11,25 @@ const router = express.Router();
  */
 router.get("/", async (req, res) => {
   try {
-    const search = req.query.search || "";
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    let search = (req.query.search || "").trim();
+
+    let page = parseInt(req.query.page);
+    let limit = parseInt(req.query.limit);
+
+    // ✅ defaults + validation
+    page = isNaN(page) || page < 1 ? 1 : page;
+    limit = isNaN(limit) || limit < 1 ? 10 : limit;
+
+    // ✅ max limit protection
+    if (limit > 100) limit = 100;
 
     const offset = (page - 1) * limit;
 
-    // 🔹 Get data
+    // 🔹 Fetch data
     const result = await pool.query(
       `
       SELECT id, name, created_at
-      FROM companies
+      FROM app.companies
       WHERE name ILIKE $1
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
@@ -29,10 +37,10 @@ router.get("/", async (req, res) => {
       [`%${search}%`, limit, offset]
     );
 
-    // 🔹 Get total count (for pagination)
+    // 🔹 Total count
     const countResult = await pool.query(
       `
-      SELECT COUNT(*) FROM companies
+      SELECT COUNT(*) FROM app.companies
       WHERE name ILIKE $1
       `,
       [`%${search}%`]

@@ -5,7 +5,7 @@ export function getCompaniesXML() {
   <VERSION>1</VERSION>
   <TALLYREQUEST>Export</TALLYREQUEST>
   <TYPE>Collection</TYPE>
-  <ID>List of Companies</ID>
+  <ID>Company</ID>
  </HEADER>
  <BODY>
   <DESC>
@@ -21,18 +21,23 @@ export function getLedgersXML(companyName = "") {
   return `
 <ENVELOPE>
  <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>List of Ledgers</ID>
+  <TALLYREQUEST>Export Data</TALLYREQUEST>
  </HEADER>
  <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   </STATICVARIABLES>
-  </DESC>
+  <EXPORTDATA>
+   <REQUESTDESC>
+    <REPORTNAME>List of Ledgers</REPORTNAME>
+    <STATICVARIABLES>
+      <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    </STATICVARIABLES>
+    <FETCHLIST>
+      <FETCH>NAME</FETCH>
+      <FETCH>PARENT</FETCH>
+    </FETCHLIST>
+
+   </REQUESTDESC>
+  </EXPORTDATA>
  </BODY>
 </ENVELOPE>`;
 }
@@ -48,8 +53,8 @@ export const getProductsXML = (company) => `
  <BODY>
   <DESC>
    <STATICVARIABLES>
-     <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
-     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
   </DESC>
  </BODY>
@@ -60,16 +65,19 @@ export function getVouchersXML(companyName = "") {
   return `
 <ENVELOPE>
  <HEADER>
+  <VERSION>1</VERSION>
   <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Data</TYPE>
-  <ID>Day Book</ID>
+  <TYPE>Collection</TYPE>
+  <ID>Voucher Register</ID>
  </HEADER>
-
  <BODY>
   <DESC>
    <STATICVARIABLES>
     <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   <SVFROMDATE>20250428</SVFROMDATE>
+<SVTODATE>20250504</SVTODATE>
+    <SVLIMIT>200</SVLIMIT>
    </STATICVARIABLES>
   </DESC>
  </BODY>
