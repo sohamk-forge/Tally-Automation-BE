@@ -20,19 +20,14 @@ function extractValues(obj, key) {
 
   function walk(data) {
     if (!data || typeof data !== "object") return;
-
     if (visited.has(data)) return;
     visited.add(data);
-
     if (Array.isArray(data)) return data.forEach(walk);
-
     if (data[key]) {
       result.push({ name: String(data[key]).trim() });
     }
-
     Object.values(data).forEach(walk);
   }
-
   walk(obj);
   return result;
 }
@@ -57,47 +52,45 @@ router.get("/products-queue", async (req, res) => {
   if (!company) {
     return res.status(400).json({ message: "company required" });
   }
-
   await runProductSync(company);
   res.json({ message: "Job added" });
 });
 
-/* ---------------- COMPANIES ---------------- */
+/* ---------------- COMPANIES SYNC ---------------- */
 
 router.get("/companies", async (req, res) => {
   try {
     const xml = getCompaniesXML();
-
-    console.log("📤 XML Sent:\n", xml);
-
     const responseXML = await sendToTally(xml);
 
-    console.log("📥 Tally Response:\n", responseXML);
-    
     if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
       throw new Error("Invalid Tally response");
     }
 
     const parsed = parseXML(responseXML);
-
-    const companies =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY || [];
-
+    const companies = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY || [];
     const list = Array.isArray(companies) ? companies : [companies];
 
     let inserted = 0;
 
     for (const item of list) {
-      const name = item?.NAME || item;
+      const name = item?.NAME ? String(item.NAME).trim() : null;
       if (!name) continue;
 
-      const result = await pool.query(
-        `INSERT INTO app.companies(name, tally_company_name, created_at)
-         VALUES($1, $1, NOW())
-         ON CONFLICT(name) DO NOTHING`,
-        [String(name).trim()]
-      );
+      const financial_year_start = item?.STARTINGFROM || null;
+      const financial_year_end = item?.BOOKSFROM || null;
 
+      const result = await pool.query(
+        `
+        INSERT INTO app.companies(name, financial_year_start, financial_year_end, created_at, updated_at)
+        VALUES($1, $2, $3, NOW(), NOW())
+        ON CONFLICT(name) DO UPDATE SET
+          financial_year_start = EXCLUDED.financial_year_start,
+          financial_year_end = EXCLUDED.financial_year_end,
+          updated_at = NOW()
+        `,
+        [name, financial_year_start, financial_year_end]
+      );
       if (result.rowCount > 0) inserted++;
     }
 
@@ -109,24 +102,25 @@ router.get("/companies", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("⚠️ Tally failed → DB fallback (companies)");
-
-    const data = await fetchFromDB("app.companies");
-
+    console.log("❌ COMPANY SYNC ERROR:", err.message);
+    const data = await pool.query(`
+      SELECT id, name, financial_year_start, financial_year_end,
+      CONCAT(LEFT(financial_year_start::TEXT, 4), '-', LEFT(financial_year_end::TEXT, 4)) as financial_year
+      FROM app.companies ORDER BY id DESC
+    `);
     return res.json({
       status: "success",
       source: "database",
-      count: data.length,
-      data
+      count: data.rows.length,
+      data: data.rows
     });
   }
 });
 
-/* ---------------- LEDGERS ---------------- */
+/* ---------------- LEDGERS SYNC ---------------- */
 
 router.get("/ledgers", async (req, res) => {
   const company = req.query.company;
-
   if (!company) {
     return res.status(400).json({ message: "company required" });
   }
@@ -135,21 +129,13 @@ router.get("/ledgers", async (req, res) => {
     const xml = getLedgersXML(company);
     const responseXML = await sendToTally(xml);
 
-    console.log("📥 LEDGER RAW RESPONSE:\n", responseXML);
-
-    if (!responseXML) {
-      throw new Error("Empty Tally response");
-    }
-
-    if (!responseXML.includes("<ENVELOPE>")) {
-      console.log("⚠️ Non-envelope response:", responseXML);
-      throw new Error("Tally not returning ledger data");
+    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
+      throw new Error("Invalid Tally response");
     }
 
     const parsed = parseXML(responseXML);
-    const collection =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION ||
-      parsed?.ENVELOPE?.BODY?.DATA;
+    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION ||
+                      parsed?.ENVELOPE?.BODY?.DATA;
 
     if (!collection) {
       throw new Error("No ledger data found");
@@ -159,27 +145,55 @@ router.get("/ledgers", async (req, res) => {
 
     function extract(obj) {
       if (!obj) return;
-
-      if (Array.isArray(obj)) {
-        obj.forEach(extract);
-        return;
-      }
-
+      if (Array.isArray(obj)) return obj.forEach(extract);
       if (typeof obj === "object") {
         if (obj.NAME) {
-          const name = String(obj.NAME)
-            .replace(/&#13;&#10;|\r|\n/g, "")
-            .trim();
+          const name = String(obj.NAME).replace(/&#13;&#10;|\r|\n/g, "").trim();
+          const parent_group = obj.PARENT ? String(obj.PARENT).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
 
-          const parent = obj.PARENT
-            ? String(obj.PARENT)
-                .replace(/&#13;&#10;|\r|\n/g, "")
-                .trim()
-            : null;
+          let address = null;
+          if (obj.ADDRESS) {
+            if (typeof obj.ADDRESS === 'string') {
+              address = obj.ADDRESS.replace(/&#13;&#10;|\r|\n/g, "").trim();
+            } else if (obj.ADDRESS?.LINE) {
+              address = Array.isArray(obj.ADDRESS.LINE) 
+                ? obj.ADDRESS.LINE.join(", ").replace(/&#13;&#10;|\r|\n/g, "").trim()
+                : String(obj.ADDRESS.LINE).replace(/&#13;&#10;|\r|\n/g, "").trim();
+            }
+          }
 
-          ledgers.push({ name, parent });
+          const state = obj.STATENAME ? String(obj.STATENAME).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+          const gst_number = obj.PARTYGSTIN ? String(obj.PARTYGSTIN).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+          const gst_type = obj.GSTREGISTRATIONTYPE ? String(obj.GSTREGISTRATIONTYPE).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+          const pan_number = obj.INCOMETAXNUMBER ? String(obj.INCOMETAXNUMBER).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+          const phone = obj.PHONE ? String(obj.PHONE).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+          const email = obj.EMAIL ? String(obj.EMAIL).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+
+          let opening_balance = 0;
+          let opening_balance_type = "Dr";
+          if (obj.OPENINGBALANCE) {
+            const balance = parseFloat(obj.OPENINGBALANCE);
+            if (!isNaN(balance)) {
+              opening_balance = Math.abs(balance);
+              opening_balance_type = balance < 0 ? "Cr" : "Dr";
+            }
+          }
+
+          ledgers.push({
+            company_name: company,
+            name,
+            parent_group,
+            address,
+            state,
+            gst_number,
+            gst_type,
+            pan_number,
+            phone,
+            email,
+            opening_balance,
+            opening_balance_type
+          });
         }
-
         Object.values(obj).forEach(extract);
       }
     }
@@ -187,65 +201,66 @@ router.get("/ledgers", async (req, res) => {
     extract(collection);
 
     if (!ledgers.length) {
-      return res.json({
-        status: "success",
-        source: "tally",
-        count: 0,
-        data: []
-      });
+      return res.json({ status: "success", source: "tally", count: 0, data: [] });
     }
 
-    const names = ledgers.map(l => l.name);
-    const parents = ledgers.map(l => l.parent);
-
-    const result = await pool.query(
-      `
-      INSERT INTO app.ledgers (name, parent_group, created_at)
-      SELECT x.name, x.parent, NOW()
-      FROM UNNEST($1::text[], $2::text[]) AS x(name, parent)
-      ON CONFLICT (name) DO NOTHING
-      RETURNING name
-      `,
-      [names, parents]
-    );
+    for (const ledger of ledgers) {
+      await pool.query(
+        `
+        INSERT INTO app.ledgers (
+          company_name, name, parent_group, address, state,
+          gst_number, gst_type, pan_number, phone, email,
+          opening_balance, opening_balance_type, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        ON CONFLICT (name) DO UPDATE SET
+          company_name = EXCLUDED.company_name,
+          parent_group = EXCLUDED.parent_group,
+          address = EXCLUDED.address,
+          state = EXCLUDED.state,
+          gst_number = EXCLUDED.gst_number,
+          gst_type = EXCLUDED.gst_type,
+          pan_number = EXCLUDED.pan_number,
+          phone = EXCLUDED.phone,
+          email = EXCLUDED.email,
+          opening_balance = EXCLUDED.opening_balance,
+          opening_balance_type = EXCLUDED.opening_balance_type
+        `,
+        [
+          ledger.company_name,
+          ledger.name,
+          ledger.parent_group,
+          ledger.address,
+          ledger.state,
+          ledger.gst_number,
+          ledger.gst_type,
+          ledger.pan_number,
+          ledger.phone,
+          ledger.email,
+          ledger.opening_balance,
+          ledger.opening_balance_type
+        ]
+      );
+    }
 
     return res.json({
       status: "success",
       source: "tally",
-      inserted: result.rowCount,
       total: ledgers.length,
       data: ledgers
     });
 
   } catch (err) {
-    console.log("❌ TALLY ERROR:", err.message);
-    console.log("⚠️ Ledger sync failed → fallback DB");
-
+    console.log("❌ LEDGER SYNC ERROR:", err.message);
     try {
-      const result = await pool.query(`
-        SELECT id, name, parent_group, created_at
-        FROM app.ledgers
-        ORDER BY created_at DESC
-      `);
-
-      const cleanDB = result.rows.map(item => ({
-        ...item,
-        name: item.name?.replace(/&#13;&#10;|\r|\n/g, "").trim(),
-        parent_group: item.parent_group
-          ?.replace(/&#13;&#10;|\r|\n/g, "")
-          .trim()
-      }));
-
+      const result = await pool.query(`SELECT * FROM app.ledgers ORDER BY created_at DESC`);
       return res.json({
         status: "success",
         source: "database",
-        count: cleanDB.length,
-        data: cleanDB
+        count: result.rows.length,
+        data: result.rows
       });
-
     } catch (dbErr) {
-      console.log("❌ DB ERROR:", dbErr.message);
-
       return res.status(500).json({
         status: "error",
         message: "Both Tally and DB failed"
@@ -254,11 +269,10 @@ router.get("/ledgers", async (req, res) => {
   }
 });
 
-/* ---------------- PRODUCTS ---------------- */
+/* ---------------- PRODUCTS SYNC ---------------- */
 
 router.get("/products", async (req, res) => {
   const company = req.query.company;
-
   if (!company) {
     return res.status(400).json({ message: "company required" });
   }
@@ -273,37 +287,23 @@ router.get("/products", async (req, res) => {
 
     const parsed = parseXML(responseXML);
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-
-    if (!collection) {
-      throw new Error("No data found in Tally response");
-    }
+    if (!collection) throw new Error("No data found");
 
     const list = extractValues(collection, "NAME");
-
     if (!list.length) {
-      return res.json({
-        status: "success",
-        source: "tally",
-        count: 0,
-        data: []
-      });
+      return res.json({ status: "success", source: "tally", count: 0, data: [] });
     }
 
     const cleanData = list.map(item => ({
-      name: item.name
-        .replace(/&#13;&#10;|\r|\n/g, "")
-        .trim()
+      name: item.name.replace(/&#13;&#10;|\r|\n/g, "").trim()
     }));
-
     const names = cleanData.map(i => i.name);
 
     const result = await pool.query(
-      `
-      INSERT INTO app.stock_items (name, created_at)
-      SELECT UNNEST($1::text[]), NOW()
-      ON CONFLICT (name) DO NOTHING
-      RETURNING name
-      `,
+      `INSERT INTO app.stock_items (name, created_at)
+       SELECT UNNEST($1::text[]), NOW()
+       ON CONFLICT (name) DO NOTHING
+       RETURNING name`,
       [names]
     );
 
@@ -316,43 +316,16 @@ router.get("/products", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("⚠️ Tally failed → fallback to DB");
-
-    try {
-      const result = await pool.query(
-        `SELECT id, name, created_at 
-         FROM app.stock_items 
-         ORDER BY created_at DESC`
-      );
-
-      const cleanDB = result.rows.map(item => ({
-        ...item,
-        name: item.name
-          ?.replace(/&#13;&#10;|\r|\n/g, "")
-          .trim()
-      }));
-
-      return res.json({
-        status: "success",
-        source: "database",
-        count: cleanDB.length,
-        data: cleanDB
-      });
-
-    } catch (dbErr) {
-      return res.status(500).json({
-        status: "error",
-        message: "Both Tally and DB failed"
-      });
-    }
+    console.log("⚠️ Products sync failed:", err.message);
+    const result = await pool.query(`SELECT id, name, created_at FROM app.stock_items ORDER BY created_at DESC`);
+    return res.json({ status: "success", source: "database", count: result.rows.length, data: result.rows });
   }
 });
 
-/* ---------------- VOUCHERS (FIXED - NOW INSERTS INTO DB) ---------------- */
+/* ---------------- VOUCHERS SYNC ---------------- */
 
 router.get("/vouchers", async (req, res) => {
   const company = req.query.company;
-
   if (!company) {
     return res.status(400).json({ message: "company required" });
   }
@@ -360,8 +333,6 @@ router.get("/vouchers", async (req, res) => {
   try {
     const xml = getVouchersXML(company);
     const responseXML = await sendToTally(xml);
-        console.log("📤 VOUCHER XML:", xml);
-    console.log("📥 VOUCHER RESPONSE:", responseXML);
 
     if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
       throw new Error("Invalid Tally response");
@@ -370,13 +341,11 @@ router.get("/vouchers", async (req, res) => {
     const parsed = parseXML(responseXML);
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
 
-    // 🔥 Extract vouchers properly with all fields
     const vouchers = [];
     
     function extract(obj) {
       if (!obj) return;
       if (Array.isArray(obj)) return obj.forEach(extract);
-      
       if (typeof obj === "object") {
         if (obj.VOUCHERNUMBER) {
           vouchers.push({
@@ -392,32 +361,17 @@ router.get("/vouchers", async (req, res) => {
     extract(collection);
 
     if (!vouchers.length) {
-      return res.json({
-        status: "success",
-        source: "tally",
-        count: 0,
-        message: "No vouchers found",
-        data: []
-      });
+      return res.json({ status: "success", source: "tally", count: 0, message: "No vouchers found", data: [] });
     }
 
-    // 🔥 INSERT INTO DATABASE
     const result = await pool.query(
-      `
-      INSERT INTO app.vouchers (voucher_number, voucher_type, voucher_date, created_at)
-      SELECT 
-        x.number,
-        x.type,
-        CASE 
-          WHEN x.date ~ '^[0-9]{8}$' THEN TO_DATE(x.date, 'YYYYMMDD')
-          ELSE NULL
-        END,
-        NOW()
-      FROM UNNEST($1::json[]) 
-      AS x(number text, type text, date text)
-      ON CONFLICT (voucher_number) DO NOTHING
-      RETURNING voucher_number
-      `,
+      `INSERT INTO app.vouchers (voucher_number, voucher_type, voucher_date, created_at)
+       SELECT x.number, x.type,
+         CASE WHEN x.date ~ '^[0-9]{8}$' THEN TO_DATE(x.date, 'YYYYMMDD') ELSE NULL END,
+         NOW()
+       FROM UNNEST($1::json[]) AS x(number text, type text, date text)
+       ON CONFLICT (voucher_number) DO NOTHING
+       RETURNING voucher_number`,
       [vouchers]
     );
 
@@ -430,25 +384,9 @@ router.get("/vouchers", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("⚠️ Voucher sync failed → fallback DB");
-    
-    try {
-      const result = await pool.query(`
-        SELECT * FROM app.vouchers ORDER BY created_at DESC
-      `);
-      
-      return res.json({
-        status: "success",
-        source: "database",
-        count: result.rows.length,
-        data: result.rows
-      });
-    } catch (dbErr) {
-      return res.status(500).json({
-        status: "error",
-        message: "Both Tally and DB failed"
-      });
-    }
+    console.log("⚠️ Voucher sync failed:", err.message);
+    const result = await pool.query(`SELECT * FROM app.vouchers ORDER BY created_at DESC`);
+    return res.json({ status: "success", source: "database", count: result.rows.length, data: result.rows });
   }
 });
 

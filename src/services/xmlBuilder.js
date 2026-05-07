@@ -1,3 +1,18 @@
+// ==============================
+// Helper Function
+// Get today's date in YYYYMMDD format
+// ==============================
+function getTodayDate() {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+// ==============================
+// Companies XML
+// ==============================
 export function getCompaniesXML() {
   return `
 <ENVELOPE>
@@ -5,80 +20,110 @@ export function getCompaniesXML() {
   <VERSION>1</VERSION>
   <TALLYREQUEST>Export</TALLYREQUEST>
   <TYPE>Collection</TYPE>
-  <ID>Company</ID>
+  <ID>CompanyCollection</ID>
  </HEADER>
  <BODY>
   <DESC>
    <STATICVARIABLES>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <COLLECTION NAME="CompanyCollection">
+      <TYPE>Company</TYPE>
+      <FETCH>NAME, STARTINGFROM, BOOKSFROM</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
   </DESC>
  </BODY>
 </ENVELOPE>`;
 }
 
+// ==============================
+// Ledgers XML
+// ==============================
 export function getLedgersXML(companyName = "") {
   return `
 <ENVELOPE>
  <HEADER>
-  <TALLYREQUEST>Export Data</TALLYREQUEST>
- </HEADER>
- <BODY>
-  <EXPORTDATA>
-   <REQUESTDESC>
-    <REPORTNAME>List of Ledgers</REPORTNAME>
-    <STATICVARIABLES>
-      <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
-      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-    </STATICVARIABLES>
-    <FETCHLIST>
-      <FETCH>NAME</FETCH>
-      <FETCH>PARENT</FETCH>
-    </FETCHLIST>
-
-   </REQUESTDESC>
-  </EXPORTDATA>
- </BODY>
-</ENVELOPE>`;
-}
-
-export const getProductsXML = (company) => `
-<ENVELOPE>
- <HEADER>
   <VERSION>1</VERSION>
   <TALLYREQUEST>Export</TALLYREQUEST>
   <TYPE>Collection</TYPE>
-  <ID>List of Stock Items</ID>
- </HEADER>
- <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   </STATICVARIABLES>
-  </DESC>
- </BODY>
-</ENVELOPE>
-`;
-
-export function getVouchersXML(companyName = "") {
-  return `
-<ENVELOPE>
- <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>Voucher Register</ID>
+  <ID>List of Ledgers</ID>
  </HEADER>
  <BODY>
   <DESC>
    <STATICVARIABLES>
     <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   <SVFROMDATE>20250428</SVFROMDATE>
-<SVTODATE>20250504</SVTODATE>
-    <SVLIMIT>200</SVLIMIT>
    </STATICVARIABLES>
+  </DESC>
+ </BODY>
+</ENVELOPE>`;
+}
+
+// ==============================
+// Products XML
+// ==============================
+export function getProductsXML(companyName = "") {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>StockItemCollection</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <COLLECTION NAME="StockItemCollection">
+      <TYPE>Stock Item</TYPE>
+      <FETCH>NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGVALUE, GSTAPPLICABLE</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>`;
+}
+
+// ==============================
+// Vouchers XML
+// ==============================
+export function getVouchersXML(companyName = "") {
+  const today = getTodayDate();
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>VoucherCollection</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    <SVFROMDATE>20000101</SVFROMDATE>
+    <SVTODATE>${today}</SVTODATE>
+    <SVLIMIT>500</SVLIMIT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <COLLECTION NAME="VoucherCollection">
+      <TYPE>Voucher</TYPE>
+      <FETCH>DATE, VOUCHERTYPENAME, VOUCHERNUMBER, PARTYLEDGERNAME, AMOUNT, NARRATION</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
   </DESC>
  </BODY>
 </ENVELOPE>`;
