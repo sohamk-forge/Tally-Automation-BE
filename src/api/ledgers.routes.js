@@ -5,82 +5,145 @@ import { parseXML } from "../services/parser.js";
 
 const router = express.Router();
 
-// GET /api/sync/ledgers
+/**
+ * GET /api/ledgers
+ * Read ledgers from PostgreSQL database only
+ */
 router.get("/", async (req, res) => {
+
   try {
+
+    // Company query parameter
     const company = req.query.company;
 
+    // Validate company
     if (!company) {
+
       return res.status(400).json({
         status: "error",
         message: "Company query parameter is required",
       });
+
     }
 
-    // 1. Fetch from Tally
-    const xml = getLedgersXML(company);
-    const responseXML = await sendToTally(xml);
+    // Optional search
+    const search = req.query.search || "";
 
-    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
-      return res.status(500).json({
-        status: "error",
-        message: "Invalid response from Tally",
-      });
-    }
+    // Pagination
+    const page =
+      parseInt(req.query.page) || 1;
 
-    // 2. Parse XML
-    const parsed = parseXML(responseXML);
+    const limit =
+      parseInt(req.query.limit) || 20;
 
-    const collection =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION ||
-      parsed?.ENVELOPE?.BODY?.DATA;
+    const offset =
+      (page - 1) * limit;
 
-    // 3. Extract ledgers
-    const ledgers = [];
+    // Fetch ledgers
+    const result = await pool.query(
+      `
+      SELECT
 
-    function extract(obj) {
-      if (!obj) return;
+        id,
 
-      if (Array.isArray(obj)) {
-        obj.forEach(extract);
-        return;
-      }
+        name,
 
-      if (typeof obj === "object") {
-        if (obj.NAME) {
-          const cleanName = String(obj.NAME)
-            .replace(/&#13;&#10;|\r|\n/g, "")
-            .trim();
+        parent_group AS under_group,
 
-          ledgers.push({
-            ledger_name: cleanName,
-            parent_group: obj.PARENT || null,
-          });
-        }
+        address,
 
-        for (const key in obj) {
-          extract(obj[key]);
-        }
-      }
-    }
+        state,
 
-    extract(collection);
+        gst_number,
 
-    res.json({
+        gst_type,
+
+        pan_number,
+
+        opening_balance,
+
+        opening_balance_type,
+
+        created_at
+
+      FROM app.ledgers
+
+      WHERE LOWER(company_name) = LOWER($1)
+      AND name ILIKE $2
+
+      ORDER BY name ASC
+
+      LIMIT $3 OFFSET $4
+      `,
+      [
+        company,
+        `%${search}%`,
+        limit,
+        offset
+      ]
+    );
+
+    // Total count
+    const countResult = await pool.query(
+      `
+      SELECT COUNT(*)
+
+      FROM app.ledgers
+
+      WHERE company_name = $1
+      AND name ILIKE $2
+      `,
+      [
+        company,
+        `%${search}%`
+      ]
+    );
+
+    // Success response
+    return res.json({
+
       status: "success",
-      message: "Ledgers fetched successfully",
-      count: ledgers.length,
-      data: ledgers,
+
+      message:
+        "Ledgers fetched successfully",
+
+      company,
+
+      page,
+
+      limit,
+
+      total:
+        parseInt(
+          countResult.rows[0].count
+        ),
+
+      count:
+        result.rows.length,
+
+      data:
+        result.rows
+
     });
 
   } catch (err) {
-    console.error("Ledger Sync Error:", err);
 
-    res.status(500).json({
+    console.error(
+      "Ledgers API Error:",
+      err
+    );
+
+    return res.status(500).json({
+
       status: "error",
-      message: err.message,
+
+      message:
+        err.message
+
     });
+
   }
+
 });
 
 export default router;
