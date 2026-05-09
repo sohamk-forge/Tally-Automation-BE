@@ -1,130 +1,228 @@
-// ==============================
-// Helper Function
-// Get today's date in YYYYMMDD format
-// ==============================
-function getTodayDate() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const day = String(today.getDate()).padStart(2, "0");
-  return `${year}${month}${day}`;
-}
+export const getCompaniesXML = () => {
 
-// ==============================
-// Companies XML
-// ==============================
-export function getCompaniesXML() {
   return `
 <ENVELOPE>
- <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>CompanyCollection</ID>
- </HEADER>
- <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   </STATICVARIABLES>
-   <TDL>
-    <TDLMESSAGE>
-     <COLLECTION NAME="CompanyCollection">
-      <TYPE>Company</TYPE>
-      <FETCH>NAME, STARTINGFROM, BOOKSFROM</FETCH>
-     </COLLECTION>
-    </TDLMESSAGE>
-   </TDL>
-  </DESC>
- </BODY>
-</ENVELOPE>`;
-}
 
-// ==============================
-// Ledgers XML
-// ==============================
-export function getLedgersXML(companyName = "") {
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>CompanyCollection</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="CompanyCollection">
+
+            <TYPE>Company</TYPE>
+
+            <FETCH>
+              NAME,
+              BOOKSFROM,
+              ENDINGAT
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};
+
+/* =========================================
+   LEDGER XML
+========================================= */
+
+export const getLedgersXML = (company) => {
+
   return `
 <ENVELOPE>
- <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>List of Ledgers</ID>
- </HEADER>
- <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   </STATICVARIABLES>
-  </DESC>
- </BODY>
-</ENVELOPE>`;
-}
 
-// ==============================
-// Products XML
-// ==============================
-export function getProductsXML(companyName = "") {
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>List of Ledgers</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="List of Ledgers">
+
+            <TYPE>Ledger</TYPE>
+
+            <FETCH>NAME</FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};
+
+
+
+/* ==================================================
+   FULL LEDGER DETAILS XML
+================================================== */
+
+export const getLedgerDetailsXML = (
+  company,
+  ledgerName
+) => {
+
   return `
 <ENVELOPE>
- <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>StockItemCollection</ID>
- </HEADER>
- <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-   </STATICVARIABLES>
-   <TDL>
-    <TDLMESSAGE>
-     <COLLECTION NAME="StockItemCollection">
-      <TYPE>Stock Item</TYPE>
-      <FETCH>NAME, PARENT, BASEUNITS, OPENINGBALANCE, OPENINGVALUE, GSTAPPLICABLE</FETCH>
-     </COLLECTION>
-    </TDLMESSAGE>
-   </TDL>
-  </DESC>
- </BODY>
-</ENVELOPE>`;
-}
 
-// ==============================
-// Vouchers XML
-// ==============================
-export function getVouchersXML(companyName = "") {
-  const today = getTodayDate();
-  return `
-<ENVELOPE>
- <HEADER>
-  <VERSION>1</VERSION>
-  <TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE>
-  <ID>VoucherCollection</ID>
- </HEADER>
- <BODY>
-  <DESC>
-   <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${companyName}</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-    <SVFROMDATE>20000101</SVFROMDATE>
-    <SVTODATE>${today}</SVTODATE>
-    <SVLIMIT>500</SVLIMIT>
-   </STATICVARIABLES>
-   <TDL>
-    <TDLMESSAGE>
-     <COLLECTION NAME="VoucherCollection">
-      <TYPE>Voucher</TYPE>
-      <FETCH>DATE, VOUCHERTYPENAME, VOUCHERNUMBER, PARTYLEDGERNAME, AMOUNT, NARRATION</FETCH>
-     </COLLECTION>
-    </TDLMESSAGE>
-   </TDL>
-  </DESC>
- </BODY>
-</ENVELOPE>`;
-}
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Object</TYPE>
+
+    <SUBTYPE>Ledger</SUBTYPE>
+
+    <ID TYPE="Name">
+      ${ledgerName}
+    </ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <FETCHLIST>
+
+        <FETCH>NAME</FETCH>
+
+        <FETCH>PARENT</FETCH>
+
+        <FETCH>ADDRESS</FETCH>
+
+        <FETCH>MAILINGNAME</FETCH>
+
+        <FETCH>STATENAME</FETCH>
+
+<FETCH>STATE</FETCH>
+
+<FETCH>LEDSTATENAME</FETCH>
+
+        <FETCH>COUNTRYNAME</FETCH>
+
+        <FETCH>PINCODE</FETCH>
+
+       <FETCH>PHONE</FETCH>
+
+<FETCH>MOBILE</FETCH>
+
+<FETCH>EMAIL</FETCH>
+
+<FETCH>LEDGERPHONE</FETCH>
+
+<FETCH>LEDGERMOBILE</FETCH>
+
+<FETCH>LEDGEREMAIL</FETCH>
+
+        <FETCH>CONTACTPERSON</FETCH>
+
+        <FETCH>PARTYGSTIN</FETCH>
+
+        <FETCH>GSTREGISTRATIONTYPE</FETCH>
+
+        <FETCH>INCOMETAXNUMBER</FETCH>
+
+        <FETCH>OPENINGBALANCE</FETCH>
+
+        <FETCH>CLOSINGBALANCE</FETCH>
+
+        <FETCH>CREDITPERIOD</FETCH>
+
+        <FETCH>ISBILLWISEON</FETCH>
+
+        <FETCH>ISREVENUE</FETCH>
+
+        <FETCH>ISDEEMEDPOSITIVE</FETCH>
+
+      </FETCHLIST>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};

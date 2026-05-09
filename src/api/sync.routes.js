@@ -1,393 +1,720 @@
 import express from "express";
 import pool from "../db/index.js";
+
 import { sendToTally } from "../services/tallyClient.js";
-import { runProductSync } from "../jobs/syncJob.js";
+
 import {
   getCompaniesXML,
   getLedgersXML,
-  getProductsXML,
-  getVouchersXML
+  getLedgerDetailsXML
 } from "../services/xmlBuilder.js";
+
 import { parseXML } from "../services/parser.js";
 
 const router = express.Router();
 
-/* ---------------- SAFE EXTRACT ---------------- */
+/* ===================================================
+   HEALTH API
+=================================================== */
 
-function extractValues(obj, key) {
-  const result = [];
-  const visited = new Set();
+router.get("/health", async (req, res) => {
 
-  function walk(data) {
-    if (!data || typeof data !== "object") return;
-    if (visited.has(data)) return;
-    visited.add(data);
-    if (Array.isArray(data)) return data.forEach(walk);
-    if (data[key]) {
-      result.push({ name: String(data[key]).trim() });
-    }
-    Object.values(data).forEach(walk);
-  }
-  walk(obj);
-  return result;
-}
-
-/* ---------------- DB HELPER ---------------- */
-
-async function fetchFromDB(table) {
-  const result = await pool.query(`SELECT * FROM ${table}`);
-  return result.rows;
-}
-
-/* ---------------- HEALTH ---------------- */
-
-router.get("/health", (req, res) => {
-  res.json({ status: "success", message: "Sync working" });
-});
-
-/* ---------------- QUEUE ---------------- */
-
-router.get("/products-queue", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({ message: "company required" });
-  }
-  await runProductSync(company);
-  res.json({ message: "Job added" });
-});
-
-/* ---------------- COMPANIES SYNC ---------------- */
-
-router.get("/companies", async (req, res) => {
   try {
-    const xml = getCompaniesXML();
-    const responseXML = await sendToTally(xml);
 
-    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
-      throw new Error("Invalid Tally response");
-    }
+    await pool.query("SELECT 1");
 
-    const parsed = parseXML(responseXML);
-    const companies = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY || [];
-    const list = Array.isArray(companies) ? companies : [companies];
+    return res.status(200).json({
 
-    let inserted = 0;
-
-    for (const item of list) {
-      const name = item?.NAME ? String(item.NAME).trim() : null;
-      if (!name) continue;
-
-      const financial_year_start = item?.STARTINGFROM || null;
-      const financial_year_end = item?.BOOKSFROM || null;
-
-      const result = await pool.query(
-        `
-        INSERT INTO app.companies(name, financial_year_start, financial_year_end, created_at, updated_at)
-        VALUES($1, $2, $3, NOW(), NOW())
-        ON CONFLICT(name) DO UPDATE SET
-          financial_year_start = EXCLUDED.financial_year_start,
-          financial_year_end = EXCLUDED.financial_year_end,
-          updated_at = NOW()
-        `,
-        [name, financial_year_start, financial_year_end]
-      );
-      if (result.rowCount > 0) inserted++;
-    }
-
-    return res.json({
       status: "success",
-      source: "tally",
-      inserted,
-      total: list.length
+
+      message:
+        "Sync service healthy",
+
+      services: {
+
+        api: "running",
+
+        database: "connected",
+
+        tally: "ready"
+
+      },
+
+      timestamp:
+        new Date()
+
     });
 
   } catch (err) {
-    console.log("❌ COMPANY SYNC ERROR:", err.message);
-    const data = await pool.query(`
-      SELECT id, name, financial_year_start, financial_year_end,
-      CONCAT(LEFT(financial_year_start::TEXT, 4), '-', LEFT(financial_year_end::TEXT, 4)) as financial_year
-      FROM app.companies ORDER BY id DESC
-    `);
-    return res.json({
-      status: "success",
-      source: "database",
-      count: data.rows.length,
-      data: data.rows
+
+    return res.status(500).json({
+
+      status: "error",
+
+      message:
+        err.message
+
     });
+
   }
+
 });
 
-/* ---------------- LEDGERS SYNC ---------------- */
+/* ===================================================
+   COMPANY SYNC
+=================================================== */
+
+router.get("/companies", async (req, res) => {
+
+  try {
+
+    const xml =
+      getCompaniesXML();
+
+    const responseXML =
+      await sendToTally(xml);
+
+    const parsed =
+      parseXML(responseXML);
+
+    const companies =
+      parsed?.ENVELOPE?.BODY?.DATA
+        ?.COLLECTION?.COMPANY || [];
+
+    const list =
+      Array.isArray(companies)
+        ? companies
+        : [companies];
+
+    const inserted = [];
+
+    for (const item of list) {
+
+      const name =
+        item?.NAME
+          ? String(item.NAME).trim()
+          : null;
+
+      if (!name) continue;
+
+      const financial_year_start =
+        item?.BOOKSFROM || null;
+
+      const financial_year_end =
+        item?.ENDINGAT || null;
+
+      await pool.query(
+        `
+        INSERT INTO app.companies
+        (
+          name,
+          financial_year_start,
+          financial_year_end,
+          created_at,
+          updated_at
+        )
+
+        VALUES
+        (
+          $1,
+          $2,
+          $3,
+          NOW(),
+          NOW()
+        )
+
+        ON CONFLICT(name)
+
+        DO UPDATE SET
+
+          financial_year_start =
+            EXCLUDED.financial_year_start,
+
+          financial_year_end =
+            EXCLUDED.financial_year_end,
+
+          updated_at = NOW()
+        `,
+        [
+          name,
+          financial_year_start,
+          financial_year_end
+        ]
+      );
+
+      inserted.push({
+
+        name,
+
+        financial_year_start,
+
+        financial_year_end
+
+      });
+
+    }
+
+    return res.status(200).json({
+
+      status: "success",
+
+      source: "tally",
+
+      message:
+        "Companies synced successfully",
+
+      total:
+        inserted.length,
+
+      data:
+        inserted
+
+    });
+
+  } catch (err) {
+
+    return res.status(500).json({
+
+      status: "error",
+
+      message:
+        err.message
+
+    });
+
+  }
+
+});
+
+/* ===================================================
+   LEDGER SYNC
+=================================================== */
 
 router.get("/ledgers", async (req, res) => {
-  const company = req.query.company;
+
+  const company =
+    req.query.company;
+
   if (!company) {
-    return res.status(400).json({ message: "company required" });
+
+    return res.status(400).json({
+
+      status: "error",
+
+      message:
+        "company query parameter required"
+
+    });
+
   }
 
   try {
-    const xml = getLedgersXML(company);
-    const responseXML = await sendToTally(xml);
 
-    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
-      throw new Error("Invalid Tally response");
-    }
+    /* =========================================
+       STEP 1:
+       FETCH ALL LEDGER NAMES
+    ========================================= */
 
-    const parsed = parseXML(responseXML);
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION ||
-                      parsed?.ENVELOPE?.BODY?.DATA;
+    const xml =
+      getLedgersXML(company);
+
+    const responseXML =
+      await sendToTally(xml);
+
+    const parsed =
+      parseXML(responseXML);
+
+    const collection =
+      parsed?.ENVELOPE?.BODY?.DATA
+        ?.COLLECTION;
 
     if (!collection) {
-      throw new Error("No ledger data found");
+
+      throw new Error(
+        "No ledger collection found"
+      );
+
     }
+
+    /* =========================================
+       EXTRACT NAMES
+    ========================================= */
+
+    const ledgerNames = [];
+
+    function extractNames(obj) {
+
+      if (!obj) return;
+
+      if (Array.isArray(obj)) {
+
+        return obj.forEach(
+          extractNames
+        );
+
+      }
+
+      if (typeof obj === "object") {
+
+        if (obj.NAME) {
+
+          ledgerNames.push(
+            String(obj.NAME).trim()
+          );
+
+        }
+
+        Object.values(obj)
+          .forEach(extractNames);
+
+      }
+
+    }
+
+    extractNames(collection);
+
+    const uniqueLedgers =
+      [...new Set(ledgerNames)];
+
+    /* =========================================
+       STEP 2:
+       FETCH FULL DETAILS
+    ========================================= */
 
     const ledgers = [];
 
-    function extract(obj) {
-      if (!obj) return;
-      if (Array.isArray(obj)) return obj.forEach(extract);
-      if (typeof obj === "object") {
-        if (obj.NAME) {
-          const name = String(obj.NAME).replace(/&#13;&#10;|\r|\n/g, "").trim();
-          const parent_group = obj.PARENT ? String(obj.PARENT).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+    for (const ledgerName of uniqueLedgers) {
 
-          let address = null;
-          if (obj.ADDRESS) {
-            if (typeof obj.ADDRESS === 'string') {
-              address = obj.ADDRESS.replace(/&#13;&#10;|\r|\n/g, "").trim();
-            } else if (obj.ADDRESS?.LINE) {
-              address = Array.isArray(obj.ADDRESS.LINE) 
-                ? obj.ADDRESS.LINE.join(", ").replace(/&#13;&#10;|\r|\n/g, "").trim()
-                : String(obj.ADDRESS.LINE).replace(/&#13;&#10;|\r|\n/g, "").trim();
-            }
+      try {
+
+        const detailsXML =
+          getLedgerDetailsXML(
+            company,
+            ledgerName
+          );
+
+        const detailsResponse =
+          await sendToTally(
+            detailsXML
+          );
+
+        if (
+          detailsResponse.includes(
+            "<ERRORMSG>"
+          )
+        ) {
+
+          continue;
+
+        }
+
+        const detailsParsed =
+          parseXML(
+            detailsResponse
+          );
+
+        const ledger =
+          detailsParsed?.ENVELOPE
+            ?.BODY?.DATA
+            ?.TALLYMESSAGE?.LEDGER;
+
+        if (!ledger) continue;
+        console.log(
+  Object.keys(ledger)
+);
+
+        /* =====================================
+           CLEAN FUNCTION
+        ===================================== */
+
+        const clean = (value) => {
+
+          if (!value) return null;
+
+          return String(value)
+            .replace(
+              /&#13;&#10;|\r|\n/g,
+              ""
+            )
+            .trim();
+
+        };
+
+        /* =====================================
+           BALANCE
+        ===================================== */
+
+        let opening_balance = 0;
+
+        let opening_balance_type =
+          "Dr";
+
+        if (
+          ledger.OPENINGBALANCE
+        ) {
+
+          const balance =
+            parseFloat(
+              ledger.OPENINGBALANCE
+            );
+
+          if (!isNaN(balance)) {
+
+            opening_balance =
+              Math.abs(balance);
+
+            opening_balance_type =
+              balance < 0
+                ? "Cr"
+                : "Dr";
+
           }
 
-          const state = obj.STATENAME ? String(obj.STATENAME).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
-          const gst_number = obj.PARTYGSTIN ? String(obj.PARTYGSTIN).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
-          const gst_type = obj.GSTREGISTRATIONTYPE ? String(obj.GSTREGISTRATIONTYPE).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
-          const pan_number = obj.INCOMETAXNUMBER ? String(obj.INCOMETAXNUMBER).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
-          const phone = obj.PHONE ? String(obj.PHONE).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
-          const email = obj.EMAIL ? String(obj.EMAIL).replace(/&#13;&#10;|\r|\n/g, "").trim() : null;
+        }
 
-          let opening_balance = 0;
-          let opening_balance_type = "Dr";
-          if (obj.OPENINGBALANCE) {
-            const balance = parseFloat(obj.OPENINGBALANCE);
-            if (!isNaN(balance)) {
-              opening_balance = Math.abs(balance);
-              opening_balance_type = balance < 0 ? "Cr" : "Dr";
-            }
-          }
+        /* =====================================
+   FINAL OBJECT
+===================================== */
 
-          ledgers.push({
-            company_name: company,
+const finalLedger = {
+
+  company_name:
+    company,
+
+ name:
+  clean(ledgerName),
+
+  parent_group:
+    clean(
+      ledger?.PARENT
+    ),
+
+  address:
+  Array.isArray(
+    ledger?.["ADDRESS.LIST"]?.ADDRESS
+  )
+    ? ledger["ADDRESS.LIST"]
+        .ADDRESS
+        .map(a => clean(a))
+        .filter(Boolean)
+        .join(", ")
+    : clean(
+        ledger?.["ADDRESS.LIST"]?.ADDRESS
+      ),
+
+ state:
+  clean(
+    ledger?.STATENAME
+  ) ||
+  clean(
+    ledger?.LEDSTATENAME
+  ) ||
+  clean(
+    ledger?.STATE
+  ),
+
+  country:
+    clean(
+      ledger?.COUNTRYNAME
+    ),
+
+  pincode:
+    clean(
+      ledger?.PINCODE
+    ),
+
+  gst_number:
+  clean(
+    ledger?.GSTIN
+  ) ||
+  clean(
+    ledger?.PARTYGSTIN
+  ),
+
+ gst_type:
+  clean(
+    ledger?.REGISTRATIONTYPE
+  ) ||
+  clean(
+    ledger?.GSTREGISTRATIONTYPE
+  ),
+
+  pan_number:
+    clean(
+      ledger?.INCOMETAXNUMBER
+    ),
+
+phone:
+  clean(
+    ledger?.PHONE
+  ) ||
+  clean(
+    ledger?.LEDGERPHONE
+  ),
+
+mobile:
+  clean(
+    ledger?.MOBILE
+  ) ||
+  clean(
+    ledger?.LEDGERMOBILE
+  ),
+
+email:
+  clean(
+    ledger?.EMAIL
+  ) ||
+  clean(
+    ledger?.LEDGEREMAIL
+  ),
+
+  contact_person:
+    clean(
+      ledger?.CONTACTPERSON
+    ),
+
+  opening_balance,
+
+  opening_balance_type,
+
+  closing_balance:
+    clean(
+      ledger?.CLOSINGBALANCE
+    ),
+
+  credit_period:
+    clean(
+      ledger?.CREDITPERIOD
+    ),
+
+  bill_wise:
+    clean(
+      ledger?.ISBILLWISEON
+    ),
+
+  revenue_ledger:
+    clean(
+      ledger?.ISREVENUE
+    ),
+
+  deemed_positive:
+    clean(
+      ledger?.ISDEEMEDPOSITIVE
+    )
+
+};
+
+ledgers.push(
+  finalLedger
+);
+        /* =====================================
+           UPSERT DATABASE
+        ===================================== */
+
+        await pool.query(
+          `
+          INSERT INTO app.ledgers
+          (
+            company_name,
             name,
             parent_group,
             address,
             state,
+            country,
+            pincode,
             gst_number,
             gst_type,
             pan_number,
             phone,
+            mobile,
             email,
+            contact_person,
             opening_balance,
-            opening_balance_type
-          });
-        }
-        Object.values(obj).forEach(extract);
+            opening_balance_type,
+            closing_balance,
+            credit_period,
+            bill_wise,
+            revenue_ledger,
+            deemed_positive,
+            created_at,
+            updated_at
+          )
+
+          VALUES
+          (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,$10,
+            $11,$12,$13,$14,
+            $15,$16,$17,$18,
+            $19,$20,$21,
+            NOW(),
+            NOW()
+          )
+
+          ON CONFLICT
+          (company_name, name)
+
+          DO UPDATE SET
+
+            parent_group =
+              EXCLUDED.parent_group,
+
+            address =
+              EXCLUDED.address,
+
+            state =
+              EXCLUDED.state,
+
+            country =
+              EXCLUDED.country,
+
+            pincode =
+              EXCLUDED.pincode,
+
+            gst_number =
+              EXCLUDED.gst_number,
+
+            gst_type =
+              EXCLUDED.gst_type,
+
+            pan_number =
+              EXCLUDED.pan_number,
+
+            phone =
+              EXCLUDED.phone,
+
+            mobile =
+              EXCLUDED.mobile,
+
+            email =
+              EXCLUDED.email,
+
+            contact_person =
+              EXCLUDED.contact_person,
+
+            opening_balance =
+              EXCLUDED.opening_balance,
+
+            opening_balance_type =
+              EXCLUDED.opening_balance_type,
+
+            closing_balance =
+              EXCLUDED.closing_balance,
+
+            credit_period =
+              EXCLUDED.credit_period,
+
+            bill_wise =
+              EXCLUDED.bill_wise,
+
+            revenue_ledger =
+              EXCLUDED.revenue_ledger,
+
+            deemed_positive =
+              EXCLUDED.deemed_positive,
+
+            updated_at = NOW()
+          `,
+          [
+
+            finalLedger.company_name,
+
+            finalLedger.name,
+
+            finalLedger.parent_group,
+
+            finalLedger.address,
+
+            finalLedger.state,
+
+            finalLedger.country,
+
+            finalLedger.pincode,
+
+            finalLedger.gst_number,
+
+            finalLedger.gst_type,
+
+            finalLedger.pan_number,
+
+            finalLedger.phone,
+
+            finalLedger.mobile,
+
+            finalLedger.email,
+
+            finalLedger.contact_person,
+
+            finalLedger.opening_balance,
+
+            finalLedger.opening_balance_type,
+
+            finalLedger.closing_balance,
+
+            finalLedger.credit_period,
+
+            finalLedger.bill_wise,
+
+            finalLedger.revenue_ledger,
+
+            finalLedger.deemed_positive
+
+          ]
+        );
+
+      } catch (innerErr) {
+
+        console.log(
+          "Ledger Error:",
+          ledgerName,
+          innerErr.message
+        );
+
       }
+
     }
 
-    extract(collection);
+    /* =========================================
+       RESPONSE
+    ========================================= */
 
-    if (!ledgers.length) {
-      return res.json({ status: "success", source: "tally", count: 0, data: [] });
-    }
+    return res.status(200).json({
 
-    for (const ledger of ledgers) {
-      await pool.query(
-        `
-        INSERT INTO app.ledgers (
-          company_name, name, parent_group, address, state,
-          gst_number, gst_type, pan_number, phone, email,
-          opening_balance, opening_balance_type, created_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-        ON CONFLICT (name) DO UPDATE SET
-          company_name = EXCLUDED.company_name,
-          parent_group = EXCLUDED.parent_group,
-          address = EXCLUDED.address,
-          state = EXCLUDED.state,
-          gst_number = EXCLUDED.gst_number,
-          gst_type = EXCLUDED.gst_type,
-          pan_number = EXCLUDED.pan_number,
-          phone = EXCLUDED.phone,
-          email = EXCLUDED.email,
-          opening_balance = EXCLUDED.opening_balance,
-          opening_balance_type = EXCLUDED.opening_balance_type
-        `,
-        [
-          ledger.company_name,
-          ledger.name,
-          ledger.parent_group,
-          ledger.address,
-          ledger.state,
-          ledger.gst_number,
-          ledger.gst_type,
-          ledger.pan_number,
-          ledger.phone,
-          ledger.email,
-          ledger.opening_balance,
-          ledger.opening_balance_type
-        ]
-      );
-    }
-
-    return res.json({
       status: "success",
+
       source: "tally",
-      total: ledgers.length,
-      data: ledgers
+
+      message:
+        "Ledgers synced successfully",
+
+      company,
+
+      total:
+        ledgers.length,
+
+      data:
+        ledgers
+
     });
 
   } catch (err) {
-    console.log("❌ LEDGER SYNC ERROR:", err.message);
-    try {
-      const result = await pool.query(`SELECT * FROM app.ledgers ORDER BY created_at DESC`);
-      return res.json({
-        status: "success",
-        source: "database",
-        count: result.rows.length,
-        data: result.rows
-      });
-    } catch (dbErr) {
-      return res.status(500).json({
-        status: "error",
-        message: "Both Tally and DB failed"
-      });
-    }
-  }
-});
 
-/* ---------------- PRODUCTS SYNC ---------------- */
-
-router.get("/products", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({ message: "company required" });
-  }
-
-  try {
-    const xml = getProductsXML(company);
-    const responseXML = await sendToTally(xml);
-
-    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
-      throw new Error("Invalid Tally response");
-    }
-
-    const parsed = parseXML(responseXML);
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-    if (!collection) throw new Error("No data found");
-
-    const list = extractValues(collection, "NAME");
-    if (!list.length) {
-      return res.json({ status: "success", source: "tally", count: 0, data: [] });
-    }
-
-    const cleanData = list.map(item => ({
-      name: item.name.replace(/&#13;&#10;|\r|\n/g, "").trim()
-    }));
-    const names = cleanData.map(i => i.name);
-
-    const result = await pool.query(
-      `INSERT INTO app.stock_items (name, created_at)
-       SELECT UNNEST($1::text[]), NOW()
-       ON CONFLICT (name) DO NOTHING
-       RETURNING name`,
-      [names]
+    console.log(
+      "❌ LEDGER SYNC ERROR:",
+      err.message
     );
 
-    return res.json({
-      status: "success",
-      source: "tally",
-      inserted: result.rowCount,
-      total: cleanData.length,
-      data: cleanData
+    return res.status(500).json({
+
+      status: "error",
+
+      message:
+        err.message
+
     });
 
-  } catch (err) {
-    console.log("⚠️ Products sync failed:", err.message);
-    const result = await pool.query(`SELECT id, name, created_at FROM app.stock_items ORDER BY created_at DESC`);
-    return res.json({ status: "success", source: "database", count: result.rows.length, data: result.rows });
-  }
-});
-
-/* ---------------- VOUCHERS SYNC ---------------- */
-
-router.get("/vouchers", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({ message: "company required" });
   }
 
-  try {
-    const xml = getVouchersXML(company);
-    const responseXML = await sendToTally(xml);
-
-    if (!responseXML || !responseXML.includes("<ENVELOPE>")) {
-      throw new Error("Invalid Tally response");
-    }
-
-    const parsed = parseXML(responseXML);
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-
-    const vouchers = [];
-    
-    function extract(obj) {
-      if (!obj) return;
-      if (Array.isArray(obj)) return obj.forEach(extract);
-      if (typeof obj === "object") {
-        if (obj.VOUCHERNUMBER) {
-          vouchers.push({
-            number: String(obj.VOUCHERNUMBER).replace(/&#13;&#10;|\r|\n/g, "").trim(),
-            type: obj.VOUCHERTYPENAME ? String(obj.VOUCHERTYPENAME).replace(/&#13;&#10;|\r|\n/g, "").trim() : null,
-            date: obj.DATE || null,
-          });
-        }
-        Object.values(obj).forEach(extract);
-      }
-    }
-    
-    extract(collection);
-
-    if (!vouchers.length) {
-      return res.json({ status: "success", source: "tally", count: 0, message: "No vouchers found", data: [] });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO app.vouchers (voucher_number, voucher_type, voucher_date, created_at)
-       SELECT x.number, x.type,
-         CASE WHEN x.date ~ '^[0-9]{8}$' THEN TO_DATE(x.date, 'YYYYMMDD') ELSE NULL END,
-         NOW()
-       FROM UNNEST($1::json[]) AS x(number text, type text, date text)
-       ON CONFLICT (voucher_number) DO NOTHING
-       RETURNING voucher_number`,
-      [vouchers]
-    );
-
-    return res.json({
-      status: "success",
-      source: "tally",
-      inserted: result.rowCount,
-      total: vouchers.length,
-      data: vouchers
-    });
-
-  } catch (err) {
-    console.log("⚠️ Voucher sync failed:", err.message);
-    const result = await pool.query(`SELECT * FROM app.vouchers ORDER BY created_at DESC`);
-    return res.json({ status: "success", source: "database", count: result.rows.length, data: result.rows });
-  }
 });
 
 export default router;
