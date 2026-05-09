@@ -1,20 +1,59 @@
 import express from "express";
 import cors from "cors";
 import db from "./api/db.routes.js";
-import sync from "./api/sync.routes.js";
 import companies from "./api/companies.routes.js";
 import ledgers from "./api/ledgers.routes.js";
-import products from "./api/products.routes.js";
+import syncRoutes from "./api/sync.routes.js";
 
 const app = express();
 
+/* =================================
+   MIDDLEWARE
+================================= */
+
 app.use(cors());
+
 app.use(express.json());
 
-app.use("/api/sync", sync);
-app.use("/api/companies", companies);
-app.use("/api/ledgers", ledgers);
-app.use("/api/products", products);
+/* =================================
+   DATABASE TEST API
+================================= */
+
 app.use("/api/db", db);
+
+/* =================================
+   COMPANY APIs
+================================= */
+
+app.use("/api/companies", companies);
+
+/* =================================
+   LEDGER APIs
+================================= */
+
+app.use("/api/ledgers", ledgers);
+
+/* =================================
+   SYNC APIs
+================================= */
+
+app.use("/api/sync", syncRoutes);
+
+/* =================================
+   DEFAULT API
+================================= */
+
+app.get("/", (req, res) => {
+
+  return res.json({
+
+    status: "success",
+
+    message:
+      "Tally Integration API Running"
+
+  });
+
+});
 
 export default app;
