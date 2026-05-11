@@ -5,6 +5,16 @@ import companies from "./api/companies.routes.js";
 import ledgers from "./api/ledgers.routes.js";
 import syncRoutes from "./api/sync.routes.js";
 
+/* =================================
+   GROUP SUMMARY APIs
+================================= */
+
+import groupSummarySC
+from "./api/groupSummarySC.routes.js";
+
+import groupSummarySD
+from "./api/groupSummarySD.routes.js";
+
 const app = express();
 
 /* =================================
@@ -38,6 +48,20 @@ app.use("/api/ledgers", ledgers);
 ================================= */
 
 app.use("/api/sync", syncRoutes);
+
+/* =================================
+   GROUP SUMMARY APIs
+================================= */
+
+app.use(
+  "/api/group-summary/sc",
+  groupSummarySC
+);
+
+app.use(
+  "/api/group-summary/sd",
+  groupSummarySD
+);
 
 /* =================================
    DEFAULT API
