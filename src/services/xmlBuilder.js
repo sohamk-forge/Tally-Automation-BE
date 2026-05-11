@@ -226,3 +226,233 @@ export const getLedgerDetailsXML = (
 `;
 
 };
+
+
+export const getGroupSummaryCRXML = (
+  company
+) => {
+
+  return `
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>GroupSummaryCR</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="GroupSummaryCR">
+
+            <TYPE>Ledger</TYPE>
+
+            <CHILDOF>
+              Sundry Creditors
+            </CHILDOF>
+
+            <FETCH>
+
+              NAME,
+
+              ALIAS,
+
+              PARENT,
+
+              ADDRESS,
+
+              MAILINGNAME,
+
+              STATENAME,
+
+              STATE,
+
+              LEDSTATENAME,
+
+              COUNTRYNAME,
+
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+
+              LEDGERPHONE,
+
+              MOBILE,
+
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+
+              PARTYGSTIN,
+
+              GSTREGISTRATIONTYPE,
+
+              INCOMETAXNUMBER,
+
+              OPENINGBALANCE,
+
+              CLOSINGBALANCE
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};
+
+
+export const getGroupSummaryDRXML = (
+  company
+) => {
+
+  return `
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>GroupSummaryDR</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="GroupSummaryDR">
+
+            <TYPE>Ledger</TYPE>
+
+            <CHILDOF>
+              Sundry Debtors
+            </CHILDOF>
+
+            <FETCH>
+
+              NAME,
+
+              ALIAS,
+
+              PARENT,
+
+              ADDRESS,
+
+              MAILINGNAME,
+
+              STATENAME,
+
+              STATE,
+
+              LEDSTATENAME,
+
+              COUNTRYNAME,
+
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+
+              LEDGERPHONE,
+
+              MOBILE,
+
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+
+              PARTYGSTIN,
+
+              GSTREGISTRATIONTYPE,
+
+              INCOMETAXNUMBER,
+
+              OPENINGBALANCE,
+
+              CLOSINGBALANCE
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};

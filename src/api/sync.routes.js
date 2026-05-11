@@ -1,12 +1,13 @@
 import express from "express";
-import pool from "../db/index.js";
 
 import { sendToTally } from "../services/tallyClient.js";
-
+import pool from "../db/index.js";
 import {
   getCompaniesXML,
   getLedgersXML,
-  getLedgerDetailsXML
+  getLedgerDetailsXML,
+  getGroupSummaryCRXML,
+  getGroupSummaryDRXML
 } from "../services/xmlBuilder.js";
 
 import { parseXML } from "../services/parser.js";
@@ -21,8 +22,6 @@ router.get("/health", async (req, res) => {
 
   try {
 
-    await pool.query("SELECT 1");
-
     return res.status(200).json({
 
       status: "success",
@@ -33,8 +32,6 @@ router.get("/health", async (req, res) => {
       services: {
 
         api: "running",
-
-        database: "connected",
 
         tally: "ready"
 
@@ -210,11 +207,6 @@ router.get("/ledgers", async (req, res) => {
 
   try {
 
-    /* =========================================
-       STEP 1:
-       FETCH ALL LEDGER NAMES
-    ========================================= */
-
     const xml =
       getLedgersXML(company);
 
@@ -235,10 +227,6 @@ router.get("/ledgers", async (req, res) => {
       );
 
     }
-
-    /* =========================================
-       EXTRACT NAMES
-    ========================================= */
 
     const ledgerNames = [];
 
@@ -275,11 +263,6 @@ router.get("/ledgers", async (req, res) => {
 
     const uniqueLedgers =
       [...new Set(ledgerNames)];
-
-    /* =========================================
-       STEP 2:
-       FETCH FULL DETAILS
-    ========================================= */
 
     const ledgers = [];
 
@@ -319,13 +302,6 @@ router.get("/ledgers", async (req, res) => {
             ?.TALLYMESSAGE?.LEDGER;
 
         if (!ledger) continue;
-        console.log(
-  Object.keys(ledger)
-);
-
-        /* =====================================
-           CLEAN FUNCTION
-        ===================================== */
 
         const clean = (value) => {
 
@@ -340,326 +316,96 @@ router.get("/ledgers", async (req, res) => {
 
         };
 
-        /* =====================================
-           BALANCE
-        ===================================== */
-
-        let opening_balance = 0;
-
-        let opening_balance_type =
-          "Dr";
-
-        if (
-          ledger.OPENINGBALANCE
-        ) {
-
-          const balance =
-            parseFloat(
-              ledger.OPENINGBALANCE
-            );
-
-          if (!isNaN(balance)) {
-
-            opening_balance =
-              Math.abs(balance);
-
-            opening_balance_type =
-              balance < 0
-                ? "Cr"
-                : "Dr";
-
-          }
-
-        }
-
-        /* =====================================
-   FINAL OBJECT
-===================================== */
-
-const finalLedger = {
-
-  company_name:
-    company,
-
- name:
-  clean(ledgerName),
-
-  parent_group:
-    clean(
-      ledger?.PARENT
-    ),
-
-  address:
-  Array.isArray(
-    ledger?.["ADDRESS.LIST"]?.ADDRESS
-  )
-    ? ledger["ADDRESS.LIST"]
-        .ADDRESS
-        .map(a => clean(a))
-        .filter(Boolean)
-        .join(", ")
-    : clean(
-        ledger?.["ADDRESS.LIST"]?.ADDRESS
-      ),
-
- state:
-  clean(
-    ledger?.STATENAME
-  ) ||
-  clean(
-    ledger?.LEDSTATENAME
-  ) ||
-  clean(
-    ledger?.STATE
-  ),
-
-  country:
-    clean(
-      ledger?.COUNTRYNAME
-    ),
-
-  pincode:
-    clean(
-      ledger?.PINCODE
-    ),
-
-  gst_number:
-  clean(
-    ledger?.GSTIN
-  ) ||
-  clean(
-    ledger?.PARTYGSTIN
-  ),
-
- gst_type:
-  clean(
-    ledger?.REGISTRATIONTYPE
-  ) ||
-  clean(
-    ledger?.GSTREGISTRATIONTYPE
-  ),
-
-  pan_number:
-    clean(
-      ledger?.INCOMETAXNUMBER
-    ),
-
-phone:
-  clean(
-    ledger?.PHONE
-  ) ||
-  clean(
-    ledger?.LEDGERPHONE
-  ),
-
-mobile:
-  clean(
-    ledger?.MOBILE
-  ) ||
-  clean(
-    ledger?.LEDGERMOBILE
-  ),
-
-email:
-  clean(
-    ledger?.EMAIL
-  ) ||
-  clean(
-    ledger?.LEDGEREMAIL
-  ),
-
-  contact_person:
-    clean(
-      ledger?.CONTACTPERSON
-    ),
-
-  opening_balance,
-
-  opening_balance_type,
-
-  closing_balance:
-    clean(
-      ledger?.CLOSINGBALANCE
-    ),
-
-  credit_period:
-    clean(
-      ledger?.CREDITPERIOD
-    ),
-
-  bill_wise:
-    clean(
-      ledger?.ISBILLWISEON
-    ),
-
-  revenue_ledger:
-    clean(
-      ledger?.ISREVENUE
-    ),
-
-  deemed_positive:
-    clean(
-      ledger?.ISDEEMEDPOSITIVE
-    )
-
-};
-
-ledgers.push(
-  finalLedger
-);
-        /* =====================================
-           UPSERT DATABASE
-        ===================================== */
-
-        await pool.query(
-          `
-          INSERT INTO app.ledgers
-          (
-            company_name,
-            name,
-            parent_group,
-            address,
-            state,
-            country,
-            pincode,
-            gst_number,
-            gst_type,
-            pan_number,
-            phone,
-            mobile,
-            email,
-            contact_person,
-            opening_balance,
-            opening_balance_type,
-            closing_balance,
-            credit_period,
-            bill_wise,
-            revenue_ledger,
-            deemed_positive,
-            created_at,
-            updated_at
-          )
-
-          VALUES
-          (
-            $1,$2,$3,$4,$5,
-            $6,$7,$8,$9,$10,
-            $11,$12,$13,$14,
-            $15,$16,$17,$18,
-            $19,$20,$21,
-            NOW(),
-            NOW()
-          )
-
-          ON CONFLICT
-          (company_name, name)
-
-          DO UPDATE SET
-
-            parent_group =
-              EXCLUDED.parent_group,
-
-            address =
-              EXCLUDED.address,
-
-            state =
-              EXCLUDED.state,
-
-            country =
-              EXCLUDED.country,
-
-            pincode =
-              EXCLUDED.pincode,
-
-            gst_number =
-              EXCLUDED.gst_number,
-
-            gst_type =
-              EXCLUDED.gst_type,
-
-            pan_number =
-              EXCLUDED.pan_number,
-
-            phone =
-              EXCLUDED.phone,
-
-            mobile =
-              EXCLUDED.mobile,
-
-            email =
-              EXCLUDED.email,
-
-            contact_person =
-              EXCLUDED.contact_person,
-
-            opening_balance =
-              EXCLUDED.opening_balance,
-
-            opening_balance_type =
-              EXCLUDED.opening_balance_type,
-
-            closing_balance =
-              EXCLUDED.closing_balance,
-
-            credit_period =
-              EXCLUDED.credit_period,
-
-            bill_wise =
-              EXCLUDED.bill_wise,
-
-            revenue_ledger =
-              EXCLUDED.revenue_ledger,
-
-            deemed_positive =
-              EXCLUDED.deemed_positive,
-
-            updated_at = NOW()
-          `,
-          [
-
-            finalLedger.company_name,
-
-            finalLedger.name,
-
-            finalLedger.parent_group,
-
-            finalLedger.address,
-
-            finalLedger.state,
-
-            finalLedger.country,
-
-            finalLedger.pincode,
-
-            finalLedger.gst_number,
-
-            finalLedger.gst_type,
-
-            finalLedger.pan_number,
-
-            finalLedger.phone,
-
-            finalLedger.mobile,
-
-            finalLedger.email,
-
-            finalLedger.contact_person,
-
-            finalLedger.opening_balance,
-
-            finalLedger.opening_balance_type,
-
-            finalLedger.closing_balance,
-
-            finalLedger.credit_period,
-
-            finalLedger.bill_wise,
-
-            finalLedger.revenue_ledger,
-
-            finalLedger.deemed_positive
-
-          ]
+        const finalLedger = {
+
+          company_name:
+            company,
+
+          name:
+            clean(ledgerName),
+
+          parent_group:
+            clean(
+              ledger?.PARENT
+            ),
+
+          address:
+            Array.isArray(
+              ledger?.["ADDRESS.LIST"]?.ADDRESS
+            )
+              ? ledger["ADDRESS.LIST"]
+                  .ADDRESS
+                  .map(a => clean(a))
+                  .filter(Boolean)
+                  .join(", ")
+              : clean(
+                  ledger?.["ADDRESS.LIST"]?.ADDRESS
+                ),
+
+          state:
+            clean(
+              ledger?.STATENAME
+            ),
+
+          country:
+            clean(
+              ledger?.COUNTRYNAME
+            ),
+
+          pincode:
+            clean(
+              ledger?.PINCODE
+            ),
+
+          gst_number:
+            clean(
+              ledger?.PARTYGSTIN
+            ),
+
+          gst_type:
+            clean(
+              ledger?.GSTREGISTRATIONTYPE
+            ),
+
+          pan_number:
+            clean(
+              ledger?.INCOMETAXNUMBER
+            ),
+
+          phone:
+            clean(
+              ledger?.PHONE
+            ),
+
+          mobile:
+            clean(
+              ledger?.MOBILE
+            ),
+
+          email:
+            clean(
+              ledger?.EMAIL
+            ),
+
+          contact_person:
+            clean(
+              ledger?.CONTACTPERSON
+            ),
+
+          opening_balance:
+            clean(
+              ledger?.OPENINGBALANCE
+            ),
+
+          closing_balance:
+            clean(
+              ledger?.CLOSINGBALANCE
+            )
+
+        };
+
+        ledgers.push(
+          finalLedger
         );
 
       } catch (innerErr) {
@@ -673,10 +419,6 @@ ledgers.push(
       }
 
     }
-
-    /* =========================================
-       RESPONSE
-    ========================================= */
 
     return res.status(200).json({
 
@@ -717,4 +459,513 @@ ledgers.push(
 
 });
 
+/* ===================================================
+   GROUP SUMMARY CR
+=================================================== */
+
+router.get(
+  "/group-summary-cr",
+  async (req, res) => {
+
+    try {
+
+      const company =
+        req.query.company;
+
+      if (!company) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "company query parameter required"
+
+        });
+
+      }
+
+      /* =========================================
+         GET XML
+      ========================================= */
+
+      const xml =
+        getGroupSummaryCRXML(
+          company
+        );
+
+      /* =========================================
+         SEND TO TALLY
+      ========================================= */
+
+      const responseXML =
+        await sendToTally(xml);
+
+      /* =========================================
+         PARSE XML
+      ========================================= */
+
+      const parsed =
+        parseXML(responseXML);
+
+      const collection =
+        parsed?.ENVELOPE?.BODY?.DATA
+          ?.COLLECTION?.LEDGER || [];
+
+      const list =
+        Array.isArray(collection)
+          ? collection
+          : [collection];
+
+/* =========================================
+   CLEAN FUNCTION
+========================================= */
+
+const clean = (value) => {
+
+  if (!value) return null;
+
+  return String(value)
+    .replace(
+      /&#13;&#10;|\r|\n/g,
+      ""
+    )
+    .trim();
+
+};
+
+/* =========================================
+   CLEAN BALANCE FUNCTION
+========================================= */
+
+const cleanBalance = (value) => {
+
+  if (!value) return null;
+
+  const cleaned =
+    String(value)
+      .replace(/[^\d.-]/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean);
+
+  return cleaned.length
+    ? cleaned[
+        cleaned.length - 1
+      ]
+    : null;
+
+};
+
+      /* =========================================
+         FINAL RESPONSE
+      ========================================= */
+const data =
+  list.map((ledger) => ({
+
+    company_name:
+      company,
+
+    ledger_name:
+      clean(
+        ledger?.$?.NAME ||
+        ledger?.["@NAME"] ||
+        ledger?.NAME ||
+        ledger?.MAILINGNAME
+      ),
+
+    parent_group:
+      "Sundry Creditors",
+
+    address:
+      Array.isArray(
+        ledger?.["ADDRESS.LIST"]?.ADDRESS
+      )
+        ? ledger["ADDRESS.LIST"]
+            .ADDRESS
+            .map(a => clean(a))
+            .filter(Boolean)
+            .join(", ")
+        : clean(
+            ledger?.["ADDRESS.LIST"]?.ADDRESS
+          ),
+
+    alias:
+      clean(
+        ledger?.$?.ALIAS ||
+        ledger?.["@ALIAS"] ||
+        ledger?.ALIAS
+      ),
+
+    state:
+      clean(
+        ledger?.STATENAME ||
+        ledger?.STATE ||
+        ledger?.LEDSTATENAME
+      ),
+
+    country:
+      clean(
+        ledger?.COUNTRYNAME ||
+        ledger?.LEDCOUNTRYNAME
+      ),
+
+    pincode:
+      clean(
+        ledger?.PINCODE
+      ),
+
+    pan_number:
+      clean(
+        ledger?.INCOMETAXNUMBER
+      ),
+
+    gst_number:
+      clean(
+        ledger?.PARTYGSTIN
+      ),
+
+    gst_registration_type:
+      clean(
+        ledger?.GSTREGISTRATIONTYPE
+      ),
+
+    contact_name:
+      clean(
+        ledger?.CONTACTPERSON
+      ),
+
+    phone_number:
+      clean(
+        ledger?.PHONE ||
+        ledger?.LEDGERPHONE
+      ),
+
+    primary_phone_number:
+      clean(
+        ledger?.MOBILE ||
+        ledger?.LEDGERMOBILE
+      ),
+
+    fax_no:
+      clean(
+        ledger?.FAX
+      ),
+
+    email:
+      clean(
+        ledger?.EMAIL ||
+        ledger?.LEDGEREMAIL
+      ),
+
+   opening_balance:
+  cleanBalance(
+    ledger?.OPENINGBALANCE
+  ),
+
+closing_balance:
+  cleanBalance(
+    ledger?.CLOSINGBALANCE
+  ),
+    opening_balance_type:
+      clean(
+        ledger?.OPENINGBALANCE
+      )?.includes("-")
+        ? "Cr"
+        : "Dr",
+
+    closing_balance_type:
+      clean(
+        ledger?.CLOSINGBALANCE
+      )?.includes("-")
+        ? "Cr"
+        : "Dr"
+
+  }));
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "tally",
+
+        message:
+          "Sundry creditors fetched successfully",
+
+        company,
+
+        total:
+          data.length,
+
+        data
+
+      });
+
+    } catch (err) {
+
+      console.log(
+        "❌ GROUP SUMMARY CR ERROR:",
+        err.message
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
+    }
+
+  }
+);
+
+
+/* ===================================================
+   GROUP SUMMARY DR
+=================================================== */
+
+router.get(
+  "/group-summary-dr",
+  async (req, res) => {
+
+    try {
+
+      const company =
+        req.query.company;
+
+      if (!company) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "company query parameter required"
+
+        });
+
+      }
+
+      const xml =
+        getGroupSummaryDRXML(
+          company
+        );
+
+      const responseXML =
+        await sendToTally(xml);
+
+      const parsed =
+        parseXML(responseXML);
+
+      const collection =
+        parsed?.ENVELOPE?.BODY?.DATA
+          ?.COLLECTION?.LEDGER || [];
+
+      const list =
+        Array.isArray(collection)
+          ? collection
+          : [collection];
+
+      const clean = (value) => {
+
+        if (!value) return null;
+
+        return String(value)
+          .replace(
+            /&#13;&#10;|\r|\n/g,
+            ""
+          )
+          .trim();
+
+      };
+
+      const cleanBalance = (value) => {
+
+        if (!value) return null;
+
+        const cleaned =
+          String(value)
+            .replace(/[^\d.-]/g, " ")
+            .trim()
+            .split(" ")
+            .filter(Boolean);
+
+        return cleaned.length
+          ? cleaned[
+              cleaned.length - 1
+            ]
+          : null;
+
+      };
+
+      const data =
+        list.map((ledger) => ({
+
+          company_name:
+            company,
+
+        ledger_name:
+  clean(
+    ledger?.$?.NAME ||
+    ledger?.["@NAME"] ||
+    ledger?.NAME ||
+    ledger?.MAILINGNAME ||
+    "Unknown Ledger"
+  ),
+
+          parent_group:
+            "Sundry Debtors",
+
+          address:
+            Array.isArray(
+              ledger?.["ADDRESS.LIST"]?.ADDRESS
+            )
+              ? ledger["ADDRESS.LIST"]
+                  .ADDRESS
+                  .map(a => clean(a))
+                  .filter(Boolean)
+                  .join(", ")
+              : clean(
+                  ledger?.["ADDRESS.LIST"]?.ADDRESS
+                ),
+
+          alias:
+            clean(
+              ledger?.$?.ALIAS ||
+              ledger?.["@ALIAS"] ||
+              ledger?.ALIAS
+            ),
+
+          state:
+            clean(
+              ledger?.STATENAME ||
+              ledger?.STATE ||
+              ledger?.LEDSTATENAME
+            ),
+
+          country:
+            clean(
+              ledger?.COUNTRYNAME ||
+              ledger?.LEDCOUNTRYNAME
+            ),
+
+          pincode:
+            clean(
+              ledger?.PINCODE
+            ),
+
+          pan_number:
+            clean(
+              ledger?.INCOMETAXNUMBER
+            ),
+
+          gst_number:
+            clean(
+              ledger?.PARTYGSTIN
+            ),
+
+          gst_registration_type:
+            clean(
+              ledger?.GSTREGISTRATIONTYPE
+            ),
+
+          contact_name:
+            clean(
+              ledger?.CONTACTPERSON
+            ),
+
+          phone_number:
+            clean(
+              ledger?.PHONE ||
+              ledger?.LEDGERPHONE
+            ),
+
+          primary_phone_number:
+            clean(
+              ledger?.MOBILE ||
+              ledger?.LEDGERMOBILE
+            ),
+
+          fax_no:
+            clean(
+              ledger?.FAX
+            ),
+
+          email:
+            clean(
+              ledger?.EMAIL ||
+              ledger?.LEDGEREMAIL
+            ),
+
+          opening_balance:
+            cleanBalance(
+              ledger?.OPENINGBALANCE
+            ),
+
+          closing_balance:
+            cleanBalance(
+              ledger?.CLOSINGBALANCE
+            ),
+
+          opening_balance_type:
+  Number(
+    cleanBalance(
+      ledger?.OPENINGBALANCE
+    )
+  ) < 0
+    ? "Cr"
+    : "Dr",
+
+          closing_balance_type:
+  Number(
+    cleanBalance(
+      ledger?.CLOSINGBALANCE
+    )
+  ) < 0
+    ? "Cr"
+    : "Dr"
+
+        }));
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "tally",
+
+        message:
+          "Sundry debtors fetched successfully",
+
+        company,
+
+        total:
+          data.length,
+
+        data
+
+      });
+
+    } catch (err) {
+
+      console.log(
+        "❌ GROUP SUMMARY DR ERROR:",
+        err.message
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
+    }
+
+  }
+);
 export default router;
