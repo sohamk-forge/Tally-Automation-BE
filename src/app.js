@@ -13,6 +13,9 @@ from "./api/ledgers.routes.js";
 import syncRoutes
 from "./api/sync.routes.js";
 
+import parentGroupsRoutes
+from "./api/parentGroups.routes.js";
+
 /* =================================
    GROUP SUMMARY APIs
 ================================= */
@@ -25,6 +28,9 @@ from "./api/groupSummarySD.routes.js";
 
 import groupSummaryBank
 from "./api/groupSummaryBank.routes.js";
+
+import ledgerVouchersRoutes
+from "./api/ledgerVouchers.routes.js";
 
 const app = express();
 
@@ -89,6 +95,14 @@ app.use(
 app.use(
   "/api/group-summary-bank",
   groupSummaryBank
+);
+app.use(
+  "/api",
+  ledgerVouchersRoutes
+);
+app.use(
+  "/api",
+  parentGroupsRoutes
 );
 
 /* =================================
