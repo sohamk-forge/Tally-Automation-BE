@@ -26,7 +26,7 @@ GET /api/group-summary/sd/sundry-debtors
 =================================================== */
 
 router.get(
-  "/sundry-debtors",
+  "/",
   async (req, res) => {
 
     try {

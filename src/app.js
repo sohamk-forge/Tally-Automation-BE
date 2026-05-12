@@ -1,10 +1,17 @@
 import express from "express";
 import cors from "cors";
 
-import db from "./api/db.routes.js";
-import companies from "./api/companies.routes.js";
-import ledgers from "./api/ledgers.routes.js";
-import syncRoutes from "./api/sync.routes.js";
+import db
+from "./api/db.routes.js";
+
+import companies
+from "./api/companies.routes.js";
+
+import ledgers
+from "./api/ledgers.routes.js";
+
+import syncRoutes
+from "./api/sync.routes.js";
 
 /* =================================
    GROUP SUMMARY APIs
@@ -15,6 +22,9 @@ from "./api/groupSummarySC.routes.js";
 
 import groupSummarySD
 from "./api/groupSummarySD.routes.js";
+
+import groupSummaryBank
+from "./api/groupSummaryBank.routes.js";
 
 const app = express();
 
@@ -30,38 +40,55 @@ app.use(express.json());
    DATABASE TEST API
 ================================= */
 
-app.use("/api/db", db);
+app.use(
+  "/api/db",
+  db
+);
 
 /* =================================
    COMPANY APIs
 ================================= */
 
-app.use("/api/companies", companies);
+app.use(
+  "/api/companies",
+  companies
+);
 
 /* =================================
    LEDGER APIs
 ================================= */
 
-app.use("/api/ledgers", ledgers);
+app.use(
+  "/api/ledgers",
+  ledgers
+);
 
 /* =================================
-   SYNC APIs
+   OLD SYNC APIs
 ================================= */
 
-app.use("/api/sync", syncRoutes);
+app.use(
+  "/api/sync",
+  syncRoutes
+);
 
 /* =================================
    GROUP SUMMARY APIs
 ================================= */
 
 app.use(
-  "/api/group-summary/sc",
+  "/api/group-summary-cr",
   groupSummarySC
 );
 
 app.use(
-  "/api/group-summary/sd",
+  "/api/group-summary-dr",
   groupSummarySD
+);
+
+app.use(
+  "/api/group-summary-bank",
+  groupSummaryBank
 );
 
 /* =================================

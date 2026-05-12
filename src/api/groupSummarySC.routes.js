@@ -26,7 +26,7 @@ GET /api/group-summary/sc/sundry-creditors
 =================================================== */
 
 router.get(
-  "/sundry-creditors",
+  "/",
   async (req, res) => {
 
     try {
