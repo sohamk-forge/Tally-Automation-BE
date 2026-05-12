@@ -150,14 +150,7 @@ account_number:
               ledger?.SWIFTCODE
             ),
 
-         bank_name:
-  clean(
-
-    ledger?.BANKNAME ||
-
-    ledger?.BankDetails
-
-  ),
+   
 
          branch:
   clean(
@@ -200,12 +193,7 @@ account_number:
               ledger?.PINCODE
             ),
 
- gst_number: clean(
-  ledger?.GSTIN ||
-  ledger?.PARTYGSTIN ||
-  ledger?.["LEDGERGSTREGDETAILS.LIST"]?.GSTIN ||
-  ledger?.["LEDGERGSTREGDETAILS.LIST"]?.[0]?.GSTIN
-)
+
 
         }));
 
