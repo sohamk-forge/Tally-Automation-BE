@@ -1,20 +1,18 @@
 import express from "express";
 
-import pool from "../db/index.js";
+import pool
+from "../db/index.js";
 
-const router = express.Router();
+const router =
+  express.Router();
 
 /* ===================================================
-   PARENT GROUPS DB API
-===================================================
-
-API:
-GET /api/parent-groups
-
+   PAYABLE + RECEIVABLE DB API
 =================================================== */
 
 router.get(
-  "/parent-groups",
+
+  "/payable-debtors",
 
   async (req, res) => {
 
@@ -38,7 +36,7 @@ router.get(
           status: "error",
 
           message:
-            "company required"
+            "company query parameter required"
 
         });
 
@@ -49,16 +47,21 @@ router.get(
       ========================================= */
 
       const result =
+
         await pool.query(
 
           `
-          SELECT group_name
+          SELECT
 
-          FROM app.parent_groups
+            company_name,
+            group_name,
+            parent_group,
+            opening_balance,
+            closing_balance
+
+          FROM app.group_balances
 
           WHERE company_name = $1
-
-          ORDER BY group_name ASC
           `,
 
           [company]
@@ -66,19 +69,37 @@ router.get(
         );
 
       /* =========================================
-         PARENT GROUPS ARRAY
+         DEBTORS
       ========================================= */
 
-      const parentGroups =
+      const debtors =
 
-        result.rows.map(
+        result.rows.find(
 
-          (row) => row.group_name
+          (row) =>
+
+            row.group_name ===
+            "Sundry Debtors"
 
         );
 
       /* =========================================
-         SUCCESS RESPONSE
+         CREDITORS
+      ========================================= */
+
+      const creditors =
+
+        result.rows.find(
+
+          (row) =>
+
+            row.group_name ===
+            "Sundry Creditors"
+
+        );
+
+      /* =========================================
+         RESPONSE
       ========================================= */
 
       return res.status(200).json({
@@ -89,11 +110,13 @@ router.get(
 
         company,
 
-        total:
-          parentGroups.length,
+        data: {
 
-        parent_groups:
-          parentGroups
+          debtors,
+
+          creditors
+
+        }
 
       });
 
@@ -101,7 +124,7 @@ router.get(
 
       console.log(
 
-        "❌ PARENT GROUP DB ERROR:",
+        "❌ GROUP BALANCE DB ERROR:",
 
         err.message
 
@@ -119,6 +142,7 @@ router.get(
     }
 
   }
+
 );
 
 export default router;

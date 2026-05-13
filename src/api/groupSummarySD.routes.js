@@ -2,22 +2,10 @@ import express from "express";
 
 import pool from "../db/index.js";
 
-import {
-  sendToTally
-} from "../services/tallyClient.js";
-
-import {
-  getGroupSummaryDRXML
-} from "../services/xmlBuilder.js";
-
-import {
-  parseXML
-} from "../services/parser.js";
-
 const router = express.Router();
 
 /* ===================================================
-   GROUP SUMMARY SD API
+   GROUP SUMMARY SD DB API
 ===================================================
 
 API:
@@ -48,324 +36,50 @@ router.get(
       }
 
       /* =========================================
-         GET XML
+         DATABASE QUERY
       ========================================= */
 
-      const xml =
-        getGroupSummaryDRXML(
-          company
-        );
-
-      /* =========================================
-         SEND TO TALLY
-      ========================================= */
-
-      const responseXML =
-        await sendToTally(xml);
-
-      /* =========================================
-         PARSE XML
-      ========================================= */
-
-      const parsed =
-        parseXML(responseXML);
-
-      const collection =
-        parsed?.ENVELOPE?.BODY?.DATA
-          ?.COLLECTION?.LEDGER || [];
-
-      const list =
-        Array.isArray(collection)
-          ? collection
-          : [collection];
-
-      /* =========================================
-         CLEAN FUNCTION
-      ========================================= */
-
-      const clean = (value) => {
-
-        if (!value) return null;
-
-        return String(value)
-
-          .replace(
-            /&#13;&#10;|\r|\n/g,
-            ""
-          )
-
-          .replace(/,+/g, ",")
-
-          .replace(/\s+,/g, ",")
-
-          .replace(/�/g, "")
-
-          .replace(/\s+/g, " ")
-
-          .trim();
-
-      };
-
-      /* =========================================
-         CLEAN BALANCE FUNCTION
-      ========================================= */
-
-      const cleanBalance = (value) => {
-
-        if (!value) return null;
-
-        const matches =
-          String(value).match(
-            /-?\d+(\.\d+)?/g
-          );
-
-        if (!matches) return null;
-
-        return matches[
-          matches.length - 1
-        ];
-
-      };
-
-      /* =========================================
-         BALANCE TYPE FUNCTION
-      ========================================= */
-
-      const getBalanceType = (value) => {
-
-        const amount =
-          cleanBalance(value);
-
-        if (!amount)
-          return "Dr";
-
-        return String(amount)
-          .startsWith("-")
-            ? "Cr"
-            : "Dr";
-
-      };
-
-      /* =========================================
-         FINAL RESPONSE
-      ========================================= */
-
-      const data =
-        list.map((ledger) => ({
-
-          company_name:
-            company,
-
-         ledger_name:
-  clean(
-    ledger?.$?.NAME ||
-    ledger?.["@NAME"] ||
-    ledger?.NAME ||
-    ledger?.MAILINGNAME ||
-    "Unknown Ledger"
-  ),
-
-          parent_group:
-            "Sundry Debtors",
-
-     address:
-  Array.isArray(
-    ledger?.["ADDRESS.LIST"]?.ADDRESS
-  )
-    ? ledger["ADDRESS.LIST"]
-        .ADDRESS
-        .map(a => clean(a))
-        .filter(Boolean)
-        .join(", ")
-        .replace(/,+/g, ", ")
-        .replace(/\s+/g, " ")
-        .trim()
-    : clean(
-        ledger?.["ADDRESS.LIST"]?.ADDRESS
-      ),
-          alias:
-            clean(
-              ledger?.$?.ALIAS ||
-              ledger?.["@ALIAS"] ||
-              ledger?.ALIAS
-            ),
-
-          state:
-            clean(
-              ledger?.STATENAME ||
-              ledger?.STATE ||
-              ledger?.LEDSTATENAME
-            ),
-
-          country:
-            clean(
-              ledger?.COUNTRYNAME ||
-              ledger?.LEDCOUNTRYNAME
-            ),
-
-          pincode:
-            clean(
-              ledger?.PINCODE
-            ),
-
-          pan_number:
-            clean(
-              ledger?.INCOMETAXNUMBER
-            ),
-
-          gst_number:
-            clean(
-              ledger?.PARTYGSTIN
-            ),
-
-          gst_registration_type:
-            clean(
-              ledger?.GSTREGISTRATIONTYPE
-            ),
-
-          contact_name:
-            clean(
-              ledger?.CONTACTPERSON
-            ),
-
-          phone_number:
-            clean(
-              ledger?.PHONE ||
-              ledger?.LEDGERPHONE
-            ),
-
-          primary_phone_number:
-            clean(
-              ledger?.MOBILE ||
-              ledger?.LEDGERMOBILE
-            ),
-
-          fax_no:
-            clean(
-              ledger?.FAX
-            ),
-
-          email:
-            clean(
-              ledger?.EMAIL ||
-              ledger?.LEDGEREMAIL
-            ),
-
-          opening_balance:
-            cleanBalance(
-              ledger?.OPENINGBALANCE
-            ),
-
-          closing_balance:
-            cleanBalance(
-              ledger?.CLOSINGBALANCE
-            ),
-
-          opening_balance_type:
-            getBalanceType(
-              ledger?.OPENINGBALANCE
-            ),
-
-          closing_balance_type:
-            getBalanceType(
-              ledger?.CLOSINGBALANCE
-            )
-
-        }));
-
-      /* =========================================
-         SAVE INTO DATABASE
-      ========================================= */
-
-      for (const item of data) {
-
+      const result =
         await pool.query(
+
           `
-          INSERT INTO
-          app.sundry_debtors (
+          SELECT *
 
-            company_name,
-            ledger_name,
-            parent_group,
-            address,
-            alias,
-            state,
-            country,
-            pincode,
-            pan_number,
-            gst_number,
-            gst_registration_type,
-            contact_name,
-            phone_number,
-            primary_phone_number,
-            fax_no,
-            email,
-            opening_balance,
-            closing_balance,
-            opening_balance_type,
-            closing_balance_type
+          FROM app.sundry_debtors
 
-          )
+          WHERE company_name = $1
 
-          VALUES (
-
-            $1,$2,$3,$4,$5,
-            $6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,
-            $16,$17,$18,$19,$20
-
-          )
+          ORDER BY ledger_name ASC
           `,
-          [
 
-            item.company_name,
-            item.ledger_name,
-            item.parent_group,
-            item.address,
-            item.alias,
-            item.state,
-            item.country,
-            item.pincode,
-            item.pan_number,
-            item.gst_number,
-            item.gst_registration_type,
-            item.contact_name,
-            item.phone_number,
-            item.primary_phone_number,
-            item.fax_no,
-            item.email,
-            item.opening_balance,
-            item.closing_balance,
-            item.opening_balance_type,
-            item.closing_balance_type
+          [company]
 
-          ]
         );
 
-      }
+      /* =========================================
+         RESPONSE
+      ========================================= */
 
       return res.status(200).json({
 
         status: "success",
 
-        source: "tally",
-
-        message:
-          "Sundry debtors fetched successfully and saved into database",
+        source: "database",
 
         company,
 
         total:
-          data.length,
+          result.rows.length,
 
-        data
+        data:
+          result.rows
 
       });
 
     } catch (err) {
 
       console.log(
-        "❌ GROUP SUMMARY SD ERROR:",
+        "❌ GROUP SUMMARY SD DB ERROR:",
         err.message
       );
 

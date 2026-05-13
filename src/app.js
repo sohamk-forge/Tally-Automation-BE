@@ -32,6 +32,9 @@ from "./api/groupSummaryBank.routes.js";
 import ledgerVouchersRoutes
 from "./api/ledgerVouchers.routes.js";
 
+import payableDebtorsRoutes
+from "./api/payableDebtors.routes.js";
+
 const app = express();
 
 /* =================================
@@ -103,6 +106,10 @@ app.use(
 app.use(
   "/api",
   parentGroupsRoutes
+);
+app.use(
+  "/api",
+  payableDebtorsRoutes
 );
 
 /* =================================

@@ -11,10 +11,10 @@ import {
   getGroupSummaryDRXML,
   getGroupSummaryBankXML,
   getLedgerVouchersXML,
-  getParentGroupsXML
+  getParentGroupsXML,
+  getGroupBalanceXML
 
 } from "../services/xmlBuilder.js";
-
 import { parseXML } from "../services/parser.js";
 
 const router = express.Router();
@@ -1857,12 +1857,11 @@ router.get(
 
       }
 
-      /* =========================================
-         STORE IN DATABASE
-      ========================================= */
 /* =========================================
-   DELETE OLD RECORDS
+   STORE IN DATABASE
 ========================================= */
+
+/* ---- DELETE OLD RECORDS ---- */
 
 await pool.query(
 
@@ -1874,53 +1873,106 @@ await pool.query(
   [company]
 
 );
-      for (const voucher of filteredData) {
 
-      await pool.query(
+/* ---- INSERT NEW RECORDS ---- */
 
-  `
-  INSERT INTO app.vouchers (
+for (const voucher of filteredData) {
 
-    company_name,
-    voucher_date,
-    voucher_type,
-    voucher_number,
-    party_ledger_name,
-    narration
+  /* =====================================
+     AMOUNT CALCULATION
+  ===================================== */
 
-  )
+  const firstLedger =
 
-  VALUES (
+    voucher.ledger_entries?.[0];
 
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6
+  let amount = 0;
 
-  )
-  `,
+  if (firstLedger?.AMOUNT) {
 
-  [
+    amount = Number(
+      firstLedger.AMOUNT
+    );
 
-    voucher.company_name,
+  }
 
-    voucher.date,
+  const debit_amount =
 
-    voucher.voucher_type,
+    amount > 0
+      ? amount
+      : 0;
 
-    voucher.voucher_number,
+  const credit_amount =
 
-    voucher.party_ledger_name,
+    amount < 0
+      ? Math.abs(amount)
+      : 0;
 
-    voucher.narration
+  const balance =
+    amount;
 
-  ]
+  /* =====================================
+     INSERT QUERY
+  ===================================== */
 
-);
+  await pool.query(
 
-      }
+    `
+    INSERT INTO app.vouchers (
+
+      company_name,
+      voucher_date,
+      voucher_type,
+      voucher_number,
+      party_ledger_name,
+      narration,
+      debit_amount,
+      credit_amount,
+      balance
+
+    )
+
+    VALUES (
+
+      $1,
+      $2,
+      $3,
+      $4,
+      $5,
+      $6,
+      $7,
+      $8,
+      $9
+
+    )
+    `,
+
+    [
+
+      voucher.company_name,
+
+      voucher.date,
+
+      voucher.voucher_type,
+
+      voucher.voucher_number,
+
+      voucher.party_ledger_name,
+
+      voucher.narration,
+
+      debit_amount,
+
+      credit_amount,
+
+      balance
+
+    ]
+
+  );
+
+}
+      
 
       /* =========================================
          SUCCESS RESPONSE
@@ -2171,7 +2223,7 @@ const parentGroups =
          INSERT NEW GROUPS
       ========================================= */
 
-    for (const group of parentGroups) {
+for (const group of parentGroups) {
 
   await pool.query(
 
@@ -2200,8 +2252,7 @@ const parentGroups =
 
   );
 
-}
-      /* =========================================
+}/* =========================================
          SUCCESS RESPONSE
       ========================================= */
 
@@ -2243,5 +2294,336 @@ const parentGroups =
     }
 
   }
+);
+
+/* ===================================================
+   PAYABLE + RECEIVABLE SYNC
+=================================================== */
+
+router.get(
+
+  "/payable-debtors",
+
+  async (req, res) => {
+
+    try {
+
+      const company =
+        req.query.company;
+
+      if (!company) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "company query parameter required"
+
+        });
+
+      }
+
+      /* =========================================
+         CLEAN
+      ========================================= */
+
+      const clean = (value) => {
+
+        if (
+
+          value === null ||
+
+          value === undefined
+
+        ) {
+
+          return null;
+
+        }
+
+        return String(value)
+
+          .replace(
+            /&#13;&#10;|\r|\n/g,
+            ""
+          )
+
+          .replace(/�/g, "")
+
+          .trim();
+
+      };
+
+      /* =========================================
+         AMOUNT PARSER
+      ========================================= */
+
+      const parseAmount = (value) => {
+
+        if (!value) {
+
+          return 0;
+
+        }
+
+        const matches =
+
+          String(value)
+
+            .replace(/,/g, "")
+
+            .match(/-?\d+(\.\d+)?/g);
+
+        if (!matches?.length) {
+
+          return 0;
+
+        }
+
+        return Number(
+
+          matches[
+            matches.length - 1
+          ]
+
+        );
+
+      };
+
+      /* =========================================
+         COMMON FUNCTION
+      ========================================= */
+
+      const getGroupData = async (
+
+        groupName
+
+      ) => {
+
+        const xml =
+
+          getGroupBalanceXML(
+
+            company,
+            groupName
+
+          );
+
+        const responseXML =
+
+          await sendToTally(
+            xml
+          );
+
+        const parsed =
+
+          parseXML(
+            responseXML
+          );
+
+        const group =
+
+          parsed?.ENVELOPE
+            ?.BODY
+            ?.DATA
+            ?.TALLYMESSAGE
+            ?.GROUP;
+
+        return {
+
+          company_name:
+            company,
+
+          group_name:
+
+            clean(
+
+              group?.$?.NAME ||
+
+              group?.["@NAME"] ||
+
+              groupName
+
+            ),
+
+          parent_group:
+
+            clean(
+              group?.PARENT
+            ),
+
+          opening_balance:
+
+            parseAmount(
+              group?.OPENINGBALANCE
+            ),
+
+          closing_balance:
+
+            parseAmount(
+              group?.CLOSINGBALANCE
+            )
+
+        };
+
+      };
+
+      /* =========================================
+         GET BOTH
+      ========================================= */
+
+      const debtors =
+
+        await getGroupData(
+          "Sundry Debtors"
+        );
+
+      const creditors =
+
+        await getGroupData(
+          "Sundry Creditors"
+        );
+
+      /* =========================================
+         DELETE OLD RECORDS
+      ========================================= */
+
+      await pool.query(
+
+        `
+        DELETE FROM app.group_balances
+        WHERE company_name = $1
+        `,
+
+        [company]
+
+      );
+
+      /* =========================================
+         INSERT DEBTORS
+      ========================================= */
+
+      await pool.query(
+
+        `
+        INSERT INTO app.group_balances (
+
+          company_name,
+          group_name,
+          parent_group,
+          opening_balance,
+          closing_balance,
+          created_at,
+          updated_at
+
+        )
+
+        VALUES (
+
+          $1,$2,$3,$4,$5,
+          NOW(),
+          NOW()
+
+        )
+        `,
+
+        [
+
+          debtors.company_name,
+          debtors.group_name,
+          debtors.parent_group,
+          debtors.opening_balance,
+          debtors.closing_balance
+
+        ]
+
+      );
+
+      /* =========================================
+         INSERT CREDITORS
+      ========================================= */
+
+      await pool.query(
+
+        `
+        INSERT INTO app.group_balances (
+
+          company_name,
+          group_name,
+          parent_group,
+          opening_balance,
+          closing_balance,
+          created_at,
+          updated_at
+
+        )
+
+        VALUES (
+
+          $1,$2,$3,$4,$5,
+          NOW(),
+          NOW()
+
+        )
+        `,
+
+        [
+
+          creditors.company_name,
+          creditors.group_name,
+          creditors.parent_group,
+          creditors.opening_balance,
+          creditors.closing_balance
+
+        ]
+
+      );
+
+      /* =========================================
+         RESPONSE
+      ========================================= */
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "tally",
+
+        company,
+
+        data: {
+
+          debtors,
+
+          creditors
+
+        }
+
+      });
+
+    } catch (err) {
+
+      console.log(
+
+        "❌ GROUP BALANCE ERROR:",
+
+        err.message
+
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
+    }
+
+  }
+
 );
 export default router;
