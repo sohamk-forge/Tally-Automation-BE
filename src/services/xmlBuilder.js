@@ -462,35 +462,81 @@
   ) => {
 
     return `
-  <ENVELOPE>
+<ENVELOPE>
     <HEADER>
-      <VERSION>1</VERSION>
-      <TALLYREQUEST>Export</TALLYREQUEST>
-      <TYPE>Collection</TYPE>
-      <ID>GroupSummaryBank</ID>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>GroupSummaryBank</ID>
     </HEADER>
+
     <BODY>
-    <DESC>
-  <STATICVARIABLES>
-  <SVCURRENTCOMPANY>
-    ${company}
-  </SVCURRENTCOMPANY>
-          <SVEXPORTFORMAT> $$SysName:XML </SVEXPORTFORMAT>
-        </STATICVARIABLES>
-        <TDL>
-          <TDLMESSAGE>
-            <SYSTEM TYPE="Formulae" NAME="BankFilter"> $Parent = "Bank Accounts" </SYSTEM>
-            <COLLECTION NAME="GroupSummaryBank">
-              <TYPE>Ledger</TYPE>
-              <FILTERS> BankFilter </FILTERS>
-        <FETCH>NAME,PARENT,MAILINGNAME,ADDRESS,STATENAME,LEDSTATENAME,STATE,COUNTRYNAME,PINCODE,GSTIN,PARTYGSTIN,GSTREGISTRATIONTYPE,ISGSTAPPLICABLE,LEDGERGSTREGDETAILS.LIST,ACHOLDERNAME,BANKACNO,BANKACCOUNTNO,BANKACCOUNTNUMBER,ACNO,ACCOUNTNO,ACCOUNTNUMBER,BANKACNUMBER,BANKACCOUNT,IFSCODE,IFSCCODE,BANKNAME,BANKBRANCHNAME,BRANCHNAME,SWIFTCODE,BankAccHolderName,BankDetails,BankIBAN
-  </FETCH>
-            </COLLECTION>
-          </TDLMESSAGE>
-        </TDL>
-      </DESC>
+        <DESC>
+
+            <STATICVARIABLES>
+                <SVCURRENTCOMPANY>Venkateshwara Traders</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+
+            <TDL>
+                <TDLMESSAGE>
+
+                    <SYSTEM TYPE="Formulae" NAME="BankFilter">
+                        $Parent = "Bank OD A/c" OR $Parent = "Bank Accounts" OR $Parent = "Bank Accounts"
+                    </SYSTEM>
+
+                    <COLLECTION NAME="GroupSummaryBank">
+
+                        <TYPE>Ledger</TYPE>
+
+                        <FILTERS>BankFilter</FILTERS>
+
+                        <FETCH>
+                            NAME,
+                            PARENT,
+                            MAILINGNAME,
+                            ADDRESS,
+                            STATENAME,
+                            LEDSTATENAME,
+                            STATE,
+                            COUNTRYNAME,
+                            PINCODE,
+                            GSTIN,
+                            PARTYGSTIN,
+                            GSTREGISTRATIONTYPE,
+                            ISGSTAPPLICABLE,
+                            LEDGERGSTREGDETAILS.LIST,
+                            ACHOLDERNAME,
+                            BANKACNO,
+                            BANKACCOUNTNO,
+                            BANKACCOUNTNUMBER,
+                            ACNO,
+                            ACCOUNTNO,
+                            ACCOUNTNUMBER,
+                            BANKACNUMBER,
+                            BANKACCOUNT,
+                            IFSCODE,
+                            IFSCCODE,
+                            BANKNAME,
+                            BANKBRANCHNAME,
+                            BRANCHNAME,
+                            SWIFTCODE,
+                            BankAccHolderName,
+                            BankDetails,
+                            BankIBAN,
+                            OpeningBalance,
+                            ClosingBalance,
+                            ODLimit
+                        </FETCH>
+
+                    </COLLECTION>
+
+                </TDLMESSAGE>
+            </TDL>
+
+        </DESC>
     </BODY>
-  </ENVELOPE>
+</ENVELOPE>
   `;
 
   };
@@ -673,3 +719,73 @@
 `;
 
 }
+export const getGroupBalanceXML = (
+
+  company,
+  groupName
+
+) => {
+
+  return `
+
+<ENVELOPE>
+
+    <HEADER>
+
+        <VERSION>1</VERSION>
+
+        <TALLYREQUEST>
+            Export
+        </TALLYREQUEST>
+
+        <TYPE>
+            Object
+        </TYPE>
+
+        <SUBTYPE>
+            Group
+        </SUBTYPE>
+
+        <ID TYPE="Name">
+            ${groupName}
+        </ID>
+
+    </HEADER>
+
+    <BODY>
+
+        <DESC>
+
+            <STATICVARIABLES>
+
+                <SVEXPORTFORMAT>
+                    $$SysName:XML
+                </SVEXPORTFORMAT>
+
+                <SVCURRENTCOMPANY>
+                    ${company}
+                </SVCURRENTCOMPANY>
+
+            </STATICVARIABLES>
+
+            <FETCHLIST>
+
+                <FETCH>Name</FETCH>
+
+                <FETCH>Parent</FETCH>
+
+                <FETCH>ClosingBalance</FETCH>
+
+                <FETCH>OpeningBalance</FETCH>
+
+            </FETCHLIST>
+
+        </DESC>
+
+    </BODY>
+
+</ENVELOPE>
+
+  `;
+
+};

@@ -1,29 +1,28 @@
 import express from "express";
 
-import { sendToTally }
-from "../services/tallyClient.js";
-
-import pool
-from "../db/index.js";
-
-import {
-  getLedgerVouchersXML
-}
-from "../services/xmlBuilder.js";
-
-import {
-  parseXML
-}
-from "../services/parser.js";
+import pool from "../db/index.js";
 
 const router =
   express.Router();
 
 /* ===================================================
-   LEDGER VOUCHERS
+   LEDGER VOUCHERS DB API
+===================================================
+
+API:
+GET /api/ledger-vouchers
+
+Example:
+
+/api/ledger-vouchers
+?company=Venkateshwara Traders
+&fromDate=2020-04-01
+&toDate=2021-03-31
+
 =================================================== */
 
 router.get(
+
   "/ledger-vouchers",
 
   async (req, res) => {
@@ -54,9 +53,13 @@ router.get(
       ========================================= */
 
       if (
+
         !company ||
+
         !fromDate ||
+
         !toDate
+
       ) {
 
         return res.status(400).json({
@@ -71,324 +74,117 @@ router.get(
       }
 
       /* =========================================
-         XML
+         BASE QUERY
       ========================================= */
 
-      const xml =
-        getLedgerVouchersXML(
-          company,
-          fromDate,
-          toDate
-        );
+      let query =
+
+        `
+        SELECT
+
+          id,
+          company_name,
+          voucher_date,
+          voucher_type,
+          voucher_number,
+          party_ledger_name,
+          narration,
+          debit_amount,
+          credit_amount,
+          balance,
+          created_at,
+          updated_at
+
+        FROM app.vouchers
+
+        WHERE
+
+          company_name = $1
+
+          AND DATE(voucher_date)
+          BETWEEN $2 AND $3
+        `;
 
       /* =========================================
-         SEND TO TALLY
+         VALUES ARRAY
       ========================================= */
 
-      const responseXML =
-        await sendToTally(xml);
+      const values = [
+
+        company,
+        fromDate,
+        toDate
+
+      ];
+
+      let paramIndex = 4;
 
       /* =========================================
-         PARSE XML
+         VOUCHER TYPE FILTER
       ========================================= */
-
-      const parsed =
-        parseXML(responseXML);
-
-      /* =========================================
-         COLLECTION
-      ========================================= */
-
-      const collection =
-        parsed?.ENVELOPE?.BODY?.DATA
-          ?.COLLECTION?.VOUCHER || [];
-
-      const list =
-        Array.isArray(collection)
-          ? collection
-          : [collection];
-
-      /* =========================================
-         CLEAN FUNCTION
-      ========================================= */
-
-      const clean = (value) => {
-
-        if (
-          value === null ||
-          value === undefined
-        ) {
-
-          return null;
-
-        }
-
-        return String(value)
-
-          .replace(
-            /&#13;&#10;|\r|\n/g,
-            ""
-          )
-
-          .trim();
-
-      };
-
-      /* =========================================
-         DEEP CLEAN FUNCTION
-      ========================================= */
-
-      const deepClean = (obj) => {
-
-        if (
-          typeof obj === "string"
-        ) {
-
-          return obj
-
-            .replace(
-              /&#13;&#10;|\r|\n/g,
-              ""
-            )
-
-            .trim();
-
-        }
-
-        if (
-          Array.isArray(obj)
-        ) {
-
-          return obj.map(
-            deepClean
-          );
-
-        }
-
-        if (
-          obj &&
-          typeof obj === "object"
-        ) {
-
-          const cleaned = {};
-
-          for (const key in obj) {
-
-            cleaned[key] =
-              deepClean(
-                obj[key]
-              );
-
-          }
-
-          return cleaned;
-
-        }
-
-        return obj;
-
-      };
-
-      /* =========================================
-         FINAL DATA
-      ========================================= */
-
-      const data =
-
-        list
-
-          .map((voucher) => ({
-
-            company_name:
-              company,
-
-            date:
-
-              clean(
-                voucher?.DATE
-              )?.replace(
-
-                /(\d{4})(\d{2})(\d{2})/,
-
-                "$1-$2-$3"
-              ),
-
-            voucher_type:
-
-              clean(
-                voucher?.VOUCHERTYPENAME
-              ),
-
-            voucher_number:
-
-              clean(
-                voucher?.VOUCHERNUMBER
-              ),
-
-            party_ledger_name:
-
-              clean(
-                voucher?.PARTYLEDGERNAME
-              ),
-
-            narration:
-
-              clean(
-                voucher?.NARRATION
-              ),
-
-            ledger_entries:
-
-              (() => {
-
-                const entries =
-
-                  voucher?.[
-                    "ALLLEDGERENTRIES.LIST"
-                  ];
-
-                const normalized =
-
-                  Array.isArray(entries)
-
-                    ? entries
-
-                    : entries
-
-                    ? [entries]
-
-                    : [];
-
-                return deepClean(
-                  normalized
-                );
-
-              })()
-
-          }))
-
-          .filter(
-            (voucher) =>
-              voucher.voucher_number
-          );
-
-      /* =========================================
-         FILTERS
-      ========================================= */
-
-      let filteredData =
-        data;
-
-      /* ---- Voucher Type Filter ---- */
 
       if (voucherType) {
 
-        filteredData =
+        query +=
 
-          filteredData.filter(
-            (voucher) =>
+          `
+          AND LOWER(voucher_type)
+          LIKE LOWER($${paramIndex})
+          `;
 
-              voucher
-                .voucher_type
+        values.push(
+          `%${voucherType}%`
+        );
 
-                ?.toLowerCase()
-
-                .includes(
-
-                  voucherType
-                    .toLowerCase()
-
-                )
-          );
-
-      }
-
-      /* ---- Party Filter ---- */
-
-      if (party) {
-
-        filteredData =
-
-          filteredData.filter(
-            (voucher) =>
-
-              voucher
-                .party_ledger_name
-
-                ?.toLowerCase()
-
-                .includes(
-
-                  party
-                    .toLowerCase()
-
-                )
-          );
+        paramIndex++;
 
       }
 
       /* =========================================
-         STORE IN DATABASE
+         PARTY FILTER
       ========================================= */
 
-      for (const voucher of filteredData) {
+      if (party) {
+
+        query +=
+
+          `
+          AND LOWER(party_ledger_name)
+          LIKE LOWER($${paramIndex})
+          `;
+
+        values.push(
+          `%${party}%`
+        );
+
+        paramIndex++;
+
+      }
+
+      /* =========================================
+         ORDER BY
+      ========================================= */
+
+      query +=
+
+        `
+        ORDER BY
+        voucher_date DESC,
+        id DESC
+        `;
+
+      /* =========================================
+         EXECUTE QUERY
+      ========================================= */
+
+      const result =
 
         await pool.query(
 
-          `
-          INSERT INTO app.vouchers (
-
-            company_name,
-            voucher_date,
-            voucher_type,
-            voucher_number,
-            party_ledger_name,
-            narration
-
-          )
-
-          SELECT
-
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6
-
-          WHERE NOT EXISTS (
-
-            SELECT 1
-            FROM app.vouchers
-
-            WHERE
-
-              company_name = $1
-              AND voucher_type = $3
-              AND voucher_number = $4
-
-          )
-          `,
-
-          [
-
-            voucher.company_name,
-
-            voucher.date,
-
-            voucher.voucher_type,
-
-            voucher.voucher_number,
-
-            voucher.party_ledger_name,
-
-            voucher.narration
-
-          ]
+          query,
+          values
 
         );
-
-      }
 
       /* =========================================
          SUCCESS RESPONSE
@@ -398,7 +194,7 @@ router.get(
 
         status: "success",
 
-        source: "tally",
+        source: "database",
 
         company,
 
@@ -407,10 +203,10 @@ router.get(
         toDate,
 
         total:
-          filteredData.length,
+          result.rows.length,
 
         data:
-          filteredData
+          result.rows
 
       });
 
@@ -418,7 +214,7 @@ router.get(
 
       console.log(
 
-        "❌ LEDGER VOUCHER ERROR:",
+        "❌ LEDGER VOUCHER DB ERROR:",
 
         err.message
 
@@ -436,6 +232,7 @@ router.get(
     }
 
   }
+
 );
 
 export default router;

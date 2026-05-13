@@ -1,21 +1,11 @@
 import express from "express";
 
-import {
-  sendToTally
-} from "../services/tallyClient.js";
-
-import {
-  getGroupSummaryBankXML
-} from "../services/xmlBuilder.js";
-
-import {
-  parseXML
-} from "../services/parser.js";
+import pool from "../db/index.js";
 
 const router = express.Router();
 
 /* ===================================================
-   GROUP SUMMARY BANK API
+   GROUP SUMMARY BANK DB API
 ===================================================
 
 API:
@@ -46,179 +36,50 @@ router.get(
       }
 
       /* =========================================
-         GET XML
+         DATABASE QUERY
       ========================================= */
 
-      const xml =
-        getGroupSummaryBankXML(
-          company
+      const result =
+        await pool.query(
+
+          `
+          SELECT *
+
+          FROM app.bank_accounts
+
+          WHERE company_name = $1
+
+          ORDER BY ledger_name ASC
+          `,
+
+          [company]
+
         );
 
       /* =========================================
-         SEND TO TALLY
+         RESPONSE
       ========================================= */
-
-      const responseXML =
-        await sendToTally(xml);
-
-      /* =========================================
-         PARSE XML
-      ========================================= */
-
-      const parsed =
-        parseXML(responseXML);
-
-      const collection =
-        parsed?.ENVELOPE?.BODY?.DATA
-          ?.COLLECTION?.LEDGER || [];
-
-      const list =
-        Array.isArray(collection)
-          ? collection
-          : [collection];
-
-      /* =========================================
-         CLEAN FUNCTION
-      ========================================= */
-
-      const clean = (value) => {
-
-        if (!value) return null;
-
-        return String(value)
-
-          .replace(
-            /&#13;&#10;|\r|\n/g,
-            ""
-          )
-
-          .replace(/,+/g, ",")
-
-          .replace(/\s+,/g, ",")
-
-          .replace(/�/g, "")
-
-          .trim();
-
-      };
-
-      /* =========================================
-         FINAL RESPONSE
-      ========================================= */
-
-      const data =
-        list.map((ledger) => ({
-
-          company_name:
-            company,
-
-ledger_name:
-  clean(
-
-    ledger?.$?.NAME ||
-
-    ledger?.["@NAME"] ||
-
-    ledger?.NAME ||
-
-    ledger?.MAILINGNAME ||
-
-    ledger?.["LANGUAGENAME.LIST"]
-      ?.["NAME.LIST"]
-      ?.NAME
-
-  ),
-          parent_group:
-            "Bank Accounts",
-account_holder_name:
-  clean(
-    ledger?.BANKACCHOLDERNAME
-  ),
-
-account_number:
-  clean(
-    ledger?.BANKDETAILS
-  ),
-
-         ifsc_code:
-  clean(
-    ledger?.IFSCODE
-  ),
-
-          swift_code:
-            clean(
-              ledger?.SWIFTCODE
-            ),
-
-   
-
-         branch:
-  clean(
-    ledger?.BRANCHNAME
-  ),
-
-       
-
-          address:
-            Array.isArray(
-              ledger?.["ADDRESS.LIST"]?.ADDRESS
-            )
-              ? ledger["ADDRESS.LIST"]
-                  .ADDRESS
-                  .map(a => clean(a))
-                  .filter(Boolean)
-                  .join(", ")
-                  .replace(
-                    /,\s*,/g,
-                    ", "
-                  )
-              : clean(
-                  ledger?.["ADDRESS.LIST"]?.ADDRESS
-                ),
-
-          state:
-            clean(
-              ledger?.STATENAME ||
-              ledger?.STATE ||
-              ledger?.LEDSTATENAME
-            ),
-
-          country:
-  clean(
-    ledger?.COUNTRYNAME
-  ),
-
-          pincode:
-            clean(
-              ledger?.PINCODE
-            ),
-
-
-
-        }));
 
       return res.status(200).json({
 
         status: "success",
 
-        source: "tally",
-
-        message:
-          "Bank accounts fetched successfully",
+        source: "database",
 
         company,
 
         total:
-          data.length,
+          result.rows.length,
 
-        data
+        data:
+          result.rows
 
       });
 
     } catch (err) {
 
       console.log(
-        "❌ GROUP SUMMARY BANK ERROR:",
+        "❌ GROUP SUMMARY BANK DB ERROR:",
         err.message
       );
 
