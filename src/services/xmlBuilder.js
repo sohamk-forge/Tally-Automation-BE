@@ -474,7 +474,7 @@
         <DESC>
 
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>Venkateshwara Traders</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
 

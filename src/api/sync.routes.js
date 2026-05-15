@@ -1317,9 +1317,24 @@ router.get(
 
 };
 
-/* =========================================
-   DEBUG LOG
-========================================= */
+const cleanBalance = (value) => {
+
+  if (!value) return null;
+
+  const cleaned =
+    String(value)
+      .replace(/[^\d.-]/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean);
+
+  return cleaned.length
+    ? cleaned[
+        cleaned.length - 1
+      ]
+    : null;
+
+};
 
 
 
@@ -1380,6 +1395,17 @@ ifsc_code:
     ledger?.BRANCHNAME
   ),
 
+   opening_balance:
+            cleanBalance(
+              ledger?.OPENINGBALANCE
+            ),
+
+          closing_balance:
+            cleanBalance(
+              ledger?.CLOSINGBALANCE
+            ),
+
+       
 
   
 
@@ -1419,6 +1445,8 @@ ifsc_code:
 
 
   }));
+  
+
   /* =========================================
    DELETE OLD RECORDS
 ========================================= */

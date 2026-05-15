@@ -14,32 +14,19 @@ GET /api/group-summary-bank
 =================================================== */
 
 router.get(
+
   "/",
+
   async (req, res) => {
 
     try {
-
-      const company =
-        req.query.company;
-
-      if (!company) {
-
-        return res.status(400).json({
-
-          status: "error",
-
-          message:
-            "company query parameter required"
-
-        });
-
-      }
 
       /* =========================================
          DATABASE QUERY
       ========================================= */
 
       const result =
+
         await pool.query(
 
           `
@@ -47,13 +34,8 @@ router.get(
 
           FROM app.bank_accounts
 
-          WHERE company_name = $1
-
           ORDER BY ledger_name ASC
-          `,
-
-          [company]
-
+          `
         );
 
       /* =========================================
@@ -66,8 +48,6 @@ router.get(
 
         source: "database",
 
-        company,
-
         total:
           result.rows.length,
 
@@ -79,8 +59,11 @@ router.get(
     } catch (err) {
 
       console.log(
+
         "❌ GROUP SUMMARY BANK DB ERROR:",
+
         err.message
+
       );
 
       return res.status(500).json({
@@ -95,6 +78,7 @@ router.get(
     }
 
   }
+
 );
 
 export default router;
