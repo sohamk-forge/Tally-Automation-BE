@@ -1,5 +1,5 @@
-exports.up = function(knex) {
-  return knex.schema.createTable('vouchers', function(table) {
+export async function up(knex) {
+  await knex.schema.createTable('vouchers', (table) => {
     table.increments('id').primary();
     table.string('company_name');
     table.string('voucher_type');
@@ -9,8 +9,8 @@ exports.up = function(knex) {
     table.decimal('amount', 12, 2);
     table.timestamp('created_at').defaultTo(knex.fn.now());
   });
-};
+}
 
-exports.down = function(knex) {
-  return knex.schema.dropTableIfExists('vouchers');
-};
+export async function down(knex) {
+  await knex.schema.dropTableIfExists('vouchers');
+}

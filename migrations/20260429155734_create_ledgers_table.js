@@ -1,13 +1,13 @@
-exports.up = function(knex) {
-  return knex.schema.createTable('ledgers', function(table) {
+export async function up(knex) {
+  await knex.schema.createTable('ledgers', (table) => {
     table.increments('id').primary();
     table.string('company_name');
     table.string('ledger_name');
     table.string('parent_group');
     table.timestamp('created_at').defaultTo(knex.fn.now());
   });
-};
+}
 
-exports.down = function(knex) {
-  return knex.schema.dropTableIfExists('ledgers');
-};
+export async function down(knex) {
+  await knex.schema.dropTableIfExists('ledgers');
+}
