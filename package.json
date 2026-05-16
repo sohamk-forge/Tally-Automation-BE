@@ -11,7 +11,8 @@
     "migrate:status": "knex migrate:status",
     "migrate:make": "knex migrate:make",
     "seed:run": "knex seed:run",
-    "db:reset": "npm run migrate:rollback && npm run migrate:latest"
+    "db:reset": "npm run migrate:rollback && npm run migrate:latest",
+    "deploy": "git pull && npm install && npm run migrate:latest && pm2 reload tally-backend --update-env || pm2 start src/server.js --name tally-backend"
   },
   "dependencies": {
     "express": "^4.18.0",
