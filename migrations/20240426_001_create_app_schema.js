@@ -1,7 +1,7 @@
-exports.up = function(knex) {
-  return knex.raw('CREATE SCHEMA IF NOT EXISTS app');
+export async function up(knex) {
+  await knex.schema.createSchemaIfNotExists('app');
 };
 
-exports.down = function(knex) {
-  return knex.raw('DROP SCHEMA IF EXISTS app CASCADE');
+export async function down(knex) {
+  await knex.schema.dropSchemaIfExists('app', true);
 };

@@ -1,11 +1,11 @@
-exports.up = function(knex) {
-  return knex.schema.alterTable('users', function(table) {
+export async function up(knex) {
+  await knex.schema.withSchema('app').table('users', (table) => {
     table.string('phone').nullable();
   });
 };
 
-exports.down = function(knex) {
-  return knex.schema.alterTable('users', function(table) {
+export async function down(knex) {
+  await knex.schema.withSchema('app').table('users', (table) => {
     table.dropColumn('phone');
   });
 };
