@@ -326,12 +326,71 @@ router.get("/companies", async (req, res) => {
     
     await client.query("COMMIT");
     
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Companies synced successfully",
-      summary: { inserted, updated, ignored, total: uniqueCompanies.size }
-    });
+   return res.status(200).json({
+
+  status: "success",
+
+  source: "tally",
+
+  message:
+    "Companies synced successfully",
+
+  summary: {
+
+    inserted,
+
+    updated,
+
+    ignored,
+
+    total:
+      uniqueCompanies.size
+
+  },
+
+  data:
+
+    Array.from(
+
+      uniqueCompanies.values()
+
+    ).map((item) => ({
+
+      name:
+        clean(item?.NAME),
+
+      guid:
+        item?.GUID || null,
+
+      master_id:
+        item?.MASTERID || null,
+
+      alter_id:
+        item?.ALTERID || null,
+
+      financial_year_start:
+
+        item?.BOOKSFROM
+
+          ? String(
+              item.BOOKSFROM
+            ).slice(0, 4)
+
+          : null,
+
+      financial_year_end:
+
+        item?.ENDINGAT
+
+          ? String(
+              item.ENDINGAT
+            ).slice(0, 4)
+
+          : null
+
+    }))
+
+});
   } catch (err) {
     await client.query("ROLLBACK");
     console.log("❌ COMPANY SYNC ERROR:", err.message);
@@ -906,39 +965,114 @@ router.get("/voucher-sync", async (req, res) => {
         if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) continue;
 
         /* ================================
+   DUPLICATE CHECK
+================================ */
+
+const existingVoucher =
+
+  await client.query(
+
+    `
+    SELECT id
+
+    FROM app.vouchers
+
+    WHERE company_id = $1
+    AND voucher_number = $2
+    AND voucher_date = $3
+    `,
+
+    [
+
+      companyId,
+
+      voucherNumber,
+
+      voucherDate
+
+    ]
+
+  );
+
+if (
+
+  existingVoucher.rows.length > 0
+
+) {
+
+  ignored++;
+
+  continue;
+
+}
+        /* ================================
            UPSERT
         ================================= */
-        const result = await upsertRecord(
-          "app.vouchers",
-          guid,
-          masterId,
-          alterId,
-          [
-            companyId,
-            company,
-            voucherDate,
-            voucherTypeName,
-            voucherNumber,
-            partyLedgerName,
-            clean(voucher?.NARRATION),
-            debitAmount,
-            creditAmount,
-            creditAmount - debitAmount
-          ],
-          [
-            "company_id",
-            "company_name",
-            "voucher_date",
-            "voucher_type",
-            "voucher_number",
-            "party_ledger_name",
-            "narration",
-            "debit_amount",
-            "credit_amount",
-            "balance"
-          ],
-          client
-        );
+const result = await upsertRecord(
+
+  "app.vouchers",
+
+  guid,
+
+  masterId,
+
+  alterId,
+
+  [
+
+    companyId,
+
+    company,
+
+    voucherDate,
+
+    voucherTypeName,
+
+    voucherNumber,
+
+    partyLedgerName,
+
+    clean(voucher?.NARRATION),
+
+    JSON.stringify(normalized),
+
+    debitAmount,
+
+    creditAmount,
+
+    creditAmount - debitAmount
+
+  ],
+
+  [
+
+    "company_id",
+
+    "company_name",
+
+    "voucher_date",
+
+    "voucher_type",
+
+    "voucher_number",
+
+    "party_ledger_name",
+
+    "narration",
+
+    "ledger_entries",
+
+    "debit_amount",
+
+    "credit_amount",
+
+    "balance"
+
+  ],
+
+  client
+
+);
 
         /* ================================
            COUNTERS
@@ -950,15 +1084,36 @@ router.get("/voucher-sync", async (req, res) => {
         } else {
           ignored++;
         }
-      } catch (loopError) {
-        failed++;
-        await createAuditLog({
-          action: "VOUCHER_SYNC_RECORD_FAILED",
-          entity: "voucher-sync",
-          metadata: { company, error: loopError.message, voucher: voucher?.VOUCHERNUMBER },
-          logType: "ERROR"
-        });
-      }
+} catch (loopError) {
+
+  failed++;
+
+  await createAuditLog({
+
+    action:
+      "VOUCHER_SYNC_RECORD_FAILED",
+
+    entity:
+      "voucher-sync",
+
+    metadata: {
+
+      company,
+
+      error:
+        loopError.message,
+
+      voucher:
+        voucher?.VOUCHERNUMBER
+
+    },
+
+    logType:
+      "ERROR"
+
+  });
+
+}
     }
 
     /* =====================================

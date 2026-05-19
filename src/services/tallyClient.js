@@ -16,7 +16,7 @@ export async function sendToTally(xml) {
           "Content-Type": "text/xml",
           "Connection": "close",
         },
-        timeout: 120000,
+       timeout: 600000,
         validateStatus: () => true
       }
     );

@@ -42,6 +42,13 @@ import profitLossRoutes
 from "./api/profitLoss.routes.js";
 
 /* =================================
+   NEW SALES ITEMS API
+================================= */
+
+import salesItemsRoutes
+from "./api/salesItems.routes.js";
+
+/* =================================
    MIDDLEWARE
 ================================= */
 
@@ -165,6 +172,15 @@ app.use(
 app.use(
   "/api",
   profitLossRoutes
+);
+
+/* =================================
+   SALES ITEMS APIs
+================================= */
+
+app.use(
+  "/api",
+  salesItemsRoutes
 );
 
 /* =================================
