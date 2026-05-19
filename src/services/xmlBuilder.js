@@ -789,3 +789,199 @@ export const getGroupBalanceXML = (
   `;
 
 };
+
+/* ==================================================
+   ALL PARENT GROUP DETAILS XML
+================================================== */
+
+export const getAllParentGroupDetailsXML = (
+
+  company,
+  groupName
+
+) => {
+
+  return `
+
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>
+      Export
+    </TALLYREQUEST>
+
+    <TYPE>
+      Collection
+    </TYPE>
+
+    <ID>
+      AllParentGroupDetails
+    </ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION
+            NAME="AllParentGroupDetails"
+          >
+
+            <TYPE>
+              Ledger
+            </TYPE>
+
+            <CHILDOF>
+              ${groupName}
+            </CHILDOF>
+
+            <FETCH>
+
+              NAME,
+
+              PARENT,
+
+              ADDRESS,
+
+              MAILINGNAME,
+
+              STATENAME,
+
+              STATE,
+
+              LEDSTATENAME,
+
+              COUNTRYNAME,
+
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+
+              LEDGERPHONE,
+
+              MOBILE,
+
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+
+              PARTYGSTIN,
+
+              GSTREGISTRATIONTYPE,
+
+              INCOMETAXNUMBER,
+
+              OPENINGBALANCE,
+
+              CLOSINGBALANCE
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+
+  `;
+
+};
+export const getProfitLossXML = (
+
+  company,
+
+  fromDate,
+
+  toDate
+
+) => `
+
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Data</TYPE>
+
+    <ID>Profit and Loss</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVFROMDATE>
+          ${fromDate}
+        </SVFROMDATE>
+
+        <SVTODATE>
+          ${toDate}
+        </SVTODATE>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <REPORT NAME="Profit and Loss">
+
+            <FORMS>Profit and Loss</FORMS>
+
+          </REPORT>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+
+`;

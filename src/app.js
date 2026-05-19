@@ -1,6 +1,10 @@
 import express from "express";
 import cors from "cors";
 
+/* =================================
+   ROUTES
+================================= */
+
 import db
 from "./api/db.routes.js";
 
@@ -16,9 +20,8 @@ from "./api/sync.routes.js";
 import parentGroupsRoutes
 from "./api/parentGroups.routes.js";
 
-/* =================================
-   GROUP SUMMARY APIs
-================================= */
+import allParentGroupsRoutes
+from "./api/allParentGroups.routes.js";
 
 import groupSummarySC
 from "./api/groupSummarySC.routes.js";
@@ -35,15 +38,38 @@ from "./api/ledgerVouchers.routes.js";
 import payableDebtorsRoutes
 from "./api/payableDebtors.routes.js";
 
-const app = express();
+import profitLossRoutes
+from "./api/profitLoss.routes.js";
 
 /* =================================
    MIDDLEWARE
 ================================= */
 
+import {
+  loggerMiddleware
+} from "./middleware/loggerMiddleware.js";
+
+/* =================================
+   EXPRESS APP
+================================= */
+
+const app = express();
+
+/* =================================
+   GLOBAL MIDDLEWARE
+================================= */
+
 app.use(cors());
 
 app.use(express.json());
+
+/* =================================
+   LOGGER MIDDLEWARE
+================================= */
+
+app.use(
+  loggerMiddleware
+);
 
 /* =================================
    DATABASE TEST API
@@ -73,7 +99,7 @@ app.use(
 );
 
 /* =================================
-   OLD SYNC APIs
+   SYNC APIs
 ================================= */
 
 app.use(
@@ -99,34 +125,73 @@ app.use(
   "/api/group-summary-bank",
   groupSummaryBank
 );
+
+/* =================================
+   LEDGER VOUCHER APIs
+================================= */
+
 app.use(
   "/api",
   ledgerVouchersRoutes
 );
+
+/* =================================
+   PARENT GROUP APIs
+================================= */
+
 app.use(
   "/api",
   parentGroupsRoutes
 );
+
+app.use(
+  "/api/all-parent-groups",
+  allParentGroupsRoutes
+);
+
+/* =================================
+   PAYABLE / DEBTOR APIs
+================================= */
+
 app.use(
   "/api",
   payableDebtorsRoutes
 );
 
 /* =================================
+   PROFIT LOSS APIs
+================================= */
+
+app.use(
+  "/api",
+  profitLossRoutes
+);
+
+/* =================================
    DEFAULT API
 ================================= */
 
-app.get("/", (req, res) => {
+app.get(
 
-  return res.json({
+  "/",
 
-    status: "success",
+  (req, res) => {
 
-    message:
-      "Tally Integration API Running"
+    return res.json({
 
-  });
+      status: "success",
 
-});
+      message:
+        "Tally Integration API Running"
+
+    });
+
+  }
+
+);
+
+/* =================================
+   EXPORT APP
+================================= */
 
 export default app;
