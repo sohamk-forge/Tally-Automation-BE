@@ -41,6 +41,9 @@ from "./api/payableDebtors.routes.js";
 import profitLossRoutes
 from "./api/profitLoss.routes.js";
 
+import stockGroupSummaryRoute
+from "./api/stockGroupSummary.js";
+
 /* =================================
    NEW SALES ITEMS API
 ================================= */
@@ -181,6 +184,11 @@ app.use(
 app.use(
   "/api",
   salesItemsRoutes
+);
+
+app.use(
+  "/api",
+  stockGroupSummaryRoute
 );
 
 /* =================================

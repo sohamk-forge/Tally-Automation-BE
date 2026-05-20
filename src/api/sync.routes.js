@@ -12,7 +12,8 @@ import {
   getParentGroupsXML,
   getGroupBalanceXML,
   getAllParentGroupDetailsXML,
-  getProfitLossXML
+  getProfitLossXML,
+    getStockGroupSummaryXML
 } from "../services/xmlBuilder.js";
 import { parseXML } from "../services/parser.js";
 import {
@@ -28,6 +29,7 @@ const router = express.Router();
 =================================================== */
 
 const allowedTables = [
+
   "app.companies",
   "app.ledgers",
   "app.sundry_creditors",
@@ -37,7 +39,9 @@ const allowedTables = [
   "app.parent_groups",
   "app.group_balances",
   "app.all_parent_groups",
-  "app.profit_loss"
+  "app.profit_loss",
+  "app.stock_group_summary"
+
 ];
 
 /* ===================================================
@@ -963,8 +967,7 @@ router.get("/voucher-sync", async (req, res) => {
         ================================= */
         if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) continue;
         if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) continue;
-
-        /* ================================
+/* ================================
    DUPLICATE CHECK
 ================================ */
 
@@ -994,96 +997,226 @@ const existingVoucher =
 
   );
 
-if (
+const voucherExists =
 
-  existingVoucher.rows.length > 0
+  existingVoucher.rows.length > 0;
 
-) {
+if (voucherExists) {
 
   ignored++;
 
-  continue;
+}
+
+/* ================================
+   UPSERT
+================================ */
+
+if (!voucherExists) {
+
+  const result = await upsertRecord(
+
+    "app.vouchers",
+
+    guid,
+
+    masterId,
+
+    alterId,
+
+    [
+
+      companyId,
+
+      company,
+
+      voucherDate,
+
+      voucherTypeName,
+
+      voucherNumber,
+
+      partyLedgerName,
+
+      clean(voucher?.NARRATION),
+
+      JSON.stringify(normalized),
+
+      debitAmount,
+
+      creditAmount,
+
+      creditAmount - debitAmount
+
+    ],
+
+    [
+
+      "company_id",
+
+      "company_name",
+
+      "voucher_date",
+
+      "voucher_type",
+
+      "voucher_number",
+
+      "party_ledger_name",
+
+      "narration",
+
+      "ledger_entries",
+
+      "debit_amount",
+
+      "credit_amount",
+
+      "balance"
+
+    ],
+
+    client
+
+  );
+
+  if (result.action === "inserted") {
+
+    inserted++;
+
+  } else if (result.action === "updated") {
+
+    updated++;
+
+  }
 
 }
-        /* ================================
-           UPSERT
-        ================================= */
-const result = await upsertRecord(
+/* ================================
+   SALES ITEMS INSERT
+================================ */
 
-  "app.vouchers",
+for (const entry of normalized) {
 
-  guid,
+  const inventoryAllocations =
 
-  masterId,
+    entry?.[
+      "INVENTORYALLOCATIONS.LIST"
+    ];
 
-  alterId,
+  const allocations =
 
-  [
+    Array.isArray(
+      inventoryAllocations
+    )
 
-    companyId,
+      ? inventoryAllocations
 
-    company,
+      : inventoryAllocations
 
-    voucherDate,
+      ? [inventoryAllocations]
 
-    voucherTypeName,
+      : [];
 
-    voucherNumber,
+  let cgst = 0;
+  let sgst = 0;
 
-    partyLedgerName,
+  for (const gstEntry of normalized) {
 
-    clean(voucher?.NARRATION),
+    const ledgerName =
 
-    JSON.stringify(normalized),
+      gstEntry?.LEDGERNAME || "";
 
-    debitAmount,
+    const amount = Math.abs(
 
-    creditAmount,
+      Number(
+        gstEntry?.AMOUNT || 0
+      )
 
-    creditAmount - debitAmount
+    );
 
-  ],
+    if (
 
-  [
+      ledgerName
+        .toLowerCase()
+        .includes("cgst")
 
-    "company_id",
+    ) {
 
-    "company_name",
+      cgst += amount;
 
-    "voucher_date",
+    }
 
-    "voucher_type",
+    if (
 
-    "voucher_number",
+      ledgerName
+        .toLowerCase()
+        .includes("sgst")
 
-    "party_ledger_name",
+    ) {
 
-    "narration",
+      sgst += amount;
 
-    "ledger_entries",
+    }
 
-    "debit_amount",
+  }
 
-    "credit_amount",
+  for (const item of allocations) {
 
-    "balance"
+    await client.query(
 
-  ],
+      `
+      INSERT INTO app.sales_items (
 
-  client
+        company_name,
 
-);
+        description,
 
-        /* ================================
-           COUNTERS
-        ================================= */
-        if (result.action === "inserted") {
-          inserted++;
-        } else if (result.action === "updated") {
-          updated++;
-        } else {
-          ignored++;
-        }
+        actual_quantity,
+
+        billed_quantity,
+
+        billing,
+
+        total_amount
+
+      )
+
+      VALUES (
+
+        $1, $2, $3,
+        $4, $5, $6
+
+      )
+      `,
+
+      [
+
+        company,
+
+        item?.STOCKITEMNAME || null,
+
+        item?.ACTUALQTY || null,
+
+        item?.BILLEDQTY || null,
+
+        Number(
+          (
+            cgst + sgst
+          ).toFixed(2)
+        ),
+
+        Math.abs(
+          creditAmount
+        )
+
+      ]
+
+    );
+
+  }
+
+}
+
+     
 } catch (loopError) {
 
   failed++;
@@ -1543,5 +1676,431 @@ router.get("/profit-loss-sync", async (req, res) => {
     client.release();
   }
 });
+
+/* ===================================================
+   STOCK GROUP SUMMARY SYNC
+=================================================== */
+
+router.get(
+
+  "/stock-group-summary-sync",
+
+  async (req, res) => {
+
+    /* =====================================
+       COMPANY
+    ===================================== */
+
+    const company =
+      req.query.company;
+
+    if (!company) {
+
+      return res.status(400).json({
+
+        status: "error",
+
+        message:
+          "company required"
+
+      });
+
+    }
+
+    /* =====================================
+       DB CLIENT
+    ===================================== */
+
+    const client =
+      await pool.connect();
+
+    try {
+
+      /* =====================================
+         BEGIN TRANSACTION
+      ===================================== */
+
+      await client.query("BEGIN");
+
+      /* =====================================
+         XML
+      ===================================== */
+
+      const xml =
+
+        getStockGroupSummaryXML(
+          company
+        );
+
+      /* =====================================
+         TALLY RESPONSE
+      ===================================== */
+
+      const responseXML =
+
+        await sendToTally(xml);
+
+      /* =====================================
+         XML PARSE
+      ===================================== */
+
+      const parsed =
+
+        await parseXML(
+          responseXML
+        );
+
+      /* =====================================
+         STOCK ITEMS
+      ===================================== */
+
+      const stockItems =
+
+        parsed?.ENVELOPE
+        ?.BODY
+        ?.DATA
+        ?.COLLECTION
+        ?.STOCKITEM || [];
+
+      const list =
+
+        Array.isArray(stockItems)
+
+          ? stockItems
+
+          : [stockItems];
+
+      /* =====================================
+         COUNTERS
+      ===================================== */
+
+      let inserted = 0;
+
+      let ignored = 0;
+
+      /* =====================================
+         LOOP
+      ===================================== */
+
+      for (const item of list) {
+
+        /* =================================
+           ITEM NAME
+        ================================= */
+
+        const itemName =
+
+          item?.NAME ||
+
+          item?.["@_NAME"] ||
+
+          item?.["$"]?.NAME ||
+
+          item?.["LANGUAGENAME.LIST"]
+            ?.["NAME.LIST"]
+            ?.NAME ||
+
+          null;
+
+        /* =================================
+           GROUP NAME
+        ================================= */
+
+        const groupName =
+
+          (item?.PARENT || "")
+            .replace("&#4;", "")
+            .trim();
+
+        /* =================================
+           QUANTITY
+        ================================= */
+
+        const quantity =
+
+          parseFloat(
+            item?.CLOSINGBALANCE || 0
+          ) || 0;
+
+        /* =================================
+           STOCK VALUE
+        ================================= */
+
+        const stockValue =
+
+          Math.abs(
+
+            parseFloat(
+              item?.CLOSINGVALUE || 0
+            )
+
+          ) || 0;
+
+        /* =================================
+           HSN CODE
+        ================================= */
+
+        let hsnCode = null;
+
+        const hsnList =
+
+          item?.["HSNDETAILS.LIST"] || [];
+
+        if (Array.isArray(hsnList)) {
+
+          const validHSN =
+
+            hsnList.find(
+
+              (hsn) => hsn?.HSNCODE
+
+            );
+
+          hsnCode =
+            validHSN?.HSNCODE || null;
+
+        } else {
+
+          hsnCode =
+            hsnList?.HSNCODE || null;
+
+        }
+
+        /* =================================
+           DUPLICATE CHECK
+        ================================= */
+
+        const existing =
+
+          await client.query(
+
+            `
+            SELECT id
+
+            FROM app.stock_group_summary
+
+            WHERE company_name = $1
+            AND item_name = $2
+            `,
+
+            [
+
+              company,
+
+              itemName
+
+            ]
+
+          );
+
+        if (
+
+          existing.rows.length > 0
+
+        ) {
+
+          ignored++;
+
+          continue;
+
+        }
+
+        /* =================================
+           INSERT
+        ================================= */
+
+        await client.query(
+
+          `
+          INSERT INTO
+          app.stock_group_summary (
+
+            company_name,
+
+            group_name,
+
+            item_name,
+
+            hsn_code,
+
+            quantity,
+
+            stock_value
+
+          )
+
+          VALUES (
+
+            $1, $2, $3, $4, $5, $6
+
+          )
+          `,
+
+          [
+
+            company,
+
+            groupName,
+
+            itemName,
+
+            hsnCode,
+
+            quantity,
+
+            stockValue
+
+          ]
+
+        );
+
+        inserted++;
+
+      }
+
+      /* =====================================
+         COMMIT
+      ===================================== */
+
+      await client.query("COMMIT");
+
+      /* =====================================
+         FINAL RESPONSE
+      ===================================== */
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "tally",
+
+        message:
+          "Stock group summary synced successfully",
+
+        company,
+
+        summary: {
+
+          inserted,
+
+          ignored,
+
+          total:
+            list.length
+
+        },
+
+        data:
+
+          list.map((item) => ({
+
+            group_name:
+
+              (item?.PARENT || "")
+                .replace("&#4;", "")
+                .trim(),
+
+            item_name:
+
+              item?.NAME ||
+
+              item?.["@_NAME"] ||
+
+              item?.["$"]?.NAME ||
+
+              item?.["LANGUAGENAME.LIST"]
+                ?.["NAME.LIST"]
+                ?.NAME ||
+
+              null,
+
+            hsn_code:
+
+              (() => {
+
+                const hsnList =
+
+                  item?.["HSNDETAILS.LIST"] || [];
+
+                if (Array.isArray(hsnList)) {
+
+                  const validHSN =
+
+                    hsnList.find(
+
+                      (hsn) => hsn?.HSNCODE
+
+                    );
+
+                  return (
+                    validHSN?.HSNCODE || null
+                  );
+
+                }
+
+                return (
+                  hsnList?.HSNCODE || null
+                );
+
+              })(),
+
+            quantity:
+
+              parseFloat(
+                item?.CLOSINGBALANCE || 0
+              ) || 0,
+
+            stock_value:
+
+              Math.abs(
+
+                parseFloat(
+                  item?.CLOSINGVALUE || 0
+                )
+
+              ) || 0
+
+          }))
+
+      });
+
+    } catch (err) {
+
+      /* =====================================
+         ROLLBACK
+      ===================================== */
+
+      await client.query("ROLLBACK");
+
+      console.log(
+
+        "❌ STOCK GROUP SUMMARY SYNC ERROR:",
+
+        err.message
+
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
+    } finally {
+
+      /* =====================================
+         RELEASE CLIENT
+      ===================================== */
+
+      client.release();
+
+    }
+
+  }
+
+);
 
 export default router;

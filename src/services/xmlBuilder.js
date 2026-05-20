@@ -985,3 +985,87 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
+
+export const getStockGroupSummaryXML = (
+  company
+) => {
+
+  return `
+
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>
+      Export
+    </TALLYREQUEST>
+
+    <TYPE>
+      Collection
+    </TYPE>
+
+    <ID>
+      StockItemSummary
+    </ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION
+            NAME="StockItemSummary"
+          >
+
+            <TYPE>
+              StockItem
+            </TYPE>
+
+            <FETCH>
+
+              NAME,
+
+              PARENT,
+
+              HSNDETAILS.LIST,
+
+              CLOSINGBALANCE,
+
+              CLOSINGVALUE
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+
+`;
+
+};

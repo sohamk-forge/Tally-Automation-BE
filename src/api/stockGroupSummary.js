@@ -1,30 +1,25 @@
 import express from "express";
 
-import pool from "../db/index.js";
+import pool
+from "../db/index.js";
 
 const router = express.Router();
 
-/* ===================================================
-   SALES ITEMS DB API
-===================================================
-
-API:
-GET /api/sales-items
-
-Example:
-
-/api/sales-items
-?company=Nutan Dairy
-
-=================================================== */
+/* =========================================
+   STOCK GROUP SUMMARY API
+========================================= */
 
 router.get(
 
-  "/sales-items",
+  "/stock/group-summary",
 
   async (req, res) => {
 
     try {
+
+      /* =====================================
+         COMPANY
+      ===================================== */
 
       const company =
         req.query.company;
@@ -42,6 +37,10 @@ router.get(
 
       }
 
+      /* =====================================
+         DATABASE
+      ===================================== */
+
       const result =
 
         await pool.query(
@@ -49,32 +48,37 @@ router.get(
           `
           SELECT
 
-            id,
-
             company_name,
 
-            description,
+            group_name,
 
-            actual_quantity,
+            item_name,
 
-            billed_quantity,
+            hsn_code,
 
-            billing,
+            quantity,
 
-            total_amount,
+            stock_value,
 
             created_at
 
-          FROM app.sales_items
+          FROM
+          app.stock_group_summary
 
-          WHERE company_name = $1
+          WHERE
+          company_name = $1
 
-          ORDER BY id DESC
+          ORDER BY
+          id DESC
           `,
 
           [company]
 
         );
+
+      /* =====================================
+         RESPONSE
+      ===================================== */
 
       return res.status(200).json({
 
@@ -96,7 +100,7 @@ router.get(
 
       console.log(
 
-        "❌ SALES ITEMS ERROR:",
+        "❌ STOCK GROUP SUMMARY API ERROR:",
 
         err.message
 
