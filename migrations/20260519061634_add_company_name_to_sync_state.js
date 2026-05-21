@@ -1,19 +1,26 @@
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.up = function(knex) {
-  return knex.schema.withSchema('app').table('sync_state', (table) => {
-    table.text('company_name').nullable();
-  });
-};
+export async function up(knex) {
+  const hasColumn = await knex.schema
+    .withSchema("app")
+    .hasColumn("sync_state", "company_name");
 
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.down = function(knex) {
-  return knex.schema.withSchema('app').table('sync_state', (table) => {
-    table.dropColumn('company_name');
-  });
+  if (!hasColumn) {
+    await knex.schema
+      .withSchema("app")
+      .alterTable("sync_state", function (table) {
+        table.text("company_name").nullable();
+      });
+  }
+};
+export async function down(knex) {
+    const hasColumn = await knex.schema
+    .withSchema("app")
+    .hasColumn("sync_state", "company_name");
+
+  if (hasColumn) {
+    await knex.schema
+      .withSchema("app")
+      .alterTable("sync_state", function (table) {
+        table.dropColumn("company_name");
+      });
+  }
 };

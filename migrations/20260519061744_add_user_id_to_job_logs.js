@@ -1,22 +1,26 @@
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.up = function(knex) {
-  return knex.schema.withSchema('app').table('job_logs', (table) => {
-    table.integer('user_id').unsigned().nullable()
-      .references('id')
-      .inTable('app.users')
-      .onDelete('CASCADE');
-  });
-};
+export async function up(knex) {
+  const hasColumn = await knex.schema
+    .withSchema("app")
+    .hasColumn("job_logs", "user_id");
 
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.down = function(knex) {
-  return knex.schema.withSchema('app').table('job_logs', (table) => {
-    table.dropColumn('user_id');
-  });
+  if (!hasColumn) {
+    await knex.schema
+      .withSchema("app")
+      .alterTable("job_logs", function (table) {
+        table.integer("user_id").nullable();
+      });
+  }
+};
+export async function down(knex) {
+  const hasColumn = await knex.schema
+    .withSchema("app")
+    .hasColumn("job_logs", "user_id");
+
+  if (hasColumn) {
+    await knex.schema
+      .withSchema("app")
+      .alterTable("job_logs", function (table) {
+        table.dropColumn("user_id");
+      });
+  }
 };

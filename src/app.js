@@ -6,7 +6,6 @@ import cors from "cors";
 /* =================================
    ROUTES
 ================================= */
-import authRoutes from "./modules/auth/auth.routes.js";
 
 import db
 from "./api/db.routes.js";
@@ -203,9 +202,6 @@ app.use(
   "/api",
   pushLedgerRoutes
 );
-
-app.use("/auth", authRoutes);
-
 /* =================================
    DEFAULT API
 ================================= */
@@ -228,7 +224,6 @@ app.get(
   }
 
 );
-
 
 /* =================================
    EXPORT APP
