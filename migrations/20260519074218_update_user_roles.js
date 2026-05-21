@@ -2,7 +2,7 @@
  * @param { import("knex").Knex } knex
  * @returns { Promise<void> }
  */
-export async function up(knex) {
+exports.up = async function(knex) {
   await knex.raw(`
     ALTER TABLE app.users
     DROP CONSTRAINT users_role_check;
@@ -19,7 +19,7 @@ export async function up(knex) {
  * @param { import("knex").Knex } knex
  * @returns { Promise<void> }
  */
-export async function down(knex) {
+exports.down = async function(knex) {
   await knex.raw(`
     ALTER TABLE app.users
     DROP CONSTRAINT users_role_check;
