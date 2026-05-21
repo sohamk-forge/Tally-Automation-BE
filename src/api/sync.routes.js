@@ -1604,79 +1604,296 @@ router.get("/all-parent-groups", async (req, res) => {
 =================================================== */
 
 router.get("/profit-loss-sync", async (req, res) => {
-  const company = req.query.company;
-  const fromDate = req.query.fromDate;
-  const toDate = req.query.toDate;
-  
-  if (!company || !fromDate || !toDate) {
-    return res.status(400).json({
-      status: "error",
-      message: "company, fromDate and toDate required"
-    });
-  }
-  
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    
-    // Get company_id using helper
-    const companyId = await getCompanyId(company, client);
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
-    
-    const xml = getProfitLossXML(company, fromDate, toDate);
-    const responseXML = await sendToTally(xml);
-    
-    const profitLossData = parseProfitLossFromXML(responseXML, company, fromDate, toDate);
-    
-    if (!profitLossData) {
-      throw new Error("Failed to parse profit loss data from Tally");
-    }
-    
-    const guid = `${companyId}_${fromDate}_${toDate}`;
-    const alterId = Date.now();
-    
-    const result = await upsertRecord(
-      "app.profit_loss", guid, null, alterId,
-      [
-        companyId, company, fromDate, toDate,
-        profitLossData.totalSales,
-        profitLossData.totalPurchase,
-        profitLossData.stockValue,
-        profitLossData.grossProfit,
-        profitLossData.netProfit,
-        profitLossData.profitMargin
-      ],
-      [
-        "company_id", "company_name", "from_date", "to_date", "total_sales", "total_purchase",
-        "stock_value", "gross_profit", "net_profit", "profit_margin"
-      ],
-      client
-    );
-    
-    await client.query("COMMIT");
-    
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Profit loss synced successfully",
-      company, fromDate, toDate,
-      summary: { action: result.action },
-      data: profitLossData
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ PROFIT LOSS SYNC ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  } finally {
-    client.release();
-  }
-});
 
+  const company =
+    req.query.company;
+
+  const fromDate =
+    req.query.fromDate;
+
+  const toDate =
+    req.query.toDate;
+
+  /* =========================================
+     VALIDATION
+  ========================================= */
+
+  if (
+
+    !company ||
+
+    !fromDate ||
+
+    !toDate
+
+  ) {
+
+    return res.status(400).json({
+
+      status: "error",
+
+      message:
+        "company, fromDate and toDate required"
+
+    });
+
+  }
+
+  const client =
+    await pool.connect();
+
+  try {
+
+    /* =====================================
+       BEGIN
+    ===================================== */
+
+    await client.query(
+      "BEGIN"
+    );
+
+    /* =====================================
+       GET COMPANY ID
+    ===================================== */
+
+    const companyId =
+      await getCompanyId(
+        company,
+        client
+      );
+
+    if (!companyId) {
+
+      throw new Error(
+        "Company not found"
+      );
+
+    }
+
+    /* =====================================
+       BUILD XML
+    ===================================== */
+
+    const xml =
+
+      getProfitLossXML(
+
+        company,
+
+        fromDate,
+
+        toDate
+
+      );
+
+    /* =====================================
+       SEND TO TALLY
+    ===================================== */
+
+    const responseXML =
+
+      await sendToTally(xml);
+
+    /* =====================================
+       DEBUG XML
+    ===================================== */
+
+    console.log(
+
+      "========== PROFIT LOSS XML =========="
+
+    );
+
+    console.log(
+      responseXML
+    );
+
+    console.log(
+
+      "====================================="
+
+    );
+
+    /* =====================================
+       PARSE XML
+    ===================================== */
+
+    const profitLossData =
+
+      parseProfitLossFromXML(
+
+        responseXML,
+
+        company,
+
+        fromDate,
+
+        toDate
+
+      );
+
+    /* =====================================
+       VALIDATION
+    ===================================== */
+
+    if (!profitLossData) {
+
+      throw new Error(
+
+        "Failed to parse profit loss data from Tally"
+
+      );
+
+    }
+
+    /* =====================================
+       UPSERT
+    ===================================== */
+
+    const guid =
+
+      `${companyId}_${fromDate}_${toDate}`;
+
+    const alterId =
+      Date.now();
+
+    const result =
+
+      await upsertRecord(
+
+        "app.profit_loss",
+
+        guid,
+
+        null,
+
+        alterId,
+
+        [
+
+          companyId,
+
+          company,
+
+          fromDate,
+
+          toDate,
+
+          profitLossData.totalSales,
+
+          profitLossData.totalPurchase,
+
+          profitLossData.stockValue,
+
+          profitLossData.grossProfit,
+
+          profitLossData.netProfit,
+
+          profitLossData.profitMargin
+
+        ],
+
+        [
+
+          "company_id",
+
+          "company_name",
+
+          "from_date",
+
+          "to_date",
+
+          "total_sales",
+
+          "total_purchase",
+
+          "stock_value",
+
+          "gross_profit",
+
+          "net_profit",
+
+          "profit_margin"
+
+        ],
+
+        client
+
+      );
+
+    /* =====================================
+       COMMIT
+    ===================================== */
+
+    await client.query(
+      "COMMIT"
+    );
+
+    /* =====================================
+       RESPONSE
+    ===================================== */
+
+    return res.status(200).json({
+
+      status: "success",
+
+      source: "tally",
+
+      message:
+        "Profit loss synced successfully",
+
+      company,
+
+      fromDate,
+
+      toDate,
+
+      summary: {
+
+        action:
+          result.action
+
+      },
+
+      data:
+        profitLossData
+
+    });
+
+  } catch (err) {
+
+    /* =====================================
+       ROLLBACK
+    ===================================== */
+
+    await client.query(
+      "ROLLBACK"
+    );
+
+    console.log(
+
+      "❌ PROFIT LOSS SYNC ERROR:",
+
+      err.message
+
+    );
+
+    return res.status(500).json({
+
+      status: "error",
+
+      message:
+        err.message
+
+    });
+
+  } finally {
+
+    client.release();
+
+  }
+
+});
 /* ===================================================
    STOCK GROUP SUMMARY SYNC
 =================================================== */
@@ -1776,7 +1993,7 @@ router.get(
 
       let inserted = 0;
 
-      let ignored = 0;
+      let updated = 0;
 
       /* =====================================
          LOOP
@@ -1828,12 +2045,8 @@ router.get(
 
         const stockValue =
 
-          Math.abs(
-
-            parseFloat(
-              item?.CLOSINGVALUE || 0
-            )
-
+          parseFloat(
+            item?.CLOSINGVALUE || 0
           ) || 0;
 
         /* =================================
@@ -1867,7 +2080,7 @@ router.get(
         }
 
         /* =================================
-           DUPLICATE CHECK
+           CHECK EXISTING
         ================================= */
 
         const existing =
@@ -1893,20 +2106,54 @@ router.get(
 
           );
 
+        /* =================================
+           UPDATE EXISTING
+        ================================= */
+
         if (
 
           existing.rows.length > 0
 
         ) {
 
-          ignored++;
+          await client.query(
+
+            `
+            UPDATE app.stock_group_summary
+
+            SET
+
+              group_name = $1,
+              hsn_code = $2,
+              quantity = $3,
+              stock_value = $4,
+              created_at = NOW()
+
+            WHERE company_name = $5
+            AND item_name = $6
+            `,
+
+            [
+
+              groupName,
+              hsnCode,
+              quantity,
+              stockValue,
+              company,
+              itemName
+
+            ]
+
+          );
+
+          updated++;
 
           continue;
 
         }
 
         /* =================================
-           INSERT
+           INSERT NEW
         ================================= */
 
         await client.query(
@@ -1983,7 +2230,7 @@ router.get(
 
           inserted,
 
-          ignored,
+          updated,
 
           total:
             list.length
@@ -2052,12 +2299,8 @@ router.get(
 
             stock_value:
 
-              Math.abs(
-
-                parseFloat(
-                  item?.CLOSINGVALUE || 0
-                )
-
+              parseFloat(
+                item?.CLOSINGVALUE || 0
               ) || 0
 
           }))

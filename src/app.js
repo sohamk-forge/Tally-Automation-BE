@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 
+
+
 /* =================================
    ROUTES
 ================================= */
@@ -59,6 +61,8 @@ import {
   loggerMiddleware
 } from "./middleware/loggerMiddleware.js";
 
+import pushLedgerRoutes
+from "./api/pushLedger.routes.js";
 /* =================================
    EXPRESS APP
 ================================= */
@@ -190,7 +194,14 @@ app.use(
   "/api",
   stockGroupSummaryRoute
 );
+/* =================================
+   PUSH LEDGER APIs
+================================= */
 
+app.use(
+  "/api",
+  pushLedgerRoutes
+);
 /* =================================
    DEFAULT API
 ================================= */

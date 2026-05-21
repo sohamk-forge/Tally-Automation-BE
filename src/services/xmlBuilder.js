@@ -940,7 +940,7 @@ export const getProfitLossXML = (
 
     <TYPE>Data</TYPE>
 
-    <ID>Profit and Loss</ID>
+    <ID>DynamicProfitLoss</ID>
 
   </HEADER>
 
@@ -950,17 +950,21 @@ export const getProfitLossXML = (
 
       <STATICVARIABLES>
 
-        <SVFROMDATE>
-          ${fromDate}
-        </SVFROMDATE>
-
-        <SVTODATE>
-          ${toDate}
-        </SVTODATE>
-
         <SVCURRENTCOMPANY>
           ${company}
         </SVCURRENTCOMPANY>
+
+        <SVFROMDATE TYPE="Date">
+          ${fromDate}
+        </SVFROMDATE>
+
+        <SVTODATE TYPE="Date">
+          ${toDate}
+        </SVTODATE>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
 
       </STATICVARIABLES>
 
@@ -968,11 +972,21 @@ export const getProfitLossXML = (
 
         <TDLMESSAGE>
 
-          <REPORT NAME="Profit and Loss">
+          <COLLECTION NAME="DynamicProfitLoss">
 
-            <FORMS>Profit and Loss</FORMS>
+            <TYPE>Group</TYPE>
 
-          </REPORT>
+            <FETCH>
+
+              Name,
+
+              Parent,
+
+              ClosingBalance
+
+            </FETCH>
+
+          </COLLECTION>
 
         </TDLMESSAGE>
 
