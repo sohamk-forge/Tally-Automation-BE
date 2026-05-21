@@ -1598,249 +1598,253 @@ router.get("/all-parent-groups", async (req, res) => {
     client.release();
   }
 });
-
 /* ===================================================
-   PROFIT LOSS SYNC (UPDATED WITH company_id)
+   PROFIT LOSS SYNC - COMPLETE FIXED VERSION
 =================================================== */
 
 router.get("/profit-loss-sync", async (req, res) => {
-
-  const company =
-    req.query.company;
-
-  const fromDate =
-    req.query.fromDate;
-
-  const toDate =
-    req.query.toDate;
+  const company = req.query.company;
+  const fromDate = req.query.fromDate;
+  const toDate = req.query.toDate;
 
   /* =========================================
      VALIDATION
   ========================================= */
-
-  if (
-
-    !company ||
-
-    !fromDate ||
-
-    !toDate
-
-  ) {
-
+  if (!company || !fromDate || !toDate) {
     return res.status(400).json({
-
       status: "error",
-
-      message:
-        "company, fromDate and toDate required"
-
+      message: "company, fromDate and toDate required"
     });
-
   }
 
-  const client =
-    await pool.connect();
+  const client = await pool.connect();
 
   try {
-
     /* =====================================
-       BEGIN
+       BEGIN TRANSACTION
     ===================================== */
-
-    await client.query(
-      "BEGIN"
-    );
+    await client.query("BEGIN");
 
     /* =====================================
        GET COMPANY ID
     ===================================== */
+    const companyResult = await client.query(
+      `SELECT id FROM app.companies WHERE name = $1`,
+      [company]
+    );
 
-    const companyId =
-      await getCompanyId(
-        company,
-        client
-      );
+    const companyId = companyResult.rows[0]?.id;
 
     if (!companyId) {
-
-      throw new Error(
-        "Company not found"
-      );
-
+      throw new Error("Company not found");
     }
 
     /* =====================================
-       BUILD XML
+       GENERATE XML REQUEST
     ===================================== */
+    const xml = getProfitLossXML(company, fromDate, toDate);
 
-    const xml =
-
-      getProfitLossXML(
-
-        company,
-
-        fromDate,
-
-        toDate
-
-      );
+    console.log("📤 SENDING XML REQUEST TO TALLY...");
 
     /* =====================================
        SEND TO TALLY
     ===================================== */
+    const responseXML = await sendToTally(xml);
 
-    const responseXML =
-
-      await sendToTally(xml);
-
-    /* =====================================
-       DEBUG XML
-    ===================================== */
-
-    console.log(
-
-      "========== PROFIT LOSS XML =========="
-
-    );
-
-    console.log(
-      responseXML
-    );
-
-    console.log(
-
-      "====================================="
-
-    );
+    console.log("📥 RAW XML RESPONSE:");
+    console.log(responseXML.substring(0, 500) + "...");
 
     /* =====================================
-       PARSE XML
+       PARSE XML RESPONSE
     ===================================== */
+    const parsed = await parseXML(responseXML);
 
-    const profitLossData =
-
-      parseProfitLossFromXML(
-
-        responseXML,
-
-        company,
-
-        fromDate,
-
-        toDate
-
-      );
+    // Log full parsed structure for debugging
+    console.log("🔍 PARSED STRUCTURE:");
+    console.log(JSON.stringify(parsed, null, 2).substring(0, 1000));
 
     /* =====================================
-       VALIDATION
+       EXTRACT GROUPS FROM PARSED XML
     ===================================== */
+    const groups = 
+      parsed?.ENVELOPE?.BODY?.[0]?.DATA?.[0]?.COLLECTION?.[0]?.GROUP || 
+      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP ||
+      [];
 
-    if (!profitLossData) {
+    const list = Array.isArray(groups) ? groups : [groups];
 
-      throw new Error(
+    console.log(`📊 FOUND ${list.length} GROUPS`);
 
-        "Failed to parse profit loss data from Tally"
+    /* =====================================
+       INITIALIZE VALUES
+    ===================================== */
+    let totalSales = 0;
+    let totalPurchase = 0;
+    let directExpenses = 0;
+    let directIncomes = 0;
+    let stockValue = 0;
+    let indirectIncome = 0;
+    let indirectExpenses = 0;
 
-      );
+    /* =====================================
+       PROCESS EACH GROUP
+    ===================================== */
+    for (const group of list) {
+      // Extract name (handle both array and single value)
+      let rawName = 
+        group?.["LANGUAGENAME.LIST"]?.[0]?.["NAME.LIST"]?.[0]?.NAME ||
+        group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+        group?.NAME;
 
+      // Convert to array for consistent handling
+      let names = [];
+      if (Array.isArray(rawName)) {
+        names = rawName;
+      } else if (rawName) {
+        names = [rawName];
+      }
+
+      // Extract balance (handle both array and single value)
+      let rawBalance = group?.CLOSINGBALANCE;
+      
+      if (Array.isArray(rawBalance)) {
+        rawBalance = rawBalance[0];
+      }
+
+      const balance = Math.abs(Number(rawBalance || 0));
+
+      console.log(`✓ GROUP: ${names.join(", ")} | BALANCE: ₹${balance.toLocaleString()}`);
+
+      /* =================================
+         CATEGORIZE BY GROUP NAME
+      ================================= */
+      
+      // Sales Accounts
+      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) {
+        totalSales = balance;
+      }
+      
+      // Purchase Accounts
+      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) {
+        totalPurchase = balance;
+      }
+      
+      // Direct Expenses
+      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) {
+        directExpenses = balance;
+      }
+      
+      // Direct Incomes
+      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) {
+        directIncomes = balance;
+      }
+      
+      // Stock-in-hand
+      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) {
+        stockValue = balance;
+      }
+      
+      // Indirect Incomes
+      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) {
+        indirectIncome = balance;
+      }
+      
+      // Indirect Expenses
+      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) {
+        indirectExpenses = balance;
+      }
     }
 
     /* =====================================
-       UPSERT
+       CALCULATE P&L METRICS
     ===================================== */
+    
+    const grossProfit = Number(
 
-    const guid =
+  (
 
-      `${companyId}_${fromDate}_${toDate}`;
+    totalSales -
 
-    const alterId =
-      Date.now();
+    totalPurchase -
 
-    const result =
+    directExpenses +
 
-      await upsertRecord(
+    directIncomes
 
-        "app.profit_loss",
+  ).toFixed(2)
 
-        guid,
+);
 
-        null,
+const netProfit = Number(
 
-        alterId,
+  (
 
-        [
+    grossProfit +
 
-          companyId,
+    indirectIncome -
 
-          company,
+    indirectExpenses
 
-          fromDate,
+  ).toFixed(2)
 
-          toDate,
+);
 
-          profitLossData.totalSales,
+const profitMargin = totalSales > 0
 
-          profitLossData.totalPurchase,
+  ? Number(
 
-          profitLossData.stockValue,
+      (
 
-          profitLossData.grossProfit,
+        netProfit /
 
-          profitLossData.netProfit,
+        totalSales
 
-          profitLossData.profitMargin
+      ) * 100
 
-        ],
+    ).toFixed(2)
 
-        [
-
-          "company_id",
-
-          "company_name",
-
-          "from_date",
-
-          "to_date",
-
-          "total_sales",
-
-          "total_purchase",
-
-          "stock_value",
-
-          "gross_profit",
-
-          "net_profit",
-
-          "profit_margin"
-
-        ],
-
-        client
-
-      );
+  : 0;
 
     /* =====================================
-       COMMIT
+       PREPARE DATA OBJECT
     ===================================== */
+    const profitLossData = {
+      totalSales,
+      totalPurchase,
+      directExpenses,
+      directIncomes,
+      stockValue,
+      indirectIncome,
+      indirectExpenses,
+      grossProfit,
+      netProfit,
+      profitMargin: Number(profitMargin)
+    };
 
-    await client.query(
-      "COMMIT"
-    );
+    console.log("💰 CALCULATED P&L:");
+    console.log(JSON.stringify(profitLossData, null, 2));
 
     /* =====================================
-       RESPONSE
+       UPSERT TO DATABASE
     ===================================== */
+    const guid = `${companyId}_${fromDate}_${toDate}`;
+    const alterId = Date.now();
 
-    return res.status(200).json({
+  const result =
 
-      status: "success",
+  await upsertRecord(
 
-      source: "tally",
+    "app.profit_loss",
 
-      message:
-        "Profit loss synced successfully",
+    guid,
+
+    null,
+
+    alterId,
+
+    [
+
+      companyId,
 
       company,
 
@@ -1848,52 +1852,106 @@ router.get("/profit-loss-sync", async (req, res) => {
 
       toDate,
 
-      summary: {
+      totalSales,
 
-        action:
-          result.action
+      totalPurchase,
 
+      stockValue,
+
+      grossProfit,
+
+      netProfit,
+
+      profitMargin
+
+    ],
+
+    [
+
+      "company_id",
+
+      "company_name",
+
+      "from_date",
+
+      "to_date",
+
+      "total_sales",
+
+      "total_purchase",
+
+      "stock_value",
+
+      "gross_profit",
+
+      "net_profit",
+
+      "profit_margin"
+
+    ],
+
+    client
+
+  );
+
+    /* =====================================
+       COMMIT TRANSACTION
+    ===================================== */
+    await client.query("COMMIT");
+
+    /* =====================================
+       SUCCESS RESPONSE
+    ===================================== */
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Profit loss synced successfully",
+      company,
+      fromDate,
+      toDate,
+      dateRange: {
+        from: formatDate(fromDate),
+        to: formatDate(toDate)
       },
-
-      data:
-        profitLossData
-
+      summary: {
+        action: result.action
+      },
+      data: profitLossData
     });
 
   } catch (err) {
-
     /* =====================================
-       ROLLBACK
+       ROLLBACK ON ERROR
     ===================================== */
+    await client.query("ROLLBACK");
 
-    await client.query(
-      "ROLLBACK"
-    );
-
-    console.log(
-
-      "❌ PROFIT LOSS SYNC ERROR:",
-
-      err.message
-
-    );
+    console.error("❌ PROFIT LOSS SYNC ERROR:", err.message);
+    console.error(err.stack);
 
     return res.status(500).json({
-
       status: "error",
-
-      message:
-        err.message
-
+      message: err.message,
+      detail: process.env.NODE_ENV === "development" ? err.stack : undefined
     });
 
   } finally {
-
     client.release();
-
   }
-
 });
+
+/* ===================================================
+   HELPER: FORMAT DATE FOR DISPLAY
+=================================================== */
+function formatDate(dateStr) {
+  // Convert YYYYMMDD to DD-MM-YYYY
+  if (dateStr.length === 8) {
+    const year = dateStr.substring(0, 4);
+    const month = dateStr.substring(4, 6);
+    const day = dateStr.substring(6, 8);
+    return `${day}-${month}-${year}`;
+  }
+  return dateStr;
+}
 /* ===================================================
    STOCK GROUP SUMMARY SYNC
 =================================================== */
@@ -1956,6 +2014,8 @@ router.get(
       const responseXML =
 
         await sendToTally(xml);
+
+        console.log(responseXML);
 
       /* =====================================
          XML PARSE
@@ -2029,25 +2089,34 @@ router.get(
             .replace("&#4;", "")
             .trim();
 
-        /* =================================
-           QUANTITY
-        ================================= */
+/* =================================
+   QUANTITY
+================================= */
 
-        const quantity =
+const quantity =
 
-          parseFloat(
-            item?.CLOSINGBALANCE || 0
-          ) || 0;
+  parseFloat(
+    item?.CLOSINGBALANCE || 0
+  ) || 0;
 
-        /* =================================
-           STOCK VALUE
-        ================================= */
+/* =================================
+   STOCK VALUE
+================================= */
 
-        const stockValue =
+const rawStockValue =
 
-          parseFloat(
-            item?.CLOSINGVALUE || 0
-          ) || 0;
+  parseFloat(
+    item?.CLOSINGVALUE || 0
+  ) || 0;
+
+/* =================================
+   FIX TALLY SIGN
+================================= */
+
+const stockValue =
+  rawStockValue * -1;
+
+
 
         /* =================================
            HSN CODE
@@ -2237,77 +2306,125 @@ router.get(
 
         },
 
-        data:
+ data:
 
-          list.map((item) => ({
+  list.map((item) => {
 
-            group_name:
+    /* =============================
+       QUANTITY
+    ============================= */
 
-              (item?.PARENT || "")
-                .replace("&#4;", "")
-                .trim(),
+    const quantity =
 
-            item_name:
+      parseFloat(
+        item?.CLOSINGBALANCE || 0
+      ) || 0;
 
-              item?.NAME ||
+    /* =============================
+       STOCK VALUE
+    ============================= */
 
-              item?.["@_NAME"] ||
+    const rawStockValue =
 
-              item?.["$"]?.NAME ||
+      parseFloat(
+        item?.CLOSINGVALUE || 0
+      ) || 0;
 
-              item?.["LANGUAGENAME.LIST"]
-                ?.["NAME.LIST"]
-                ?.NAME ||
+    /* =============================
+       FIX TALLY SIGN
+    ============================= */
 
-              null,
+    const stockValue =
+      rawStockValue * -1;
 
-            hsn_code:
+    /* =============================
+       DEBUG
+    ============================= */
 
-              (() => {
+    console.log({
 
-                const hsnList =
+      item_name:
 
-                  item?.["HSNDETAILS.LIST"] || [];
+        item?.NAME ||
 
-                if (Array.isArray(hsnList)) {
+        item?.["@_NAME"],
 
-                  const validHSN =
+      quantity,
 
-                    hsnList.find(
+      rawStockValue,
 
-                      (hsn) => hsn?.HSNCODE
+      finalStockValue:
+        stockValue
 
-                    );
+    });
 
-                  return (
-                    validHSN?.HSNCODE || null
-                  );
+    /* =============================
+       RETURN
+    ============================= */
 
-                }
+    return {
 
-                return (
-                  hsnList?.HSNCODE || null
-                );
+      group_name:
 
-              })(),
+        (item?.PARENT || "")
+          .replace("&#4;", "")
+          .trim(),
 
-            quantity:
+      item_name:
 
-              parseFloat(
-                item?.CLOSINGBALANCE || 0
-              ) || 0,
+        item?.NAME ||
 
-            stock_value:
+        item?.["@_NAME"] ||
 
-              parseFloat(
-                item?.CLOSINGVALUE || 0
-              ) || 0
+        item?.["$"]?.NAME ||
 
-          }))
+        item?.["LANGUAGENAME.LIST"]
+          ?.["NAME.LIST"]
+          ?.NAME ||
 
-      });
+        null,
 
-    } catch (err) {
+      hsn_code:
+
+        (() => {
+
+          const hsnList =
+
+            item?.["HSNDETAILS.LIST"] || [];
+
+          if (Array.isArray(hsnList)) {
+
+            const validHSN =
+
+              hsnList.find(
+
+                (hsn) => hsn?.HSNCODE
+
+              );
+
+            return (
+              validHSN?.HSNCODE || null
+            );
+
+          }
+
+          return (
+            hsnList?.HSNCODE || null
+          );
+
+        })(),
+
+      quantity,
+
+      stock_value: stockValue
+
+    };
+
+  })
+        });
+
+
+}catch (err) {
 
       /* =====================================
          ROLLBACK

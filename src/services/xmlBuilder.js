@@ -920,6 +920,9 @@ export const getAllParentGroupDetailsXML = (
   `;
 
 };
+/* ===================================================
+   PROFIT LOSS XML GENERATOR
+=================================================== */
 export const getProfitLossXML = (
 
   company,
@@ -938,9 +941,9 @@ export const getProfitLossXML = (
 
     <TALLYREQUEST>Export</TALLYREQUEST>
 
-    <TYPE>Data</TYPE>
+    <TYPE>Collection</TYPE>
 
-    <ID>DynamicProfitLoss</ID>
+    <ID>ProfitLossCollection</ID>
 
   </HEADER>
 
@@ -972,21 +975,39 @@ export const getProfitLossXML = (
 
         <TDLMESSAGE>
 
-          <COLLECTION NAME="DynamicProfitLoss">
+          <COLLECTION NAME="ProfitLossCollection">
 
             <TYPE>Group</TYPE>
 
             <FETCH>
-
               Name,
-
               Parent,
-
               ClosingBalance
-
             </FETCH>
 
+            <FILTERS>
+              IsProfitLossGroup
+            </FILTERS>
+
           </COLLECTION>
+
+          <SYSTEM TYPE="Formulae" NAME="IsProfitLossGroup">
+
+            $$IsEqual:$Name:"Sales Accounts"
+            OR
+            $$IsEqual:$Name:"Purchase Accounts"
+            OR
+            $$IsEqual:$Name:"Direct Expenses"
+            OR
+            $$IsEqual:$Name:"Direct Incomes"
+            OR
+            $$IsEqual:$Name:"Indirect Expenses"
+            OR
+            $$IsEqual:$Name:"Indirect Incomes"
+            OR
+            $$IsEqual:$Name:"Stock-in-hand"
+
+          </SYSTEM>
 
         </TDLMESSAGE>
 
@@ -999,7 +1020,6 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
-
 export const getStockGroupSummaryXML = (
   company
 ) => {
