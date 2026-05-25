@@ -95,7 +95,7 @@ router.get(
           created_at,
           updated_at
 
-        FROM app.vouchers
+    FROM app_test.vouchers
 
         WHERE
 

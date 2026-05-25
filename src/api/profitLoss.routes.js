@@ -76,7 +76,7 @@ router.get(
 
             updated_at
 
-          FROM app.profit_loss
+        FROM app_test.profit_loss
 
           WHERE LOWER(company_name)
           = LOWER($1)

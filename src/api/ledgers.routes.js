@@ -140,7 +140,7 @@ router.get("/", async (req, res) => {
 
         updated_at
 
-      FROM app.ledgers
+    FROM app_test.ledgers
 
       WHERE
 
@@ -188,7 +188,7 @@ router.get("/", async (req, res) => {
 
       SELECT COUNT(*) AS total
 
-      FROM app.ledgers
+    FROM app_test.ledgers
 
       WHERE
 

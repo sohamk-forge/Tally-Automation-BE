@@ -54,7 +54,7 @@ router.get(
           `
           SELECT group_name
 
-          FROM app.parent_groups
+        FROM app_test.parent_groups
 
           WHERE company_name = $1
 

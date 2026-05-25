@@ -30,13 +30,15 @@ export default {
 
     },
 
-    migrations: {
+  migrations: {
 
-      directory: "./migrations",
+  directory: "./migrations_v2",
 
-      extension: "js",
+  extension: "js",
 
-    },
+  tableName: "knex_migrations_v2"
+
+},
 
     seeds: {
 

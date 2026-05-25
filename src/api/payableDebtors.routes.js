@@ -59,7 +59,7 @@ router.get(
             opening_balance,
             closing_balance
 
-          FROM app.group_balances
+         FROM app_test.group_balances
 
           WHERE company_name = $1
           `,

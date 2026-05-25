@@ -32,7 +32,7 @@ router.get(
           `
           SELECT *
 
-          FROM app.bank_accounts
+         FROM app_test.bank_accounts
 
           ORDER BY ledger_name ASC
           `

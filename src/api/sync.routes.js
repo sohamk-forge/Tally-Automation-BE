@@ -30,17 +30,18 @@ const router = express.Router();
 
 const allowedTables = [
 
-  "app.companies",
-  "app.ledgers",
-  "app.sundry_creditors",
-  "app.sundry_debtors",
-  "app.bank_accounts",
-  "app.vouchers",
-  "app.parent_groups",
-  "app.group_balances",
-  "app.all_parent_groups",
-  "app.profit_loss",
-  "app.stock_group_summary"
+  "app_test.companies",
+  "app_test.ledgers",
+  "app_test.sundry_creditors",
+  "app_test.sundry_debtors",
+  "app_test.bank_accounts",
+  "app_test.vouchers",
+  "app_test.parent_groups",
+  "app_test.group_balances",
+  "app_test.all_parent_groups",
+  "app_test.profit_loss",
+  "app_test.stock_group_summary",
+  "app_test.sales_items"
 
 ];
 
@@ -80,7 +81,7 @@ const parseAmount = (value) => {
 async function getCompanyId(company, client = null) {
   const dbClient = client || pool;
   const result = await dbClient.query(
-    `SELECT id FROM app.companies WHERE name = $1`,
+    `SELECT id FROM app_test.companies WHERE name = $1`,
     [company]
   );
   return result.rows[0]?.id || null;
@@ -179,13 +180,13 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   
   // Generate stable fallback GUID if missing
   let finalGuid = guid;
-  if (!finalGuid && tableName !== 'app.profit_loss') {
+  if (!finalGuid && tableName !== 'app_test.profit_loss') {
     const companyIndex = columns.indexOf('company_name');
     const nameIndex = columns.indexOf('name') !== -1 ? columns.indexOf('name') : 
                       (columns.indexOf('ledger_name') !== -1 ? columns.indexOf('ledger_name') : -1);
     const uniqueValue = nameIndex !== -1 && data[nameIndex] ? data[nameIndex] : 
                        (columns.indexOf('group_name') !== -1 ? data[columns.indexOf('group_name')] : 'unknown');
-    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace('app.', ''));
+    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace('app_test.', ''));
     console.log(`⚠️ Generated stable fallback GUID for ${tableName}: ${finalGuid}`);
   }
   
@@ -291,14 +292,14 @@ router.get("/companies", async (req, res) => {
       
       // Check if company already exists by name
       const existingCompany = await client.query(
-        `SELECT id, name, guid, alter_id FROM app.companies WHERE name = $1`,
+        `SELECT id, name, guid, alter_id FROM app_test.companies WHERE name = $1`,
         [name]
       );
       
       if (existingCompany.rows.length === 0) {
         // INSERT new company
         const result = await upsertRecord(
-          "app.companies", guid, masterId, alterId,
+          "app_test.companies", guid, masterId, alterId,
           [name, financial_year_start, financial_year_end],
           ["name", "financial_year_start", "financial_year_end"],
           client
@@ -313,7 +314,7 @@ router.get("/companies", async (req, res) => {
         
         if (newAlterId > existingAlterId) {
           await client.query(
-            `UPDATE app.companies 
+            `UPDATE app_test.companies 
              SET financial_year_start = $1, 
                  financial_year_end = $2, 
                  alter_id = $3,
@@ -467,7 +468,7 @@ router.get("/ledgers", async (req, res) => {
         const alterId = ledger?.ALTERID || null;
         
         const result = await upsertRecord(
-          "app.ledgers", guid, masterId, alterId,
+          "app_test.ledgers", guid, masterId, alterId,
           [
             companyId,
             company,
@@ -570,7 +571,7 @@ router.get("/group-summary-cr", async (req, res) => {
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
       
       const result = await upsertRecord(
-        "app.sundry_creditors", guid, masterId, alterId,
+        "app_test.sundry_creditors", guid, masterId, alterId,
         [
           companyId,
           company,
@@ -675,7 +676,7 @@ router.get("/group-summary-dr", async (req, res) => {
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
       
       const result = await upsertRecord(
-        "app.sundry_debtors", guid, masterId, alterId,
+        "app_test.sundry_debtors", guid, masterId, alterId,
         [
           companyId,
           company,
@@ -737,7 +738,7 @@ router.get("/group-summary-dr", async (req, res) => {
 });
 
 /* ===================================================
-   BANK ACCOUNTS SYNC (UPDATED WITH company_id)
+   BANK ACCOUNTS SYNC (UPDATED WITH company_id & IMPROVED TALLY COMPATIBILITY)
 =================================================== */
 
 router.get("/group-summary-bank", async (req, res) => {
@@ -778,17 +779,28 @@ router.get("/group-summary-bank", async (req, res) => {
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
       
       const result = await upsertRecord(
-        "app.bank_accounts", guid, masterId, alterId,
+        "app_test.bank_accounts", guid, masterId, alterId,
         [
           companyId,
           company,
           ledgerName,
           "Bank Accounts",
           clean(ledger?.BANKACCHOLDERNAME),
-          clean(ledger?.BANKDETAILS),
-          clean(ledger?.IFSCODE),
+          clean(
+            ledger?.BANKACCOUNTNUMBER ||
+            ledger?.BANKACCOUNTNO ||
+            ledger?.ACCOUNTNUMBER ||
+            ledger?.BANKDETAILS
+          ),
+          clean(
+            ledger?.IFSCCODE ||
+            ledger?.IFSCODE
+          ),
           clean(ledger?.SWIFTCODE),
-          clean(ledger?.BRANCHNAME),
+          clean(
+            ledger?.BANKBRANCHNAME ||
+            ledger?.BRANCHNAME
+          ),
           Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
             ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
             : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
@@ -831,7 +843,7 @@ router.get("/group-summary-bank", async (req, res) => {
 });
 
 /* ===================================================
-   VOUCHER SYNC (UPDATED WITH company_id)
+   VOUCHER SYNC (FIXED - PROPER TRANSACTION HANDLING)
 =================================================== */
 
 router.get("/voucher-sync", async (req, res) => {
@@ -871,29 +883,18 @@ router.get("/voucher-sync", async (req, res) => {
 
   try {
     /* =====================================
-       TRANSACTION START
+       GET COMPANY ID (OUTSIDE TRANSACTION)
     ===================================== */
-    await client.query("BEGIN");
-
-    // Get company_id using helper
     const companyId = await getCompanyId(company, client);
     if (!companyId) {
       throw new Error("Company not found");
     }
     
     /* =====================================
-       BUILD XML
+       BUILD XML & FETCH FROM TALLY
     ===================================== */
     const xml = getLedgerVouchersXML(company, fromDate, toDate);
-
-    /* =====================================
-       FETCH FROM TALLY
-    ===================================== */
     const responseXML = await sendToTally(xml);
-
-    /* =====================================
-       XML PARSE
-    ===================================== */
     const parsed = await parseXML(responseXML);
 
     /* =====================================
@@ -920,12 +921,16 @@ router.get("/voucher-sync", async (req, res) => {
     let failed = 0;
 
     /* =====================================
-       LOOP
+       PROCESS EACH VOUCHER IN SEPARATE TRANSACTION
+       (To prevent one failure from breaking everything)
     ===================================== */
     for (const voucher of list) {
       try {
         const voucherNumber = clean(voucher?.VOUCHERNUMBER);
-        if (!voucherNumber) continue;
+        if (!voucherNumber) {
+          failed++;
+          continue;
+        }
 
         /* =================================
            LEDGER ENTRIES
@@ -953,308 +958,183 @@ router.get("/voucher-sync", async (req, res) => {
         const originalGuid = voucher?.GUID || null;
         const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
         const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
-
-        /* ================================
-           GUID
-        ================================= */
-        const guid = originalGuid || generateFallbackGuid(company, `${voucherDate}_${voucherTypeName}_${voucherNumber}`, "voucher");
-        const masterId = voucher?.MASTERID || null;
-        const alterId = voucher?.ALTERID || 0;
         const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
 
         /* ================================
            FILTERS
         ================================= */
-        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) continue;
-        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) continue;
-/* ================================
-   DUPLICATE CHECK
-================================ */
-
-const existingVoucher =
-
-  await client.query(
-
-    `
-    SELECT id
-
-    FROM app.vouchers
-
-    WHERE company_id = $1
-    AND voucher_number = $2
-    AND voucher_date = $3
-    `,
-
-    [
-
-      companyId,
-
-      voucherNumber,
-
-      voucherDate
-
-    ]
-
-  );
-
-const voucherExists =
-
-  existingVoucher.rows.length > 0;
-
-if (voucherExists) {
-
-  ignored++;
-
-}
-
-/* ================================
-   UPSERT
-================================ */
-
-if (!voucherExists) {
-
-  const result = await upsertRecord(
-
-    "app.vouchers",
-
-    guid,
-
-    masterId,
-
-    alterId,
-
-    [
-
-      companyId,
-
-      company,
-
-      voucherDate,
-
-      voucherTypeName,
-
-      voucherNumber,
-
-      partyLedgerName,
-
-      clean(voucher?.NARRATION),
-
-      JSON.stringify(normalized),
-
-      debitAmount,
-
-      creditAmount,
-
-      creditAmount - debitAmount
-
-    ],
-
-    [
-
-      "company_id",
-
-      "company_name",
-
-      "voucher_date",
-
-      "voucher_type",
-
-      "voucher_number",
-
-      "party_ledger_name",
-
-      "narration",
-
-      "ledger_entries",
-
-      "debit_amount",
-
-      "credit_amount",
-
-      "balance"
-
-    ],
-
-    client
-
-  );
-
-  if (result.action === "inserted") {
-
-    inserted++;
-
-  } else if (result.action === "updated") {
-
-    updated++;
-
-  }
-
-}
-/* ================================
-   SALES ITEMS INSERT
-================================ */
-
-for (const entry of normalized) {
-
-  const inventoryAllocations =
-
-    entry?.[
-      "INVENTORYALLOCATIONS.LIST"
-    ];
-
-  const allocations =
-
-    Array.isArray(
-      inventoryAllocations
-    )
-
-      ? inventoryAllocations
-
-      : inventoryAllocations
-
-      ? [inventoryAllocations]
-
-      : [];
-
-  let cgst = 0;
-  let sgst = 0;
-
-  for (const gstEntry of normalized) {
-
-    const ledgerName =
-
-      gstEntry?.LEDGERNAME || "";
-
-    const amount = Math.abs(
-
-      Number(
-        gstEntry?.AMOUNT || 0
-      )
-
-    );
-
-    if (
-
-      ledgerName
-        .toLowerCase()
-        .includes("cgst")
-
-    ) {
-
-      cgst += amount;
-
+        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
+          ignored++;
+          continue;
+        }
+        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
+          ignored++;
+          continue;
+        }
+
+        /* ================================
+           CHECK IF VOUCHER EXISTS (WITHOUT TRANSACTION)
+        ================================ */
+        const existingVoucher = await client.query(
+          `SELECT id FROM app_test.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
+          [companyId, voucherNumber, voucherDate]
+        );
+
+        if (existingVoucher.rows.length > 0) {
+          ignored++;
+          continue;
+        }
+
+        /* ================================
+           START A NEW TRANSACTION FOR THIS VOUCHER
+        ================================ */
+        await client.query("BEGIN");
+
+        try {
+          /* ================================
+             INSERT VOUCHER
+          ================================ */
+          const guid = originalGuid || generateFallbackGuid(company, `${voucherDate}_${voucherTypeName}_${voucherNumber}`, "voucher");
+          const masterId = voucher?.MASTERID || null;
+          const alterId = voucher?.ALTERID || 0;
+
+          await client.query(
+            `
+            INSERT INTO app_test.vouchers (
+              guid, master_id, alter_id, company_id, company_name, 
+              voucher_date, voucher_type, voucher_number, party_ledger_name, 
+              narration, ledger_entries, debit_amount, credit_amount, balance,
+              created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+            `,
+            [
+              guid, masterId, alterId, companyId, company,
+              voucherDate, voucherTypeName, voucherNumber, partyLedgerName,
+              clean(voucher?.NARRATION), JSON.stringify(normalized),
+              debitAmount, creditAmount, creditAmount - debitAmount
+            ]
+          );
+          inserted++;
+
+          /* ================================
+             INSERT SALES ITEMS (if any)
+          ================================ */
+          for (const entry of normalized) {
+            const inventoryAllocations = entry?.["INVENTORYALLOCATIONS.LIST"];
+            const allocations = Array.isArray(inventoryAllocations)
+              ? inventoryAllocations
+              : inventoryAllocations
+              ? [inventoryAllocations]
+              : [];
+
+            if (allocations.length === 0) continue;
+
+            let cgst = 0;
+            let sgst = 0;
+
+            for (const gstEntry of normalized) {
+              const ledgerName = gstEntry?.LEDGERNAME || "";
+              const amount = Math.abs(Number(gstEntry?.AMOUNT || 0));
+
+              if (ledgerName.toLowerCase().includes("cgst")) cgst += amount;
+              if (ledgerName.toLowerCase().includes("sgst")) sgst += amount;
+            }
+
+            for (const item of allocations) {
+              if (!item?.STOCKITEMNAME) continue;
+
+       await client.query(
+
+  `
+  INSERT INTO app_test.sales_items (
+
+    company_id,
+    company_name,
+    voucher_number,
+    description,
+    actual_quantity,
+    billed_quantity,
+    total_amount,
+    created_at,
+    updated_at
+
+  )
+
+  VALUES (
+
+    $1, $2, $3, $4,
+    $5, $6, $7,
+    NOW(),
+    NOW()
+
+  )
+  `,
+
+  [
+
+    companyId,
+
+    company,
+
+    voucherNumber,
+
+    item?.STOCKITEMNAME || null,
+
+    parseFloat(
+      String(
+        item?.ACTUALQTY || 0
+      ).replace(/[^\d.-]/g, "")
+    ),
+
+    parseFloat(
+      String(
+        item?.BILLEDQTY || 0
+      ).replace(/[^\d.-]/g, "")
+    ),
+
+    Math.abs(creditAmount)
+
+  ]
+
+);
+            }
+          }
+
+          /* ================================
+             COMMIT THIS VOUCHER'S TRANSACTION
+          ================================ */
+          await client.query("COMMIT");
+
+        } catch (voucherError) {
+          /* ================================
+             ROLLBACK THIS VOUCHER ONLY
+          ================================ */
+          await client.query("ROLLBACK");
+          failed++;
+          console.log(`❌ Voucher ${voucherNumber} failed:`, voucherError.message);
+          
+          await createAuditLog({
+            action: "VOUCHER_SYNC_RECORD_FAILED",
+            entity: "voucher-sync",
+            metadata: { company, error: voucherError.message, voucher: voucherNumber },
+            logType: "ERROR"
+          });
+        }
+
+      } catch (loopError) {
+        failed++;
+        console.log(`❌ Voucher ${voucher?.VOUCHERNUMBER} failed:`, loopError.message);
+        
+        await createAuditLog({
+          action: "VOUCHER_SYNC_RECORD_FAILED",
+          entity: "voucher-sync",
+          metadata: { company, error: loopError.message, voucher: voucher?.VOUCHERNUMBER },
+          logType: "ERROR"
+        });
+      }
     }
 
-    if (
-
-      ledgerName
-        .toLowerCase()
-        .includes("sgst")
-
-    ) {
-
-      sgst += amount;
-
-    }
-
-  }
-
-  for (const item of allocations) {
-
-    await client.query(
-
-      `
-      INSERT INTO app.sales_items (
-
-        company_name,
-
-        description,
-
-        actual_quantity,
-
-        billed_quantity,
-
-        billing,
-
-        total_amount
-
-      )
-
-      VALUES (
-
-        $1, $2, $3,
-        $4, $5, $6
-
-      )
-      `,
-
-      [
-
-        company,
-
-        item?.STOCKITEMNAME || null,
-
-        item?.ACTUALQTY || null,
-
-        item?.BILLEDQTY || null,
-
-        Number(
-          (
-            cgst + sgst
-          ).toFixed(2)
-        ),
-
-        Math.abs(
-          creditAmount
-        )
-
-      ]
-
-    );
-
-  }
-
-}
-
-     
-} catch (loopError) {
-
-  failed++;
-
-  await createAuditLog({
-
-    action:
-      "VOUCHER_SYNC_RECORD_FAILED",
-
-    entity:
-      "voucher-sync",
-
-    metadata: {
-
-      company,
-
-      error:
-        loopError.message,
-
-      voucher:
-        voucher?.VOUCHERNUMBER
-
-    },
-
-    logType:
-      "ERROR"
-
-  });
-
-}
-    }
-
-    /* =====================================
-       COMMIT
-    ===================================== */
-    await client.query("COMMIT");
-
-    /* =====================================
+        /* =====================================
        EXECUTION TIME
     ===================================== */
     const executionTime = Date.now() - startTime;
@@ -1268,7 +1148,8 @@ for (const entry of normalized) {
       metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, totalRecords: list.length, executionTime }
     });
 
-    /* =====================================
+
+     /* =====================================
        FINAL RESPONSE
     ===================================== */
     return res.status(200).json({
@@ -1368,7 +1249,7 @@ router.get("/parent-groups", async (req, res) => {
       const alterId = group?.ALTERID || group?.$?.ALTERID || null;
       
       const result = await upsertRecord(
-        "app.parent_groups", guid, masterId, alterId,
+        "app_test.parent_groups", guid, masterId, alterId,
         [companyId, company, groupName],
         ["company_id", "company_name", "group_name"],
         client
@@ -1449,7 +1330,7 @@ router.get("/payable-debtors", async (req, res) => {
     let inserted = 0, updated = 0, ignored = 0;
     
     const debtorsResult = await upsertRecord(
-      "app.group_balances", debtors.guid, debtors.masterId, debtors.alterId,
+      "app_test.group_balances", debtors.guid, debtors.masterId, debtors.alterId,
       [companyId, company, debtors.group_name, debtors.parent_group, debtors.opening_balance, debtors.closing_balance],
       ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
       client
@@ -1460,7 +1341,7 @@ router.get("/payable-debtors", async (req, res) => {
     else ignored++;
     
     const creditorsResult = await upsertRecord(
-      "app.group_balances", creditors.guid, creditors.masterId, creditors.alterId,
+      "app_test.group_balances", creditors.guid, creditors.masterId, creditors.alterId,
       [companyId, company, creditors.group_name, creditors.parent_group, creditors.opening_balance, creditors.closing_balance],
       ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
       client
@@ -1538,7 +1419,7 @@ router.get("/all-parent-groups", async (req, res) => {
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
       
       const result = await upsertRecord(
-        "app.all_parent_groups", guid, masterId, alterId,
+        "app_test.all_parent_groups", guid, masterId, alterId,
         [
           companyId,
           company,
@@ -1598,6 +1479,7 @@ router.get("/all-parent-groups", async (req, res) => {
     client.release();
   }
 });
+
 /* ===================================================
    PROFIT LOSS SYNC - COMPLETE FIXED VERSION
 =================================================== */
@@ -1629,7 +1511,7 @@ router.get("/profit-loss-sync", async (req, res) => {
        GET COMPANY ID
     ===================================== */
     const companyResult = await client.query(
-      `SELECT id FROM app.companies WHERE name = $1`,
+      `SELECT id FROM app_test.companies WHERE name = $1`,
       [company]
     );
 
@@ -1760,50 +1642,30 @@ router.get("/profit-loss-sync", async (req, res) => {
     ===================================== */
     
     const grossProfit = Number(
-
-  (
-
-    totalSales -
-
-    totalPurchase -
-
-    directExpenses +
-
-    directIncomes
-
-  ).toFixed(2)
-
-);
-
-const netProfit = Number(
-
-  (
-
-    grossProfit +
-
-    indirectIncome -
-
-    indirectExpenses
-
-  ).toFixed(2)
-
-);
-
-const profitMargin = totalSales > 0
-
-  ? Number(
-
       (
+        totalSales -
+        totalPurchase -
+        directExpenses +
+        directIncomes
+      ).toFixed(2)
+    );
 
-        netProfit /
+    const netProfit = Number(
+      (
+        grossProfit +
+        indirectIncome -
+        indirectExpenses
+      ).toFixed(2)
+    );
 
-        totalSales
-
-      ) * 100
-
-    ).toFixed(2)
-
-  : 0;
+    const profitMargin = totalSales > 0
+      ? Number(
+          (
+            netProfit /
+            totalSales
+          ) * 100
+        ).toFixed(2)
+      : 0;
 
     /* =====================================
        PREPARE DATA OBJECT
@@ -1828,71 +1690,39 @@ const profitMargin = totalSales > 0
        UPSERT TO DATABASE
     ===================================== */
     const guid = `${companyId}_${fromDate}_${toDate}`;
-    const alterId = Date.now();
+    const alterId = 1;
 
-  const result =
-
-  await upsertRecord(
-
-    "app.profit_loss",
-
-    guid,
-
-    null,
-
-    alterId,
-
-    [
-
-      companyId,
-
-      company,
-
-      fromDate,
-
-      toDate,
-
-      totalSales,
-
-      totalPurchase,
-
-      stockValue,
-
-      grossProfit,
-
-      netProfit,
-
-      profitMargin
-
-    ],
-
-    [
-
-      "company_id",
-
-      "company_name",
-
-      "from_date",
-
-      "to_date",
-
-      "total_sales",
-
-      "total_purchase",
-
-      "stock_value",
-
-      "gross_profit",
-
-      "net_profit",
-
-      "profit_margin"
-
-    ],
-
-    client
-
-  );
+    const result = await upsertRecord(
+      "app_test.profit_loss",
+      guid,
+      null,
+      alterId,
+      [
+        companyId,
+        company,
+        fromDate,
+        toDate,
+        totalSales,
+        totalPurchase,
+        stockValue,
+        grossProfit,
+        netProfit,
+        profitMargin
+      ],
+      [
+        "company_id",
+        "company_name",
+        "from_date",
+        "to_date",
+        "total_sales",
+        "total_purchase",
+        "stock_value",
+        "gross_profit",
+        "net_profit",
+        "profit_margin"
+      ],
+      client
+    );
 
     /* =====================================
        COMMIT TRANSACTION
@@ -1952,515 +1782,258 @@ function formatDate(dateStr) {
   }
   return dateStr;
 }
+
 /* ===================================================
    STOCK GROUP SUMMARY SYNC
 =================================================== */
 
 router.get(
-
   "/stock-group-summary-sync",
-
   async (req, res) => {
-
     /* =====================================
        COMPANY
     ===================================== */
-
-    const company =
-      req.query.company;
-
+    const company = req.query.company;
     if (!company) {
-
       return res.status(400).json({
-
         status: "error",
-
-        message:
-          "company required"
-
+        message: "company required"
       });
-
     }
 
     /* =====================================
        DB CLIENT
     ===================================== */
-
-    const client =
-      await pool.connect();
+    const client = await pool.connect();
 
     try {
-
       /* =====================================
          BEGIN TRANSACTION
       ===================================== */
-
       await client.query("BEGIN");
+
+      /* =====================================
+         GET COMPANY ID
+      ===================================== */
+      const companyId = await getCompanyId(company, client);
+      if (!companyId) {
+        throw new Error("Company not found");
+      }
 
       /* =====================================
          XML
       ===================================== */
-
-      const xml =
-
-        getStockGroupSummaryXML(
-          company
-        );
+      const xml = getStockGroupSummaryXML(company);
 
       /* =====================================
          TALLY RESPONSE
       ===================================== */
-
-      const responseXML =
-
-        await sendToTally(xml);
-
-        console.log(responseXML);
+      const responseXML = await sendToTally(xml);
+      console.log(responseXML);
 
       /* =====================================
          XML PARSE
       ===================================== */
-
-      const parsed =
-
-        await parseXML(
-          responseXML
-        );
+      const parsed = await parseXML(responseXML);
 
       /* =====================================
          STOCK ITEMS
       ===================================== */
-
-      const stockItems =
-
-        parsed?.ENVELOPE
-        ?.BODY
-        ?.DATA
-        ?.COLLECTION
-        ?.STOCKITEM || [];
-
-      const list =
-
-        Array.isArray(stockItems)
-
-          ? stockItems
-
-          : [stockItems];
+      const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
+      const list = Array.isArray(stockItems) ? stockItems : [stockItems];
 
       /* =====================================
          COUNTERS
       ===================================== */
-
       let inserted = 0;
-
       let updated = 0;
 
       /* =====================================
          LOOP
       ===================================== */
-
       for (const item of list) {
-
         /* =================================
            ITEM NAME
         ================================= */
-
-        const itemName =
-
-          item?.NAME ||
-
+        const itemName = item?.NAME ||
           item?.["@_NAME"] ||
-
           item?.["$"]?.NAME ||
-
-          item?.["LANGUAGENAME.LIST"]
-            ?.["NAME.LIST"]
-            ?.NAME ||
-
+          item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
           null;
 
         /* =================================
            GROUP NAME
         ================================= */
+        const groupName = (item?.PARENT || "").replace("&#4;", "").trim();
 
-        const groupName =
+        /* =================================
+           QUANTITY
+        ================================= */
+        const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
 
-          (item?.PARENT || "")
-            .replace("&#4;", "")
-            .trim();
+        /* =================================
+           STOCK VALUE
+        ================================= */
+        const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
 
-/* =================================
-   QUANTITY
-================================= */
-
-const quantity =
-
-  parseFloat(
-    item?.CLOSINGBALANCE || 0
-  ) || 0;
-
-/* =================================
-   STOCK VALUE
-================================= */
-
-const rawStockValue =
-
-  parseFloat(
-    item?.CLOSINGVALUE || 0
-  ) || 0;
-
-/* =================================
-   FIX TALLY SIGN
-================================= */
-
-const stockValue =
-  rawStockValue * -1;
-
-
+        /* =================================
+           FIX TALLY SIGN
+        ================================= */
+        const stockValue = rawStockValue * -1;
 
         /* =================================
            HSN CODE
         ================================= */
-
         let hsnCode = null;
-
-        const hsnList =
-
-          item?.["HSNDETAILS.LIST"] || [];
-
+        const hsnList = item?.["HSNDETAILS.LIST"] || [];
         if (Array.isArray(hsnList)) {
-
-          const validHSN =
-
-            hsnList.find(
-
-              (hsn) => hsn?.HSNCODE
-
-            );
-
-          hsnCode =
-            validHSN?.HSNCODE || null;
-
+          const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
+          hsnCode = validHSN?.HSNCODE || null;
         } else {
-
-          hsnCode =
-            hsnList?.HSNCODE || null;
-
+          hsnCode = hsnList?.HSNCODE || null;
         }
 
         /* =================================
            CHECK EXISTING
         ================================= */
-
-        const existing =
-
-          await client.query(
-
-            `
-            SELECT id
-
-            FROM app.stock_group_summary
-
-            WHERE company_name = $1
-            AND item_name = $2
-            `,
-
-            [
-
-              company,
-
-              itemName
-
-            ]
-
-          );
+        const existing = await client.query(
+          `
+          SELECT id
+          FROM app_test.stock_group_summary
+          WHERE company_name = $1
+          AND item_name = $2
+          `,
+          [company, itemName]
+        );
 
         /* =================================
            UPDATE EXISTING
         ================================= */
-
-        if (
-
-          existing.rows.length > 0
-
-        ) {
-
+        if (existing.rows.length > 0) {
           await client.query(
-
             `
-            UPDATE app.stock_group_summary
-
+            UPDATE app_test.stock_group_summary
             SET
-
-              group_name = $1,
-              hsn_code = $2,
-              quantity = $3,
-              stock_value = $4,
-              created_at = NOW()
-
-            WHERE company_name = $5
-            AND item_name = $6
+              company_id = $1,
+              group_name = $2,
+              hsn_code = $3,
+              quantity = $4,
+              stock_value = $5,
+              updated_at = NOW()
+            WHERE company_name = $6
+            AND item_name = $7
             `,
-
-            [
-
-              groupName,
-              hsnCode,
-              quantity,
-              stockValue,
-              company,
-              itemName
-
-            ]
-
+            [companyId, groupName, hsnCode, quantity, stockValue, company, itemName]
           );
-
           updated++;
-
           continue;
-
         }
 
         /* =================================
            INSERT NEW
         ================================= */
-
         await client.query(
-
           `
-          INSERT INTO
-          app.stock_group_summary (
-
+          INSERT INTO app_test.stock_group_summary (
+            company_id,
             company_name,
-
             group_name,
-
             item_name,
-
             hsn_code,
-
             quantity,
-
             stock_value
-
           )
-
-          VALUES (
-
-            $1, $2, $3, $4, $5, $6
-
-          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
           `,
-
-          [
-
-            company,
-
-            groupName,
-
-            itemName,
-
-            hsnCode,
-
-            quantity,
-
-            stockValue
-
-          ]
-
+          [companyId, company, groupName, itemName, hsnCode, quantity, stockValue]
         );
-
         inserted++;
-
       }
 
       /* =====================================
          COMMIT
       ===================================== */
-
       await client.query("COMMIT");
 
       /* =====================================
          FINAL RESPONSE
       ===================================== */
-
       return res.status(200).json({
-
         status: "success",
-
         source: "tally",
-
-        message:
-          "Stock group summary synced successfully",
-
+        message: "Stock group summary synced successfully",
         company,
-
         summary: {
-
           inserted,
-
           updated,
-
-          total:
-            list.length
-
+          total: list.length
         },
+        data: list.map((item) => {
+          /* =============================
+             QUANTITY
+          ============================= */
+          const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
 
- data:
+          /* =============================
+             STOCK VALUE
+          ============================= */
+          const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
 
-  list.map((item) => {
+          /* =============================
+             FIX TALLY SIGN
+          ============================= */
+          const stockValue = rawStockValue * -1;
 
-    /* =============================
-       QUANTITY
-    ============================= */
+          /* =============================
+             DEBUG
+          ============================= */
+          console.log({
+            item_name: item?.NAME || item?.["@_NAME"],
+            quantity,
+            rawStockValue,
+            finalStockValue: stockValue
+          });
 
-    const quantity =
-
-      parseFloat(
-        item?.CLOSINGBALANCE || 0
-      ) || 0;
-
-    /* =============================
-       STOCK VALUE
-    ============================= */
-
-    const rawStockValue =
-
-      parseFloat(
-        item?.CLOSINGVALUE || 0
-      ) || 0;
-
-    /* =============================
-       FIX TALLY SIGN
-    ============================= */
-
-    const stockValue =
-      rawStockValue * -1;
-
-    /* =============================
-       DEBUG
-    ============================= */
-
-    console.log({
-
-      item_name:
-
-        item?.NAME ||
-
-        item?.["@_NAME"],
-
-      quantity,
-
-      rawStockValue,
-
-      finalStockValue:
-        stockValue
-
-    });
-
-    /* =============================
-       RETURN
-    ============================= */
-
-    return {
-
-      group_name:
-
-        (item?.PARENT || "")
-          .replace("&#4;", "")
-          .trim(),
-
-      item_name:
-
-        item?.NAME ||
-
-        item?.["@_NAME"] ||
-
-        item?.["$"]?.NAME ||
-
-        item?.["LANGUAGENAME.LIST"]
-          ?.["NAME.LIST"]
-          ?.NAME ||
-
-        null,
-
-      hsn_code:
-
-        (() => {
-
-          const hsnList =
-
-            item?.["HSNDETAILS.LIST"] || [];
-
-          if (Array.isArray(hsnList)) {
-
-            const validHSN =
-
-              hsnList.find(
-
-                (hsn) => hsn?.HSNCODE
-
-              );
-
-            return (
-              validHSN?.HSNCODE || null
-            );
-
-          }
-
-          return (
-            hsnList?.HSNCODE || null
-          );
-
-        })(),
-
-      quantity,
-
-      stock_value: stockValue
-
-    };
-
-  })
-        });
-
-
-}catch (err) {
-
+          /* =============================
+             RETURN
+          ============================= */
+          return {
+            group_name: (item?.PARENT || "").replace("&#4;", "").trim(),
+            item_name: item?.NAME ||
+              item?.["@_NAME"] ||
+              item?.["$"]?.NAME ||
+              item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+              null,
+            hsn_code: (() => {
+              const hsnList = item?.["HSNDETAILS.LIST"] || [];
+              if (Array.isArray(hsnList)) {
+                const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
+                return validHSN?.HSNCODE || null;
+              }
+              return hsnList?.HSNCODE || null;
+            })(),
+            quantity,
+            stock_value: stockValue
+          };
+        })
+      });
+    } catch (err) {
       /* =====================================
          ROLLBACK
       ===================================== */
-
       await client.query("ROLLBACK");
-
-      console.log(
-
-        "❌ STOCK GROUP SUMMARY SYNC ERROR:",
-
-        err.message
-
-      );
-
+      console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
       return res.status(500).json({
-
         status: "error",
-
-        message:
-          err.message
-
+        message: err.message
       });
-
     } finally {
-
       /* =====================================
          RELEASE CLIENT
       ===================================== */
-
       client.release();
-
     }
-
   }
-
 );
 
 export default router;

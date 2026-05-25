@@ -18,7 +18,7 @@ router.get("/", async (req, res) => {
 
     // TOTAL COUNT
     const totalResult = await pool.query(`
-      SELECT COUNT(*) FROM app.companies
+     SELECT COUNT(*) FROM app_test.companies
     `);
 
     const total = parseInt(totalResult.rows[0].count);
@@ -38,7 +38,7 @@ router.get("/", async (req, res) => {
           financial_year_end
         ) AS financial_year
 
-      FROM app.companies
+   FROM app_test.companies
 
       ORDER BY id DESC
 
@@ -210,7 +210,7 @@ const financial_year_end =
       // INSERT / UPDATE DATABASE
       const result = await pool.query(
         `
-        INSERT INTO app.companies (
+       INSERT INTO app_test.companies (
 
           name,
           financial_year_start,

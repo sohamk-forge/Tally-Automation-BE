@@ -44,7 +44,7 @@ router.get(
           `
           SELECT *
 
-          FROM app.sundry_creditors
+        FROM app_test.sundry_creditors
 
           WHERE company_name = $1
 

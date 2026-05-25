@@ -60,7 +60,7 @@ const companyResult =
     `
     SELECT id
 
-    FROM app.companies
+  FROM app_test.companies
 
     WHERE name = $1
     `,
@@ -83,7 +83,7 @@ const companyId =
       await pool.query(
 
         `
-      INSERT INTO app.push_ledger (
+     INSERT INTO app_test.push_ledger (
 
   company_id,
   company_name,
@@ -212,7 +212,7 @@ const companyId =
         await pool.query(
 
           `
-          UPDATE app.push_ledger
+       UPDATE app_test.push_ledger
 
           SET
 
@@ -260,7 +260,7 @@ const companyId =
       await pool.query(
 
         `
-        UPDATE app.push_ledger
+      UPDATE app_test.push_ledger
 
         SET
 
@@ -336,7 +336,7 @@ const companyId =
         await pool.query(
 
           `
-          UPDATE app.push_ledger
+       UPDATE app_test.push_ledger
 
           SET
 
