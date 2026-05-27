@@ -63,7 +63,7 @@ router.get(
             created_at
 
           FROM
-        FROM
+        
 app_test.stock_group_summary
 
           WHERE

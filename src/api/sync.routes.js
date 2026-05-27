@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../db/index.js";
+import axios from "axios";
 import { sendToTally } from "../services/tallyClient.js";
 import {
   getCompaniesXML,
@@ -16,6 +17,8 @@ import {
     getStockGroupSummaryXML
 } from "../services/xmlBuilder.js";
 import { parseXML } from "../services/parser.js";
+import { parseStringPromise }
+from "xml2js";
 import {
   createAuditLog
 } from "../utils/createAuditLog.js";
@@ -23,6 +26,20 @@ import {
 
 
 const router = express.Router();
+
+/* ===================================================
+   DELAY UTILITY
+=================================================== */
+
+const delay = (ms) =>
+
+  new Promise(
+
+    (resolve) =>
+
+      setTimeout(resolve, ms)
+
+  );
 
 /* ===================================================
    ALLOWED TABLES (SQL INJECTION PROTECTION)
@@ -985,141 +1002,259 @@ router.get("/voucher-sync", async (req, res) => {
           continue;
         }
 
-        /* ================================
-           START A NEW TRANSACTION FOR THIS VOUCHER
-        ================================ */
-        await client.query("BEGIN");
+   /* ================================
+   START A NEW TRANSACTION FOR THIS VOUCHER
+================================ */
 
-        try {
-          /* ================================
-             INSERT VOUCHER
-          ================================ */
-          const guid = originalGuid || generateFallbackGuid(company, `${voucherDate}_${voucherTypeName}_${voucherNumber}`, "voucher");
-          const masterId = voucher?.MASTERID || null;
-          const alterId = voucher?.ALTERID || 0;
+/* ================================
+   START TRANSACTION
+================================ */
 
-          await client.query(
-            `
-            INSERT INTO app_test.vouchers (
-              guid, master_id, alter_id, company_id, company_name, 
-              voucher_date, voucher_type, voucher_number, party_ledger_name, 
-              narration, ledger_entries, debit_amount, credit_amount, balance,
-              created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
-            `,
-            [
-              guid, masterId, alterId, companyId, company,
-              voucherDate, voucherTypeName, voucherNumber, partyLedgerName,
-              clean(voucher?.NARRATION), JSON.stringify(normalized),
-              debitAmount, creditAmount, creditAmount - debitAmount
-            ]
-          );
-          inserted++;
+const voucherClient =
+  await pool.connect();
 
-          /* ================================
-             INSERT SALES ITEMS (if any)
-          ================================ */
-          for (const entry of normalized) {
-            const inventoryAllocations = entry?.["INVENTORYALLOCATIONS.LIST"];
-            const allocations = Array.isArray(inventoryAllocations)
-              ? inventoryAllocations
-              : inventoryAllocations
-              ? [inventoryAllocations]
-              : [];
+try {
 
-            if (allocations.length === 0) continue;
+  await voucherClient.query(
+    "BEGIN"
+  );
 
-            let cgst = 0;
-            let sgst = 0;
+  /* ================================
+     INSERT VOUCHER
+  ================================ */
 
-            for (const gstEntry of normalized) {
-              const ledgerName = gstEntry?.LEDGERNAME || "";
-              const amount = Math.abs(Number(gstEntry?.AMOUNT || 0));
+  const guid =
 
-              if (ledgerName.toLowerCase().includes("cgst")) cgst += amount;
-              if (ledgerName.toLowerCase().includes("sgst")) sgst += amount;
-            }
+    originalGuid ||
 
-            for (const item of allocations) {
-              if (!item?.STOCKITEMNAME) continue;
+    generateFallbackGuid(
 
-       await client.query(
+      company,
 
-  `
-  INSERT INTO app_test.sales_items (
+      `${voucherDate}_${voucherTypeName}_${voucherNumber}`,
 
-    company_id,
-    company_name,
-    voucher_number,
-    description,
-    actual_quantity,
-    billed_quantity,
-    total_amount,
-    created_at,
-    updated_at
+      "voucher"
 
-  )
+    );
 
-  VALUES (
+  const masterId =
+    voucher?.MASTERID || null;
 
-    $1, $2, $3, $4,
-    $5, $6, $7,
-    NOW(),
-    NOW()
+  const alterId =
+    voucher?.ALTERID || 0;
 
-  )
-  `,
+  await voucherClient.query(
 
-  [
+    `
+    INSERT INTO app_test.vouchers (
 
-    companyId,
+      guid,
+      master_id,
+      alter_id,
+      company_id,
+      company_name,
+      voucher_date,
+      voucher_type,
+      voucher_number,
+      party_ledger_name,
+      narration,
+      ledger_entries,
+      debit_amount,
+      credit_amount,
+      balance,
+      created_at,
+      updated_at
 
-    company,
+    )
 
-    voucherNumber,
+    VALUES (
 
-    item?.STOCKITEMNAME || null,
+      $1, $2, $3, $4, $5,
+      $6, $7, $8, $9, $10,
+      $11, $12, $13, $14,
+      NOW(), NOW()
 
-    parseFloat(
-      String(
-        item?.ACTUALQTY || 0
-      ).replace(/[^\d.-]/g, "")
-    ),
+    )
+    `,
 
-    parseFloat(
-      String(
-        item?.BILLEDQTY || 0
-      ).replace(/[^\d.-]/g, "")
-    ),
+    [
 
-    Math.abs(creditAmount)
+      guid,
+      masterId,
+      alterId,
+      companyId,
+      company,
 
-  ]
+      voucherDate,
+      voucherTypeName,
+      voucherNumber,
+      partyLedgerName,
 
-);
-            }
-          }
+      clean(voucher?.NARRATION),
 
-          /* ================================
-             COMMIT THIS VOUCHER'S TRANSACTION
-          ================================ */
-          await client.query("COMMIT");
+      JSON.stringify(normalized),
 
-        } catch (voucherError) {
-          /* ================================
-             ROLLBACK THIS VOUCHER ONLY
-          ================================ */
-          await client.query("ROLLBACK");
-          failed++;
-          console.log(`❌ Voucher ${voucherNumber} failed:`, voucherError.message);
-          
-          await createAuditLog({
-            action: "VOUCHER_SYNC_RECORD_FAILED",
-            entity: "voucher-sync",
-            metadata: { company, error: voucherError.message, voucher: voucherNumber },
-            logType: "ERROR"
-          });
-        }
+      debitAmount,
+
+      creditAmount,
+
+      creditAmount - debitAmount
+
+    ]
+
+  );
+
+  /* ================================
+     INSERT SALES ITEMS
+  ================================ */
+
+  for (const entry of normalized) {
+
+    const inventoryAllocations =
+      entry?.["INVENTORYALLOCATIONS.LIST"];
+
+    const allocations =
+
+      Array.isArray(
+        inventoryAllocations
+      )
+
+        ? inventoryAllocations
+
+        : inventoryAllocations
+
+        ? [inventoryAllocations]
+
+        : [];
+
+    if (allocations.length === 0) {
+
+      continue;
+
+    }
+
+    for (const item of allocations) {
+
+      if (!item?.STOCKITEMNAME) {
+
+        continue;
+
+      }
+
+      await voucherClient.query(
+
+        `
+        INSERT INTO app_test.sales_items (
+
+          company_id,
+          company_name,
+          voucher_number,
+          description,
+          actual_quantity,
+          billed_quantity,
+          total_amount,
+          created_at,
+          updated_at
+
+        )
+
+        VALUES (
+
+          $1, $2, $3, $4,
+          $5, $6, $7,
+          NOW(),
+          NOW()
+
+        )
+        `,
+
+        [
+
+          companyId,
+
+          company,
+
+          voucherNumber,
+
+          item?.STOCKITEMNAME || null,
+
+          parseFloat(
+            String(
+              item?.ACTUALQTY || 0
+            ).replace(/[^\d.-]/g, "")
+          ),
+
+          parseFloat(
+            String(
+              item?.BILLEDQTY || 0
+            ).replace(/[^\d.-]/g, "")
+          ),
+
+          Math.abs(creditAmount)
+
+        ]
+
+      );
+
+    }
+
+  }
+
+  /* ================================
+     COMMIT
+  ================================ */
+
+  await voucherClient.query(
+    "COMMIT"
+  );
+
+  inserted++;
+
+} catch (voucherError) {
+
+  await voucherClient.query(
+    "ROLLBACK"
+  );
+
+  failed++;
+
+  console.log(
+    `❌ Voucher ${voucherNumber} failed:`,
+    voucherError.message
+  );
+
+  await createAuditLog({
+
+    action:
+      "VOUCHER_SYNC_RECORD_FAILED",
+
+    entity:
+      "voucher-sync",
+
+    metadata: {
+
+      company,
+
+      error:
+        voucherError.message,
+
+      voucher:
+        voucherNumber
+
+    },
+
+    logType:
+      "ERROR"
+
+  });
+
+} finally {
+
+  voucherClient.release();
+
+}
+
+ 
 
       } catch (loopError) {
         failed++;
@@ -1179,9 +1314,7 @@ router.get("/voucher-sync", async (req, res) => {
     });
   } catch (err) {
     /* =====================================
-       ROLLBACK
-    ===================================== */
-    await client.query("ROLLBACK");
+   
     /* =====================================
        ERROR LOG
     ===================================== */
@@ -2034,6 +2167,203 @@ router.get(
       client.release();
     }
   }
+);
+/* ===================================================
+   CREATE SYNC JOB
+=================================================== */
+
+router.post(
+
+  "/manual",
+
+  async (req, res) => {
+
+    try {
+
+      const {
+
+        fromDate,
+
+        toDate
+
+      } = req.body;
+
+      /* =====================================
+         FETCH LIVE COMPANIES
+      ===================================== */
+
+      const companyXML =
+        getCompaniesXML();
+
+      const companyResponse =
+        await sendToTally(
+          companyXML
+        );
+
+      const parsed =
+        await parseStringPromise(
+          companyResponse
+        );
+
+      const companyList =
+
+        parsed?.ENVELOPE?.BODY?.[0]
+          ?.DATA?.[0]
+          ?.COLLECTION?.[0]
+          ?.COMPANY || [];
+
+      if (!companyList.length) {
+
+        return res.status(404).json({
+
+          status: "error",
+
+          message:
+            "No companies found"
+
+        });
+
+      }
+
+      /* =====================================
+         FINAL SUMMARY
+      ===================================== */
+
+      const jobs = [];
+
+      /* =====================================
+         CREATE JOBS
+      ===================================== */
+
+      for (const item of companyList) {
+
+        const company =
+
+          item?.NAME?.[0]?._ ||
+
+          item?.NAME?.[0];
+
+        if (!company) {
+
+          continue;
+
+        }
+
+        /* =================================
+           STORE COMPANY
+        ================================= */
+
+        await pool.query(
+
+          `
+          INSERT INTO app_test.companies
+          (
+            name
+          )
+          VALUES ($1)
+
+          ON CONFLICT (name)
+
+          DO NOTHING
+          `,
+
+          [company]
+
+        );
+
+        /* =================================
+           CREATE JOB
+        ================================= */
+
+       const payload = {
+
+  company
+
+};
+
+        const result =
+
+          await pool.query(
+
+            `
+            INSERT INTO app_test.job_logs
+            (
+              job_type,
+              status,
+              payload
+            )
+            VALUES
+            (
+              $1,
+              $2,
+              $3
+            )
+
+            RETURNING id
+            `,
+
+            [
+              "manual_sync",
+              "pending",
+              payload
+            ]
+
+          );
+
+        jobs.push({
+
+          jobId:
+            result.rows[0].id,
+
+          company,
+
+          status:
+            "pending"
+
+        });
+
+      }
+
+      /* =====================================
+         RESPONSE
+      ===================================== */
+
+      return res.status(200).json({
+
+        status:
+          "success",
+
+        message:
+          "Sync jobs created",
+
+        totalJobs:
+          jobs.length,
+
+        data:
+          jobs
+
+      });
+
+    } catch (err) {
+
+      console.log(
+        err.message
+      );
+
+      return res.status(500).json({
+
+        status:
+          "error",
+
+        message:
+          err.message
+
+      });
+
+    }
+
+  }
+
 );
 
 export default router;

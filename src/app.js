@@ -1,9 +1,19 @@
 import express from "express";
 import cors from "cors";
 
+/* =================================
+   DAILY CRON
+================================= */
 
+import "./cron/dailySync.cron.js";
+/* =================================
+   SYNC WORKER
+================================= */
+
+import "./workers/sync.worker.js";
 
 /* =================================
+
    ROUTES
 ================================= */
 
@@ -46,12 +56,11 @@ from "./api/profitLoss.routes.js";
 import stockGroupSummaryRoute
 from "./api/stockGroupSummary.js";
 
-/* =================================
-   NEW SALES ITEMS API
-================================= */
-
 import salesItemsRoutes
 from "./api/salesItems.routes.js";
+
+import pushLedgerRoutes
+from "./api/pushLedger.routes.js";
 
 /* =================================
    MIDDLEWARE
@@ -61,8 +70,6 @@ import {
   loggerMiddleware
 } from "./middleware/loggerMiddleware.js";
 
-import pushLedgerRoutes
-from "./api/pushLedger.routes.js";
 /* =================================
    EXPRESS APP
 ================================= */
@@ -190,10 +197,15 @@ app.use(
   salesItemsRoutes
 );
 
+/* =================================
+   STOCK GROUP SUMMARY APIs
+================================= */
+
 app.use(
   "/api",
   stockGroupSummaryRoute
 );
+
 /* =================================
    PUSH LEDGER APIs
 ================================= */
@@ -202,6 +214,7 @@ app.use(
   "/api",
   pushLedgerRoutes
 );
+
 /* =================================
    DEFAULT API
 ================================= */
