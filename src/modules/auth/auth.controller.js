@@ -1,11 +1,11 @@
-const authService = require('./auth.service');
+import authService from "./auth.service.js";
 
 const register = async (req, res) => {
   try {
     const user = await authService.register(req.body);
 
     return res.status(201).json({
-      message: 'User registered successfully',
+      message: "User registered successfully",
       user,
     });
   } catch (error) {
@@ -26,6 +26,7 @@ const login = async (req, res) => {
     });
   }
 };
+
 const me = async (req, res) => {
   try {
     return res.status(200).json(req.user);
@@ -35,6 +36,7 @@ const me = async (req, res) => {
     });
   }
 };
+
 const logout = async (req, res) => {
   try {
     const data = await authService.logout();
@@ -47,7 +49,7 @@ const logout = async (req, res) => {
   }
 };
 
-module.exports = {
+export default {
   register,
   login,
   me,

@@ -1,42 +1,42 @@
-const bcrypt = require('bcryptjs');
-const { z } = require('zod');
-const db = require('../../config/db');
-const jwt = require('jsonwebtoken');
+import bcrypt from "bcryptjs";
+import { z } from "zod";
+import db from "../../db.js";
+import jwt from "jsonwebtoken";
+
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
-    phone: z.string().min(10).max(10),
-
-    role: z.enum(['admin', 'owner', 'viewer']),
+  phone: z.string().min(10).max(10),
+  role: z.enum(["admin", "owner", "viewer"]),
 });
 
 const register = async (data) => {
   // Validate input
   const validatedData = registerSchema.parse(data);
 
-  const { email, password, phone ,role } = validatedData;
+  const { email, password, phone, role } = validatedData;
 
   // Check if user already exists
-  const existingUser = await db('app.users')
+  const existingUser = await db("app.users")
     .where({ email })
     .first();
 
   if (existingUser) {
-    throw new Error('User already exists');
+    throw new Error("User already exists");
   }
 
   // Hash password
   const hashedPassword = await bcrypt.hash(password, 10);
 
   // Save user
-  const [user] = await db('app.users')
+  const [user] = await db("app.users")
     .insert({
       email,
       password: hashedPassword,
       phone,
       role,
     })
-    .returning(['id', 'email','phone' , 'role']);
+    .returning(["id", "email", "phone", "role"]);
 
   return user;
 };
@@ -53,12 +53,12 @@ const login = async (data) => {
   const { email, password } = validatedData;
 
   // Find user by email
-  const user = await db('app.users')
+  const user = await db("app.users")
     .where({ email })
     .first();
 
   if (!user) {
-    throw new Error('Invalid email or password');
+    throw new Error("Invalid email or password");
   }
 
   // Compare password
@@ -68,7 +68,7 @@ const login = async (data) => {
   );
 
   if (!isPasswordValid) {
-    throw new Error('Invalid email or password');
+    throw new Error("Invalid email or password");
   }
 
   // Generate JWT token
@@ -80,12 +80,12 @@ const login = async (data) => {
     },
     process.env.JWT_SECRET,
     {
-      expiresIn: '1d',
+      expiresIn: "1d",
     }
   );
 
   return {
-    message: 'Login successful',
+    message: "Login successful",
     token,
     user: {
       id: user.id,
@@ -95,15 +95,13 @@ const login = async (data) => {
   };
 };
 
-
-
 const logout = async () => {
   return {
-    message: 'Logout successful',
+    message: "Logout successful",
   };
 };
 
-module.exports = {
+export default {
   register,
   login,
   logout,

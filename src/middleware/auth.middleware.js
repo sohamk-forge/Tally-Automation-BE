@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+import jwt from "jsonwebtoken";
 
 const authMiddleware = (req, res, next) => {
   try {
@@ -7,12 +7,18 @@ const authMiddleware = (req, res, next) => {
 
     if (!authHeader) {
       return res.status(401).json({
-        error: 'Access denied. No token provided',
+        error: "Access denied. No token provided",
       });
     }
 
     // Remove "Bearer "
-    const token = authHeader.split(' ')[1];
+    const token = authHeader.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).json({
+        error: "Invalid token format",
+      });
+    }
 
     // Verify token
     const decoded = jwt.verify(
@@ -26,9 +32,9 @@ const authMiddleware = (req, res, next) => {
     next();
   } catch (error) {
     return res.status(401).json({
-      error: 'Invalid or expired token',
+      error: "Invalid or expired token",
     });
   }
 };
 
-module.exports = authMiddleware;
+export default authMiddleware;
