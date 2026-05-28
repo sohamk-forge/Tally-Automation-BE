@@ -1,4 +1,24 @@
- /* ==================================================
+/* ==================================================
+   XML SAFE
+================================================== */
+
+const safe = (value = "") => {
+
+  return String(value)
+
+    .replace(/&/g, "&amp;")
+
+    .replace(/</g, "&lt;")
+
+    .replace(/>/g, "&gt;")
+
+    .replace(/"/g, "&quot;")
+
+    .trim();
+
+};
+
+/* ==================================================
    CREATE LEDGER XML
 ================================================== */
 
@@ -9,7 +29,11 @@ return `
 <ENVELOPE>
 
 <HEADER>
-<TALLYREQUEST>Import Data</TALLYREQUEST>
+
+<TALLYREQUEST>
+Import Data
+</TALLYREQUEST>
+
 </HEADER>
 
 <BODY>
@@ -18,12 +42,14 @@ return `
 
 <REQUESTDESC>
 
-<REPORTNAME>All Masters</REPORTNAME>
+<REPORTNAME>
+All Masters
+</REPORTNAME>
 
 <STATICVARIABLES>
 
 <SVCURRENTCOMPANY>
-${data.company}
+${safe(data.company)}
 </SVCURRENTCOMPANY>
 
 </STATICVARIABLES>
@@ -35,7 +61,7 @@ ${data.company}
 <TALLYMESSAGE xmlns:UDF="TallyUDF">
 
 <LEDGER
-NAME="${data.ledger_name}"
+NAME="${safe(data.ledger_name)}"
 RESERVEDNAME=""
 ACTION="Create"
 >
@@ -43,15 +69,15 @@ ACTION="Create"
 <!-- BASIC DETAILS -->
 
 <NAME>
-${data.ledger_name}
+${safe(data.ledger_name)}
 </NAME>
 
 <MAILINGNAME>
-${data.ledger_name}
+${safe(data.ledger_name)}
 </MAILINGNAME>
 
 <PARENT>
-${data.parent}
+${safe(data.parent)}
 </PARENT>
 
 <OPENINGBALANCE>
@@ -59,7 +85,7 @@ ${data.opening_balance || 0}
 </OPENINGBALANCE>
 
 <ISBILLWISEON>
-${data.bill_wise || "Yes"}
+${data.bill_wise === "No" ? "No" : "Yes"}
 </ISBILLWISEON>
 
 <!-- MAILING DETAILS -->
@@ -69,7 +95,7 @@ ${data.bill_wise || "Yes"}
 <ADDRESS.LIST TYPE="String">
 
 <ADDRESS>
-${data.address || ""}
+${safe(data.address)}
 </ADDRESS>
 
 </ADDRESS.LIST>
@@ -79,27 +105,27 @@ ${data.address || ""}
 </APPLICABLEFROM>
 
 <PINCODE>
-${data.pincode || ""}
+${safe(data.pincode)}
 </PINCODE>
 
 <STATE>
-${data.state || ""}
+${safe(data.state)}
 </STATE>
 
 <COUNTRY>
-${data.country || "India"}
+${safe(data.country || "India")}
 </COUNTRY>
 
 <CONTACTPERSON>
-${data.contact_person || ""}
+${safe(data.contact_person)}
 </CONTACTPERSON>
 
 <MOBILE>
-${data.mobile || ""}
+${safe(data.mobile)}
 </MOBILE>
 
 <EMAIL>
-${data.email || ""}
+${safe(data.email)}
 </EMAIL>
 
 </LEDMAILINGDETAILS.LIST>
@@ -107,41 +133,41 @@ ${data.email || ""}
 <!-- EXTRA CONTACT DETAILS -->
 
 <LEDSTATENAME>
-${data.state || ""}
+${safe(data.state)}
 </LEDSTATENAME>
 
 <LEDCOUNTRYNAME>
-${data.country || "India"}
+${safe(data.country || "India")}
 </LEDCOUNTRYNAME>
 
 <LEDPINCODE>
-${data.pincode || ""}
+${safe(data.pincode)}
 </LEDPINCODE>
 
 <LEDGERCONTACT>
-${data.contact_person || ""}
+${safe(data.contact_person)}
 </LEDGERCONTACT>
 
 <LEDGERPHONE>
-${data.phone || ""}
+${safe(data.phone)}
 </LEDGERPHONE>
 
 <LEDGERMOBILE>
-${data.mobile || ""}
+${safe(data.mobile)}
 </LEDGERMOBILE>
 
 <EMAIL>
-${data.email || ""}
+${safe(data.email)}
 </EMAIL>
 
 <LEDGERWEBSITE>
-${data.website || ""}
+${safe(data.website)}
 </LEDGERWEBSITE>
 
 <!-- PAN DETAILS -->
 
 <INCOMETAXNUMBER>
-${data.pan || ""}
+${safe(data.pan)}
 </INCOMETAXNUMBER>
 
 <!-- GST -->
@@ -151,15 +177,15 @@ Yes
 </ISGSTAPPLICABLE>
 
 <GSTREGISTRATIONTYPE>
-${data.gst_registration_type || "Regular"}
+${safe(data.gst_registration_type || "Regular")}
 </GSTREGISTRATIONTYPE>
 
 <PARTYGSTIN>
-${data.gstin || ""}
+${safe(data.gstin)}
 </PARTYGSTIN>
 
 <PLACEOFSUPPLY>
-${data.state || ""}
+${safe(data.state)}
 </PLACEOFSUPPLY>
 
 <!-- GST DETAILS -->
@@ -175,15 +201,15 @@ Taxable
 </TAXABILITY>
 
 <GSTREGISTRATIONTYPE>
-${data.gst_registration_type || "Regular"}
+${safe(data.gst_registration_type || "Regular")}
 </GSTREGISTRATIONTYPE>
 
 <PARTYGSTIN>
-${data.gstin || ""}
+${safe(data.gstin)}
 </PARTYGSTIN>
 
 <STATE>
-${data.state || ""}
+${safe(data.state)}
 </STATE>
 
 </GSTDETAILS.LIST>
@@ -197,15 +223,15 @@ ${data.state || ""}
 </APPLICABLEFROM>
 
 <GSTREGISTRATIONTYPE>
-${data.gst_registration_type || "Regular"}
+${safe(data.gst_registration_type || "Regular")}
 </GSTREGISTRATIONTYPE>
 
 <GSTIN>
-${data.gstin || ""}
+${safe(data.gstin)}
 </GSTIN>
 
 <STATE>
-${data.state || ""}
+${safe(data.state)}
 </STATE>
 
 </LEDGSTREGDETAILS.LIST>
@@ -217,7 +243,7 @@ ${data.state || ""}
 <NAME.LIST TYPE="String">
 
 <NAME>
-${data.ledger_name}
+${safe(data.ledger_name)}
 </NAME>
 
 </NAME.LIST>
@@ -237,6 +263,274 @@ ${data.ledger_name}
 </IMPORTDATA>
 
 </BODY>
+
+</ENVELOPE>
+
+`;
+
+};
+
+/* ==================================================
+   CREATE BANK LEDGER XML
+================================================== */
+
+export const createBankLedgerXML = (data) => {
+
+  return `
+
+<ENVELOPE>
+
+    <HEADER>
+
+        <TALLYREQUEST>
+            Import Data
+        </TALLYREQUEST>
+
+    </HEADER>
+
+    <BODY>
+
+        <IMPORTDATA>
+
+            <REQUESTDESC>
+
+                <REPORTNAME>
+                    All Masters
+                </REPORTNAME>
+
+                <STATICVARIABLES>
+
+                    <SVCURRENTCOMPANY>
+                        ${data.company || ""}
+                    </SVCURRENTCOMPANY>
+
+                </STATICVARIABLES>
+
+            </REQUESTDESC>
+
+            <REQUESTDATA>
+
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+                    <LEDGER
+                        NAME="${data.ledger_name || ""}"
+                        RESERVEDNAME=""
+                        ACTION="Create"
+                    >
+
+                        <!-- BASIC DETAILS -->
+
+                        <NAME>
+                            ${data.ledger_name || ""}
+                        </NAME>
+
+                        <MAILINGNAME>
+                            ${data.ledger_name || ""}
+                        </MAILINGNAME>
+
+                        <PARENT>
+                            ${data.parent || "Bank Accounts"}
+                        </PARENT>
+
+                        <OPENINGBALANCE>
+                            ${data.opening_balance || 0}
+                        </OPENINGBALANCE>
+
+                        <ISBILLWISEON>
+                            No
+                        </ISBILLWISEON>
+
+                        <ISBANKINGLEDGER>
+                            Yes
+                        </ISBANKINGLEDGER>
+
+                        <ISCHEQUEPRINTINGENABLED>
+                            Yes
+                        </ISCHEQUEPRINTINGENABLED>
+
+                        <ISPAYUPLOAD>
+                            Yes
+                        </ISPAYUPLOAD>
+
+                        <!-- BANK DETAILS -->
+
+                        <BANKNAME>
+                            ${data.bank_name || ""}
+                        </BANKNAME>
+
+                        <BANKBRANCHNAME>
+                            ${data.branch_name || ""}
+                        </BANKBRANCHNAME>
+
+                        <!-- MAILING DETAILS -->
+
+                        <LEDMAILINGDETAILS.LIST>
+
+                            <ADDRESS.LIST TYPE="String">
+
+                                <ADDRESS>
+                                    ${data.address || ""}
+                                </ADDRESS>
+
+                            </ADDRESS.LIST>
+
+                            <APPLICABLEFROM>
+                                ${data.applicable_from || "20250401"}
+                            </APPLICABLEFROM>
+
+                            <PINCODE>
+                                ${data.pincode || ""}
+                            </PINCODE>
+
+                            <STATE>
+                                ${data.state || ""}
+                            </STATE>
+
+                            <COUNTRY>
+                                ${data.country || "India"}
+                            </COUNTRY>
+
+                            <CONTACTPERSON>
+                                ${data.contact_person || ""}
+                            </CONTACTPERSON>
+
+                            <MOBILE>
+                                ${data.mobile || ""}
+                            </MOBILE>
+
+                            <EMAIL>
+                                ${data.email || ""}
+                            </EMAIL>
+
+                            <!-- IFSC -->
+
+                            <IFSCCODE>
+                                ${data.ifsc_code || ""}
+                            </IFSCCODE>
+
+                            <IFSCODE>
+                                ${data.ifsc_code || ""}
+                            </IFSCODE>
+
+                        </LEDMAILINGDETAILS.LIST>
+
+                        <!-- EXTRA DETAILS -->
+
+                        <LEDSTATENAME>
+                            ${data.state || ""}
+                        </LEDSTATENAME>
+
+                        <LEDCOUNTRYNAME>
+                            ${data.country || "India"}
+                        </LEDCOUNTRYNAME>
+
+                        <LEDPINCODE>
+                            ${data.pincode || ""}
+                        </LEDPINCODE>
+
+                        <LEDGERCONTACT>
+                            ${data.contact_person || ""}
+                        </LEDGERCONTACT>
+
+                        <LEDGERPHONE>
+                            ${data.mobile || ""}
+                        </LEDGERPHONE>
+
+                        <LEDGERMOBILE>
+                            ${data.mobile || ""}
+                        </LEDGERMOBILE>
+
+                        <!-- BANK ACCOUNT DETAILS -->
+
+                     <BANKALLOCATIONS.LIST>
+
+    <!-- ACCOUNT HOLDER -->
+
+    <BANKACCHOLDERNAME>
+        ${data.account_holder || ""}
+    </BANKACCHOLDERNAME>
+
+    <!-- ACCOUNT NUMBER -->
+
+ <BANKDETAILS>
+    ${data.account_number || ""}
+</BANKDETAILS>
+
+    <!-- BANK< -->
+
+   
+<NAME>
+    ${data.bank_name || ""}
+</NAME>
+
+<BANKNAME>
+    ${data.bank_name || ""}
+</BANKNAME>
+
+
+    <BANKBRANCHNAME>
+        ${data.branch_name || ""}
+    </BANKBRANCHNAME>
+
+    <BRANCHNAME>
+        ${data.branch_name || ""}
+    </BRANCHNAME>
+
+    <!-- IFSC -->
+
+    <BANKIFSC>
+        ${data.ifsc_code || ""}
+    </BANKIFSC>
+
+    <IFSCCODE>
+        ${data.ifsc_code || ""}
+    </IFSCCODE>
+
+    <IFSCODE>
+        ${data.ifsc_code || ""}
+    </IFSCODE>
+
+    <!-- SWIFT -->
+
+    <SWIFTCODE>
+        ${data.swift_code || ""}
+    </SWIFTCODE>
+
+    <!-- IBAN -->
+
+    <BANKIBAN>
+        ${data.iban || ""}
+    </BANKIBAN>
+
+</BANKALLOCATIONS.LIST>
+
+                        <!-- LANGUAGE -->
+
+                        <LANGUAGENAME.LIST>
+
+                            <NAME.LIST TYPE="String">
+
+                                <NAME>
+                                    ${data.ledger_name || ""}
+                                </NAME>
+
+                            </NAME.LIST>
+
+                            <LANGUAGEID>
+                                1033
+                            </LANGUAGEID>
+
+                        </LANGUAGENAME.LIST>
+
+                    </LEDGER>
+
+                </TALLYMESSAGE>
+
+            </REQUESTDATA>
+
+        </IMPORTDATA>
+
+    </BODY>
 
 </ENVELOPE>
 
