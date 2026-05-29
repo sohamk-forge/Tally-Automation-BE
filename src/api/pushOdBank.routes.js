@@ -1,11 +1,11 @@
+// =========================================
+// src/api/pushOdBank.routes.js
+// =========================================
+
 import express from "express";
-
-import axios from "axios";
-
 import pool from "../db/index.js";
 
-const router =
-  express.Router();
+const router = express.Router();
 
 /* =========================================
    PUSH OD / OCC BANK LEDGER
@@ -19,21 +19,37 @@ router.post(
 
     try {
 
-      /* =====================================
-         REQUEST BODY
-      ===================================== */
+      const {
 
-      const data =
-        req.body;
+        company,
+        ledger_name,
+        account_type,
+        opening_balance,
+        od_limit,
+        bank_name,
+        branch_name,
+        account_holder,
+        account_number,
+        ifsc_code,
+        swift_code,
+        address,
+        state,
+        country,
+        pincode,
+        contact_person,
+        mobile,
+        email
+
+      } = req.body;
 
       /* =====================================
-         REQUIRED VALIDATION
+         VALIDATION
       ===================================== */
 
       if (
-        !data.company ||
-        !data.ledger_name ||
-        !data.account_type
+        !company ||
+        !ledger_name ||
+        !account_type
       ) {
 
         return res.status(400).json({
@@ -48,200 +64,52 @@ router.post(
       }
 
       /* =====================================
-         PARENT GROUP
+         DUPLICATE CHECK
       ===================================== */
 
-      const parentGroup =
-        "Bank OD A/c";
+      const existing = await pool.query(
+
+        `
+        SELECT id
+
+        FROM app_test.bank_od_accounts
+
+        WHERE LOWER(TRIM(ledger_name))
+        = LOWER(TRIM($1))
+
+        AND sync_status IN
+        ('pending','success')
+
+        LIMIT 1
+        `,
+
+        [
+          ledger_name
+        ]
+
+      );
+
+      if (existing.rows.length > 0) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "OD/OCC ledger already queued or synced"
+
+        });
+
+      }
 
       /* =====================================
-         XML
-      ===================================== */
-
-      const xml = `
-
-<ENVELOPE>
-
-  <HEADER>
-
-    <TALLYREQUEST>
-      Import Data
-    </TALLYREQUEST>
-
-  </HEADER>
-
-  <BODY>
-
-    <IMPORTDATA>
-
-      <REQUESTDESC>
-
-        <REPORTNAME>
-          All Masters
-        </REPORTNAME>
-
-        <STATICVARIABLES>
-
-          <SVCURRENTCOMPANY>
-            ${data.company}
-          </SVCURRENTCOMPANY>
-
-        </STATICVARIABLES>
-
-      </REQUESTDESC>
-
-      <REQUESTDATA>
-
-        <TALLYMESSAGE xmlns:UDF="TallyUDF">
-
-          <LEDGER
-            NAME="${data.ledger_name}"
-            ACTION="Create"
-          >
-
-            <NAME>
-              ${data.ledger_name}
-            </NAME>
-
-            <MAILINGNAME>
-              ${data.ledger_name}
-            </MAILINGNAME>
-
-            <PARENT>
-              ${parentGroup}
-            </PARENT>
-
-            <ISODACCOUNT>
-              Yes
-            </ISODACCOUNT>
-
-            <ISLOANACCOUNT>
-              Yes
-            </ISLOANACCOUNT>
-
-            <OPENINGBALANCE>
-              ${data.opening_balance || 0}
-            </OPENINGBALANCE>
-
-            <ODLIMIT>
-              ${data.od_limit || 0}
-            </ODLIMIT>
-
-            <SETODLIMIT>
-              ${data.od_limit || 0}
-            </SETODLIMIT>
-
-            <BANKNAME>
-              ${data.bank_name || ""}
-            </BANKNAME>
-
-            <BANKBRANCHNAME>
-              ${data.branch_name || ""}
-            </BANKBRANCHNAME>
-
-            <LEDMAILINGDETAILS.LIST>
-
-              <ADDRESS.LIST TYPE="String">
-
-                <ADDRESS>
-                  ${data.address || ""}
-                </ADDRESS>
-
-              </ADDRESS.LIST>
-
-              <STATE>
-                ${data.state || ""}
-              </STATE>
-
-              <COUNTRY>
-                ${data.country || ""}
-              </COUNTRY>
-
-              <PINCODE>
-                ${data.pincode || ""}
-              </PINCODE>
-
-              <MOBILE>
-                ${data.mobile || ""}
-              </MOBILE>
-
-              <EMAIL>
-                ${data.email || ""}
-              </EMAIL>
-
-            </LEDMAILINGDETAILS.LIST>
-
-            <BANKALLOCATIONS.LIST>
-
-              <BANKACCHOLDERNAME>
-                ${data.account_holder || ""}
-              </BANKACCHOLDERNAME>
-
-              <BANKDETAILS>
-                ${data.account_number || ""}
-              </BANKDETAILS>
-
-              <BANKNAME>
-                ${data.bank_name || ""}
-              </BANKNAME>
-
-              <BANKBRANCHNAME>
-                ${data.branch_name || ""}
-              </BANKBRANCHNAME>
-
-              <BANKIFSC>
-                ${data.ifsc_code || ""}
-              </BANKIFSC>
-
-              <SWIFTCODE>
-                ${data.swift_code || ""}
-              </SWIFTCODE>
-
-            </BANKALLOCATIONS.LIST>
-
-          </LEDGER>
-
-        </TALLYMESSAGE>
-
-      </REQUESTDATA>
-
-    </IMPORTDATA>
-
-  </BODY>
-
-</ENVELOPE>
-
-`;
-
-      /* =====================================
-         SEND TO TALLY
-      ===================================== */
-
-      const tallyResponse =
-        await axios.post(
-
-          "http://localhost:9000",
-
-          xml,
-
-          {
-            headers: {
-              "Content-Type":
-                "text/xml"
-            }
-          }
-
-        );
-
-      /* =====================================
-         STORE IN DB
+         INSERT QUEUE
       ===================================== */
 
       await pool.query(
 
         `
-        INSERT INTO
-        app.bank_od_accounts
+        INSERT INTO app_test.bank_od_accounts
         (
 
           company_name,
@@ -261,7 +129,10 @@ router.post(
           pincode,
           contact_person,
           mobile,
-          email
+          email,
+          sync_status,
+          created_at,
+          updated_at
 
         )
 
@@ -271,55 +142,73 @@ router.post(
           $1,$2,$3,$4,$5,
           $6,$7,$8,$9,$10,
           $11,$12,$13,$14,$15,
-          $16,$17,$18
+          $16,$17,$18,
+          $19,
+          NOW(),
+          NOW()
 
         )
         `,
 
         [
 
-          data.company,
-          data.ledger_name,
-          data.account_type,
-          data.opening_balance,
-          data.od_limit,
-          data.bank_name,
-          data.branch_name,
-          data.account_holder,
-          data.account_number,
-          data.ifsc_code,
-          data.swift_code,
-          data.address,
-          data.state,
-          data.country,
-          data.pincode,
-          data.contact_person,
-          data.mobile,
-          data.email
+          company?.trim(),
+
+          ledger_name?.trim(),
+
+          account_type?.trim(),
+
+          opening_balance || 0,
+
+          od_limit || 0,
+
+          bank_name || "",
+
+          branch_name || "",
+
+          account_holder || "",
+
+          account_number || "",
+
+          ifsc_code || "",
+
+          swift_code || "",
+
+          address || "",
+
+          state || "",
+
+          country || "India",
+
+          pincode || "",
+
+          contact_person || "",
+
+          mobile || "",
+
+          email || "",
+
+          "pending"
 
         ]
 
       );
-
-      /* =====================================
-         SUCCESS
-      ===================================== */
 
       return res.status(200).json({
 
         status: "success",
 
         message:
-          "OD/OCC Ledger pushed successfully",
-
-        tallyResponse:
-          tallyResponse.data
+          "OD/OCC ledger queued successfully"
 
       });
 
     } catch (err) {
 
-      console.log(err.message);
+      console.log(
+        "PUSH OD BANK ERROR:",
+        err.message
+      );
 
       return res.status(500).json({
 

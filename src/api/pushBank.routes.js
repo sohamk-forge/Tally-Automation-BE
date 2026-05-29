@@ -1,21 +1,18 @@
+// =========================================
+// src/api/pushBank.routes.js
+// =========================================
+
 import express from "express";
 
-import pool from "../db/index.js";
-
-import { sendToTally }
-from "../services/tallyClient.js";
-
-import {
-  createBankLedgerXML
-}
-from "../services/pushXmlBuilder.js";
+import pool
+from "../db/index.js";
 
 const router =
   express.Router();
 
-/* ==================================================
+/* =========================================
    PUSH BANK LEDGER API
-================================================== */
+========================================= */
 
 router.post(
 
@@ -108,13 +105,20 @@ router.post(
 
           FROM app_test.push_bank
 
-          WHERE LOWER(ledger_name)
-          = LOWER($1)
+          WHERE LOWER(TRIM(ledger_name))
+          = LOWER(TRIM($1))
+
+          AND sync_status IN
+          ('pending', 'success')
 
           LIMIT 1
           `,
 
-          [ledger_name]
+          [
+
+            ledger_name
+
+          ]
 
         );
 
@@ -126,90 +130,14 @@ router.post(
             "error",
 
           message:
-            "Bank ledger already exists"
+            "Bank ledger already queued or synced"
 
         });
 
       }
 
       /* =====================================
-         BUILD XML DATA
-      ===================================== */
-
-      const xmlData = {
-
-        company,
-
-        ledger_name,
-
-        parent:
-          "Bank Accounts",
-
-        opening_balance:
-          opening_balance || 0,
-
-        bill_wise:
-          "No",
-
-        /* =================================
-           ADDRESS DETAILS
-        ================================= */
-
-        address,
-
-        state,
-
-        country:
-          country || "India",
-
-        pincode,
-
-        contact_person,
-
-        mobile,
-
-        email,
-
-        /* =================================
-           BANK DETAILS
-        ================================= */
-
-        bank_name,
-
-        branch_name,
-
-        account_holder,
-
-        account_number,
-
-        ifsc_code,
-
-        swift_code
-
-      };
-
-      /* =====================================
-         GENERATE XML
-      ===================================== */
-
-     const xml =
-
-  createBankLedgerXML(
-    xmlData
-  );
-
-      /* =====================================
-         SEND TO TALLY
-      ===================================== */
-
-      const tallyResponse =
-
-        await sendToTally(
-          xml
-        );
-
-      /* =====================================
-         STORE PUSH LOG
+         INSERT QUEUE RECORD
       ===================================== */
 
       await pool.query(
@@ -252,9 +180,11 @@ router.post(
 
           email,
 
-          tally_response,
+          sync_status,
 
-          created_at
+          created_at,
+
+          updated_at
 
         )
 
@@ -265,48 +195,50 @@ router.post(
           $5,  $6,  $7,  $8,
           $9,  $10, $11, $12,
           $13, $14, $15, $16,
-          $17, $18, NOW()
+          $17, $18,
+          NOW(),
+          NOW()
 
         )
         `,
 
         [
 
-          company,
+          company?.trim(),
 
-          ledger_name,
+          ledger_name?.trim(),
 
           "Bank Accounts",
 
           opening_balance || 0,
 
-          bank_name,
+          bank_name || "",
 
-          branch_name,
+          branch_name || "",
 
-          account_holder,
+          account_holder || "",
 
-          account_number,
+          account_number || "",
 
-          ifsc_code,
+          ifsc_code || "",
 
-          swift_code,
+          swift_code || "",
 
-          address,
+          address || "",
 
-          state,
+          state || "",
 
           country || "India",
 
-          pincode,
+          pincode || "",
 
-          contact_person,
+          contact_person || "",
 
-          mobile,
+          mobile || "",
 
-          email,
+          email || "",
 
-          tallyResponse
+          "pending"
 
         ]
 
@@ -322,24 +254,18 @@ router.post(
           "success",
 
         message:
-          "Bank ledger pushed successfully",
-
-        company,
-
-        ledger_name,
-
-        bank_name,
-
-        account_number,
-
-        ifsc_code
+          "Bank ledger queued successfully"
 
       });
 
     } catch (err) {
 
       console.log(
+
+        "❌ PUSH BANK ERROR:",
+
         err.message
+
       );
 
       return res.status(500).json({

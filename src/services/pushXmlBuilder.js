@@ -276,7 +276,251 @@ ${safe(data.ledger_name)}
 
 export const createBankLedgerXML = (data) => {
 
-  return `
+return `
+
+<ENVELOPE>
+
+<HEADER>
+
+<TALLYREQUEST>
+Import Data
+</TALLYREQUEST>
+
+</HEADER>
+
+<BODY>
+
+<IMPORTDATA>
+
+<REQUESTDESC>
+
+<REPORTNAME>
+All Masters
+</REPORTNAME>
+
+<STATICVARIABLES>
+
+<SVCURRENTCOMPANY>
+${safe(data.company)}
+</SVCURRENTCOMPANY>
+
+</STATICVARIABLES>
+
+</REQUESTDESC>
+
+<REQUESTDATA>
+
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+<LEDGER
+NAME="${safe(data.ledger_name)}"
+RESERVEDNAME=""
+ACTION="Create"
+>
+
+<!-- BASIC DETAILS -->
+
+<NAME>
+${safe(data.ledger_name)}
+</NAME>
+
+<MAILINGNAME>
+${safe(data.ledger_name)}
+</MAILINGNAME>
+
+<PARENT>
+${safe(data.parent || "Bank Accounts")}
+</PARENT>
+
+<OPENINGBALANCE>
+${data.opening_balance || 0}
+</OPENINGBALANCE>
+
+<ISBILLWISEON>
+No
+</ISBILLWISEON>
+
+<ISBANKINGLEDGER>
+Yes
+</ISBANKINGLEDGER>
+
+<ISCHEQUEPRINTINGENABLED>
+Yes
+</ISCHEQUEPRINTINGENABLED>
+
+<ISPAYUPLOAD>
+Yes
+</ISPAYUPLOAD>
+
+<!-- BANK DETAILS -->
+
+<BANKNAME>
+${safe(data.bank_name)}
+</BANKNAME>
+
+<BANKBRANCHNAME>
+${safe(data.branch_name)}
+</BANKBRANCHNAME>
+
+<!-- MAILING DETAILS -->
+
+<LEDMAILINGDETAILS.LIST>
+
+<ADDRESS.LIST TYPE="String">
+
+<ADDRESS>
+${safe(data.address)}
+</ADDRESS>
+
+</ADDRESS.LIST>
+
+<APPLICABLEFROM>
+${safe(data.applicable_from || "20250401")}
+</APPLICABLEFROM>
+
+<PINCODE>
+${safe(data.pincode)}
+</PINCODE>
+
+<STATE>
+${safe(data.state)}
+</STATE>
+
+<COUNTRY>
+${safe(data.country || "India")}
+</COUNTRY>
+
+<CONTACTPERSON>
+${safe(data.contact_person)}
+</CONTACTPERSON>
+
+<MOBILE>
+${safe(data.mobile)}
+</MOBILE>
+
+<EMAIL>
+${safe(data.email)}
+</EMAIL>
+
+<IFSCCODE>
+${safe(data.ifsc_code)}
+</IFSCCODE>
+
+<IFSCODE>
+${safe(data.ifsc_code)}
+</IFSCODE>
+
+</LEDMAILINGDETAILS.LIST>
+
+<!-- EXTRA DETAILS -->
+
+<LEDSTATENAME>
+${safe(data.state)}
+</LEDSTATENAME>
+
+<LEDCOUNTRYNAME>
+${safe(data.country || "India")}
+</LEDCOUNTRYNAME>
+
+<LEDPINCODE>
+${safe(data.pincode)}
+</LEDPINCODE>
+
+<LEDGERCONTACT>
+${safe(data.contact_person)}
+</LEDGERCONTACT>
+
+<LEDGERPHONE>
+${safe(data.mobile)}
+</LEDGERPHONE>
+
+<LEDGERMOBILE>
+${safe(data.mobile)}
+</LEDGERMOBILE>
+
+<!-- BANK ACCOUNT DETAILS -->
+
+<BANKALLOCATIONS.LIST>
+
+<BANKACCHOLDERNAME>
+${safe(data.account_holder)}
+</BANKACCHOLDERNAME>
+
+<BANKDETAILS>
+${safe(data.account_number)}
+</BANKDETAILS>
+
+<BANKNAME>
+${safe(data.bank_name)}
+</BANKNAME>
+
+<BANKBRANCHNAME>
+${safe(data.branch_name)}
+</BANKBRANCHNAME>
+
+<BRANCHNAME>
+${safe(data.branch_name)}
+</BRANCHNAME>
+
+<BANKIFSC>
+${safe(data.ifsc_code)}
+</BANKIFSC>
+
+<IFSCCODE>
+${safe(data.ifsc_code)}
+</IFSCCODE>
+
+<IFSCODE>
+${safe(data.ifsc_code)}
+</IFSCODE>
+
+<SWIFTCODE>
+${safe(data.swift_code)}
+</SWIFTCODE>
+
+<BANKIBAN>
+${safe(data.iban)}
+</BANKIBAN>
+
+</BANKALLOCATIONS.LIST>
+
+<!-- LANGUAGE -->
+
+<LANGUAGENAME.LIST>
+
+<NAME.LIST TYPE="String">
+
+<NAME>
+${safe(data.ledger_name)}
+</NAME>
+
+</NAME.LIST>
+
+<LANGUAGEID>
+1033
+</LANGUAGEID>
+
+</LANGUAGENAME.LIST>
+
+</LEDGER>
+
+</TALLYMESSAGE>
+
+</REQUESTDATA>
+
+</IMPORTDATA>
+
+</BODY>
+
+</ENVELOPE>
+
+`;
+
+};
+
+export const createOdBankXML = (data) => {
+
+return `
 
 <ENVELOPE>
 
@@ -301,7 +545,7 @@ export const createBankLedgerXML = (data) => {
                 <STATICVARIABLES>
 
                     <SVCURRENTCOMPANY>
-                        ${data.company || ""}
+                        ${safe(data.company)}
                     </SVCURRENTCOMPANY>
 
                 </STATICVARIABLES>
@@ -313,7 +557,7 @@ export const createBankLedgerXML = (data) => {
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
 
                     <LEDGER
-                        NAME="${data.ledger_name || ""}"
+                        NAME="${safe(data.ledger_name)}"
                         RESERVEDNAME=""
                         ACTION="Create"
                     >
@@ -321,20 +565,50 @@ export const createBankLedgerXML = (data) => {
                         <!-- BASIC DETAILS -->
 
                         <NAME>
-                            ${data.ledger_name || ""}
+                            ${safe(data.ledger_name)}
                         </NAME>
 
                         <MAILINGNAME>
-                            ${data.ledger_name || ""}
+                            ${safe(data.ledger_name)}
                         </MAILINGNAME>
 
+                        <!-- OD / OCC GROUP -->
+
                         <PARENT>
-                            ${data.parent || "Bank Accounts"}
+                            Bank OD A/c
                         </PARENT>
+
+                        <!-- OD FLAGS -->
+
+                        <ISODACCOUNT>
+                            Yes
+                        </ISODACCOUNT>
+
+                        <ISLOANACCOUNT>
+                            Yes
+                        </ISLOANACCOUNT>
+
+                        <ISINTERESTON>
+                            No
+                        </ISINTERESTON>
+
+                        <!-- OPENING BALANCE -->
 
                         <OPENINGBALANCE>
                             ${data.opening_balance || 0}
                         </OPENINGBALANCE>
+
+                        <!-- OD LIMIT -->
+
+                        <ODLIMIT>
+                            ${data.od_limit || 0}
+                        </ODLIMIT>
+
+                        <SETODLIMIT>
+                            ${data.od_limit || 0}
+                        </SETODLIMIT>
+
+                        <!-- BANKING -->
 
                         <ISBILLWISEON>
                             No
@@ -355,11 +629,11 @@ export const createBankLedgerXML = (data) => {
                         <!-- BANK DETAILS -->
 
                         <BANKNAME>
-                            ${data.bank_name || ""}
+                            ${safe(data.bank_name)}
                         </BANKNAME>
 
                         <BANKBRANCHNAME>
-                            ${data.branch_name || ""}
+                            ${safe(data.branch_name)}
                         </BANKBRANCHNAME>
 
                         <!-- MAILING DETAILS -->
@@ -369,47 +643,45 @@ export const createBankLedgerXML = (data) => {
                             <ADDRESS.LIST TYPE="String">
 
                                 <ADDRESS>
-                                    ${data.address || ""}
+                                    ${safe(data.address)}
                                 </ADDRESS>
 
                             </ADDRESS.LIST>
 
                             <APPLICABLEFROM>
-                                ${data.applicable_from || "20250401"}
+                                20250401
                             </APPLICABLEFROM>
 
                             <PINCODE>
-                                ${data.pincode || ""}
+                                ${safe(data.pincode)}
                             </PINCODE>
 
                             <STATE>
-                                ${data.state || ""}
+                                ${safe(data.state)}
                             </STATE>
 
                             <COUNTRY>
-                                ${data.country || "India"}
+                                ${safe(data.country || "India")}
                             </COUNTRY>
 
                             <CONTACTPERSON>
-                                ${data.contact_person || ""}
+                                ${safe(data.contact_person)}
                             </CONTACTPERSON>
 
                             <MOBILE>
-                                ${data.mobile || ""}
+                                ${safe(data.mobile)}
                             </MOBILE>
 
                             <EMAIL>
-                                ${data.email || ""}
+                                ${safe(data.email)}
                             </EMAIL>
 
-                            <!-- IFSC -->
-
                             <IFSCCODE>
-                                ${data.ifsc_code || ""}
+                                ${safe(data.ifsc_code)}
                             </IFSCCODE>
 
                             <IFSCODE>
-                                ${data.ifsc_code || ""}
+                                ${safe(data.ifsc_code)}
                             </IFSCODE>
 
                         </LEDMAILINGDETAILS.LIST>
@@ -417,92 +689,82 @@ export const createBankLedgerXML = (data) => {
                         <!-- EXTRA DETAILS -->
 
                         <LEDSTATENAME>
-                            ${data.state || ""}
+                            ${safe(data.state)}
                         </LEDSTATENAME>
 
                         <LEDCOUNTRYNAME>
-                            ${data.country || "India"}
+                            ${safe(data.country || "India")}
                         </LEDCOUNTRYNAME>
 
                         <LEDPINCODE>
-                            ${data.pincode || ""}
+                            ${safe(data.pincode)}
                         </LEDPINCODE>
 
                         <LEDGERCONTACT>
-                            ${data.contact_person || ""}
+                            ${safe(data.contact_person)}
                         </LEDGERCONTACT>
 
                         <LEDGERPHONE>
-                            ${data.mobile || ""}
+                            ${safe(data.mobile)}
                         </LEDGERPHONE>
 
                         <LEDGERMOBILE>
-                            ${data.mobile || ""}
+                            ${safe(data.mobile)}
                         </LEDGERMOBILE>
 
                         <!-- BANK ACCOUNT DETAILS -->
 
-                     <BANKALLOCATIONS.LIST>
+                        <BANKALLOCATIONS.LIST>
 
-    <!-- ACCOUNT HOLDER -->
+                            <BANKACCHOLDERNAME>
+                                ${safe(data.account_holder)}
+                            </BANKACCHOLDERNAME>
 
-    <BANKACCHOLDERNAME>
-        ${data.account_holder || ""}
-    </BANKACCHOLDERNAME>
+                            <BANKDETAILS>
+                                ${safe(data.account_number)}
+                            </BANKDETAILS>
 
-    <!-- ACCOUNT NUMBER -->
+                            <BANKACCOUNTNAME>
+                                ${safe(data.bank_name)}
+                            </BANKACCOUNTNAME>
 
- <BANKDETAILS>
-    ${data.account_number || ""}
-</BANKDETAILS>
+                            <BANKNAME>
+                                ${safe(data.bank_name)}
+                            </BANKNAME>
 
-    <!-- BANK< -->
+                            <BANKBRANCHNAME>
+                                ${safe(data.branch_name)}
+                            </BANKBRANCHNAME>
 
-   
-<NAME>
-    ${data.bank_name || ""}
-</NAME>
+                            <BRANCHNAME>
+                                ${safe(data.branch_name)}
+                            </BRANCHNAME>
 
-<BANKNAME>
-    ${data.bank_name || ""}
-</BANKNAME>
+                            <BANKIFSC>
+                                ${safe(data.ifsc_code)}
+                            </BANKIFSC>
 
+                            <IFSCCODE>
+                                ${safe(data.ifsc_code)}
+                            </IFSCCODE>
 
-    <BANKBRANCHNAME>
-        ${data.branch_name || ""}
-    </BANKBRANCHNAME>
+                            <IFSCODE>
+                                ${safe(data.ifsc_code)}
+                            </IFSCODE>
 
-    <BRANCHNAME>
-        ${data.branch_name || ""}
-    </BRANCHNAME>
+                            <SWIFTCODE>
+                                ${safe(data.swift_code)}
+                            </SWIFTCODE>
 
-    <!-- IFSC -->
+                            <SETASDEFAULTACCT>
+                                Yes
+                            </SETASDEFAULTACCT>
 
-    <BANKIFSC>
-        ${data.ifsc_code || ""}
-    </BANKIFSC>
+                            <ISDEFAULTBANK>
+                                Yes
+                            </ISDEFAULTBANK>
 
-    <IFSCCODE>
-        ${data.ifsc_code || ""}
-    </IFSCCODE>
-
-    <IFSCODE>
-        ${data.ifsc_code || ""}
-    </IFSCODE>
-
-    <!-- SWIFT -->
-
-    <SWIFTCODE>
-        ${data.swift_code || ""}
-    </SWIFTCODE>
-
-    <!-- IBAN -->
-
-    <BANKIBAN>
-        ${data.iban || ""}
-    </BANKIBAN>
-
-</BANKALLOCATIONS.LIST>
+                        </BANKALLOCATIONS.LIST>
 
                         <!-- LANGUAGE -->
 
@@ -511,7 +773,7 @@ export const createBankLedgerXML = (data) => {
                             <NAME.LIST TYPE="String">
 
                                 <NAME>
-                                    ${data.ledger_name || ""}
+                                    ${safe(data.ledger_name)}
                                 </NAME>
 
                             </NAME.LIST>

@@ -25,6 +25,11 @@ import "./cron/dailySync.cron.js";
 
 import "./workers/pushLedger.worker.js";
 
+import "./workers/pushBank.worker.js";
+
+import "./workers/pushOdBank.worker.js";
+
+
 /* =================================
 
    ROUTES
@@ -77,6 +82,10 @@ from "./api/pushLedger.routes.js";
 
 import pushBankRoutes
 from "./api/pushBank.routes.js";
+
+import pushOdBankRoutes
+from "./api/pushOdBank.routes.js";
+
 
 /* =================================
    MIDDLEWARE
@@ -235,6 +244,11 @@ app.use(
 app.use(
   "/api",
   pushBankRoutes
+);
+
+app.use(
+  "/api",
+  pushOdBankRoutes
 );
 
 /* =================================
