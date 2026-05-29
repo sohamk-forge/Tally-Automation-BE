@@ -1,7 +1,7 @@
 export async function up(knex) {
 
   await knex.schema
-    .withSchema("app")
+    .withSchema("app_test")
     .alterTable(
       "bank_od_accounts",
       (table) => {
@@ -34,7 +34,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema("app")
+    .withSchema("app_test")
     .alterTable(
       "bank_od_accounts",
       (table) => {

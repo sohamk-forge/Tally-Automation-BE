@@ -86,6 +86,9 @@ from "./api/pushBank.routes.js";
 import pushOdBankRoutes
 from "./api/pushOdBank.routes.js";
 
+import invoiceRoutes
+from "./api/invoices.routes.js";
+
 
 /* =================================
    MIDDLEWARE
@@ -249,6 +252,11 @@ app.use(
 app.use(
   "/api",
   pushOdBankRoutes
+);
+
+app.use(
+  "/api",
+  invoiceRoutes
 );
 
 /* =================================
