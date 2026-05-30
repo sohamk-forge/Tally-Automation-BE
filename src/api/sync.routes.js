@@ -479,48 +479,223 @@ router.get("/ledgers", async (req, res) => {
         const ledger = detailsParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER;
         if (!ledger) continue;
         
-        const originalGuid = ledger?.GUID || null;
-        const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'ledger');
-        const masterId = ledger?.MASTERID || null;
-        const alterId = ledger?.ALTERID || null;
-        
-        const result = await upsertRecord(
-          "app_test.ledgers", guid, masterId, alterId,
-          [
-            companyId,
-            company,
-            clean(ledgerName),
-            clean(ledger?.PARENT),
-            Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-              ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-              : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
-            clean(ledger?.STATENAME),
-            clean(ledger?.COUNTRYNAME),
-            clean(ledger?.PINCODE),
-            clean(ledger?.PARTYGSTIN),
-            clean(ledger?.GSTREGISTRATIONTYPE),
-            clean(ledger?.INCOMETAXNUMBER),
-            clean(ledger?.PHONE),
-            clean(ledger?.MOBILE),
-            clean(ledger?.EMAIL),
-            clean(ledger?.CONTACTPERSON),
-            clean(ledger?.OPENINGBALANCE),
-            clean(ledger?.CLOSINGBALANCE)
-          ],
-          [
-            "company_id", "company_name", "name", "parent_group", "address", "state", "country",
-            "pincode", "gst_number", "gst_type", "pan_number", "phone", "mobile",
-            "email", "contact_person", "opening_balance", "closing_balance"
-          ],
-          client
-        );
-        
-        if (result.action === "inserted") inserted++;
-        else if (result.action === "updated") updated++;
-        else ignored++;
-      } catch (innerErr) {
-        console.log("Ledger Error:", ledgerName, innerErr.message);
-      }
+const originalGuid =
+  ledger?.GUID || null;
+
+const guid =
+  originalGuid ||
+  generateFallbackGuid(
+    company,
+    ledgerName,
+    "ledger"
+  );
+
+const masterId =
+  ledger?.MASTERID || null;
+
+const alterId =
+  ledger?.ALTERID || null;
+
+/* =====================================
+   DEBUG LOG
+===================================== */
+
+console.log(
+  "================================="
+);
+
+console.log(
+  "SYNCING LEDGER:"
+);
+
+console.log(
+  ledgerName
+);
+
+console.log({
+  companyId,
+  guid,
+  masterId,
+  alterId
+});
+
+console.log(
+  "================================="
+);
+
+/* =====================================
+   UPSERT LEDGER
+===================================== */
+
+const result =
+  await upsertRecord(
+
+    "app_test.ledgers",
+
+    guid,
+
+    masterId,
+
+    alterId,
+
+    [
+
+      companyId,
+
+      company,
+
+      clean(ledgerName),
+
+      clean(
+        ledger?.PARENT
+      ),
+
+      Array.isArray(
+        ledger?.["ADDRESS.LIST"]?.ADDRESS
+      )
+        ? ledger[
+            "ADDRESS.LIST"
+          ].ADDRESS
+            .map(a => clean(a))
+            .filter(Boolean)
+            .join(", ")
+        : clean(
+            ledger?.["ADDRESS.LIST"]?.ADDRESS
+          ),
+
+      clean(
+        ledger?.STATENAME
+      ),
+
+      clean(
+        ledger?.COUNTRYNAME
+      ),
+
+      clean(
+        ledger?.PINCODE
+      ),
+
+      clean(
+        ledger?.PARTYGSTIN
+      ),
+
+      clean(
+        ledger?.GSTREGISTRATIONTYPE
+      ),
+
+      clean(
+        ledger?.INCOMETAXNUMBER
+      ),
+
+      clean(
+        ledger?.PHONE
+      ),
+
+      clean(
+        ledger?.MOBILE
+      ),
+
+      clean(
+        ledger?.EMAIL
+      ),
+
+      clean(
+        ledger?.CONTACTPERSON
+      ),
+
+      clean(
+        ledger?.OPENINGBALANCE
+      ),
+
+      clean(
+        ledger?.CLOSINGBALANCE
+      )
+
+    ],
+
+    [
+
+      "company_id",
+      "company_name",
+      "name",
+      "parent_group",
+      "address",
+      "state",
+      "country",
+      "pincode",
+      "gst_number",
+      "gst_type",
+      "pan_number",
+      "phone",
+      "mobile",
+      "email",
+      "contact_person",
+      "opening_balance",
+      "closing_balance"
+
+    ],
+
+    client
+
+  );
+
+/* =====================================
+   COUNTERS
+===================================== */
+
+if (
+  result.action === "inserted"
+) {
+
+  inserted++;
+
+} else if (
+  result.action === "updated"
+) {
+
+  updated++;
+
+} else {
+
+  ignored++;
+
+}
+
+} catch (innerErr) {
+
+  console.log(
+    "================================="
+  );
+
+  console.log(
+    "LEDGER FAILED:"
+  );
+
+  console.log(
+    ledgerName
+  );
+
+  console.log(
+    "ERROR:"
+  );
+
+  console.log(
+    innerErr.message
+  );
+
+  console.log(
+    "STACK:"
+  );
+
+  console.log(
+    innerErr.stack
+  );
+
+  console.log(
+    "================================="
+  );
+
+}
     }
     
     await client.query("COMMIT");
