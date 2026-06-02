@@ -89,57 +89,23 @@ router.get("/", async (req, res) => {
 
     const ledgerQuery = `
 
-      SELECT
+    SELECT
 
-        id,
+  id,
 
-        company_name,
+  company_id,
 
-        name,
+  company_name,
 
-        parent_group
-          AS under_group,
+  name,
 
-        address,
+  gst_number,
 
-        state,
+  guid,
 
-        country,
+  created_at,
 
-        pincode,
-
-        gst_number,
-
-        gst_type,
-
-        pan_number,
-
-        phone,
-
-        mobile,
-
-        email,
-
-        contact_person,
-
-        opening_balance,
-
-        opening_balance_type,
-
-        closing_balance,
-
-        credit_period,
-
-        bill_wise,
-
-        revenue_ledger,
-
-        deemed_positive,
-
-        created_at,
-
-        updated_at
-
+  updated_at
     FROM app_test.ledgers
 
       WHERE

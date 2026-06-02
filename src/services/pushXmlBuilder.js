@@ -799,3 +799,156 @@ return `
 `;
 
 };
+
+
+export const getStockItemCreateXML = ({
+  company,
+  itemName,
+  alias,
+  unit,
+  description,
+  hsnCode,
+  cgst,
+  sgst,
+  igst,
+  gstApplicable,
+  parentGroup
+}) => {
+
+  const finalGSTApplicable = gstApplicable || "Not Applicable";
+
+  let gstDetailsSection = "";
+
+  if (finalGSTApplicable === "Applicable") {
+
+    gstDetailsSection = `
+
+      <GSTDETAILS.LIST>
+
+        <APPLICABLEFROM>20260401</APPLICABLEFROM>
+
+        <TAXABILITY>Taxable</TAXABILITY>
+
+        <SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>
+
+        <STATEWISEDETAILS.LIST>
+
+          <STATENAME>&#4; Any</STATENAME>
+
+          <RATEDETAILS.LIST>
+            <GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD>
+            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
+            <GSTRATE>${cgst || 0}</GSTRATE>
+          </RATEDETAILS.LIST>
+
+          <RATEDETAILS.LIST>
+            <GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD>
+            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
+            <GSTRATE>${sgst || 0}</GSTRATE>
+          </RATEDETAILS.LIST>
+
+          <RATEDETAILS.LIST>
+            <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
+            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
+            <GSTRATE>${igst || 0}</GSTRATE>
+          </RATEDETAILS.LIST>
+
+        </STATEWISEDETAILS.LIST>
+
+      </GSTDETAILS.LIST>
+
+      <HSNDETAILS.LIST>
+
+        <APPLICABLEFROM>20260401</APPLICABLEFROM>
+
+        <HSNCODE>${hsnCode || ""}</HSNCODE>
+
+        <SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>
+
+      </HSNDETAILS.LIST>
+
+    `;
+  }
+
+  return `
+
+<ENVELOPE>
+
+ <HEADER>
+  <TALLYREQUEST>Import Data</TALLYREQUEST>
+ </HEADER>
+
+ <BODY>
+
+  <IMPORTDATA>
+
+   <REQUESTDESC>
+
+    <REPORTNAME>All Masters</REPORTNAME>
+
+    <STATICVARIABLES>
+
+      <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+
+    </STATICVARIABLES>
+
+   </REQUESTDESC>
+
+   <REQUESTDATA>
+
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+      <STOCKITEM NAME="${itemName}" ACTION="Create">
+
+        <NAME>${itemName}</NAME>
+
+        <PARENT>${parentGroup}</PARENT>
+
+        <CATEGORY>&#4; Not Applicable</CATEGORY>
+
+        <GSTAPPLICABLE>&#4; ${finalGSTApplicable}</GSTAPPLICABLE>
+
+        <TAXCLASSIFICATIONNAME>&#4; Not Applicable</TAXCLASSIFICATIONNAME>
+
+        <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+
+        <COSTINGMETHOD>Avg. Cost</COSTINGMETHOD>
+
+        <VALUATIONMETHOD>Avg. Price</VALUATIONMETHOD>
+
+        <BASEUNITS>${unit}</BASEUNITS>
+
+        <ADDITIONALUNITS>&#4; Not Applicable</ADDITIONALUNITS>
+
+        <DESCRIPTION>${description}</DESCRIPTION>
+
+        ${gstDetailsSection}
+
+        <LANGUAGENAME.LIST>
+
+          <NAME.LIST TYPE="String">
+
+            <NAME>${itemName}</NAME>
+
+            <NAME>${alias || itemName}</NAME>
+
+          </NAME.LIST>
+
+          <LANGUAGEID>1033</LANGUAGEID>
+
+        </LANGUAGENAME.LIST>
+
+      </STOCKITEM>
+
+    </TALLYMESSAGE>
+
+   </REQUESTDATA>
+
+  </IMPORTDATA>
+
+ </BODY>
+
+</ENVELOPE>
+
+`;
+};

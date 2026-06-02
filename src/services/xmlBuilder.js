@@ -124,108 +124,68 @@
     FULL LEDGER DETAILS XML
   ================================================== */
 
-  export const getLedgerDetailsXML = (
-    company,
-    ledgerName
-  ) => {
+export const getLedgerDetailsXML = (
+  company,
+  ledgerName
+) => {
 
-    return `
-  <ENVELOPE>
+  return `
+<ENVELOPE>
 
-    <HEADER>
+  <HEADER>
 
-      <VERSION>1</VERSION>
+    <VERSION>1</VERSION>
 
-      <TALLYREQUEST>Export</TALLYREQUEST>
+    <TALLYREQUEST>Export</TALLYREQUEST>
 
-      <TYPE>Object</TYPE>
+    <TYPE>Object</TYPE>
 
-      <SUBTYPE>Ledger</SUBTYPE>
+    <SUBTYPE>Ledger</SUBTYPE>
 
-      <ID TYPE="Name">
-        ${ledgerName}
-      </ID>
+    <ID TYPE="Name">${ledgerName}</ID>
 
-    </HEADER>
+  </HEADER>
 
-    <BODY>
+  <BODY>
 
-      <DESC>
+    <DESC>
 
-        <STATICVARIABLES>
+      <STATICVARIABLES>
 
-          <SVCURRENTCOMPANY>
-            ${company}
-          </SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
 
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
 
-        </STATICVARIABLES>
+      </STATICVARIABLES>
 
-        <FETCHLIST>
+      <FETCHLIST>
 
-          <FETCH>NAME</FETCH>
+        <FETCH>NAME</FETCH>
 
-          <FETCH>PARENT</FETCH>
+     <FETCH>PARTYGSTIN</FETCH>
 
-          <FETCH>ADDRESS</FETCH>
+<FETCH>LEDGSTREGDETAILS.*</FETCH>
 
-          <FETCH>MAILINGNAME</FETCH>
+<FETCH>GUID</FETCH>
 
-          <FETCH>STATENAME</FETCH>
+<FETCH>MASTERID</FETCH>
 
-  <FETCH>STATE</FETCH>
+<FETCH>ALTERID</FETCH>
 
-  <FETCH>LEDSTATENAME</FETCH>
+      </FETCHLIST>
 
-          <FETCH>COUNTRYNAME</FETCH>
+    </DESC>
 
-          <FETCH>PINCODE</FETCH>
+  </BODY>
 
-        <FETCH>PHONE</FETCH>
+</ENVELOPE>
+`;
 
-  <FETCH>MOBILE</FETCH>
-
-  <FETCH>EMAIL</FETCH>
-
-  <FETCH>LEDGERPHONE</FETCH>
-
-  <FETCH>LEDGERMOBILE</FETCH>
-
-  <FETCH>LEDGEREMAIL</FETCH>
-
-          <FETCH>CONTACTPERSON</FETCH>
-
-          <FETCH>PARTYGSTIN</FETCH>
-
-          <FETCH>GSTREGISTRATIONTYPE</FETCH>
-
-          <FETCH>INCOMETAXNUMBER</FETCH>
-
-          <FETCH>OPENINGBALANCE</FETCH>
-
-          <FETCH>CLOSINGBALANCE</FETCH>
-
-          <FETCH>CREDITPERIOD</FETCH>
-
-          <FETCH>ISBILLWISEON</FETCH>
-
-          <FETCH>ISREVENUE</FETCH>
-
-          <FETCH>ISDEEMEDPOSITIVE</FETCH>
-
-        </FETCHLIST>
-
-      </DESC>
-
-    </BODY>
-
-  </ENVELOPE>
-  `;
-
-  };
+};
 
 
   export const getGroupSummaryCRXML = (
@@ -1102,4 +1062,213 @@ export const getStockGroupSummaryXML = (
 
 `;
 
+};
+
+/* ===================================================
+   SIMPLE UNITS XML
+=================================================== */
+
+export const getUnitsXML = (company) => {
+
+  return `
+
+<ENVELOPE>
+
+    <HEADER>
+
+        <VERSION>1</VERSION>
+
+        <TALLYREQUEST>
+            Export
+        </TALLYREQUEST>
+
+        <TYPE>
+            Collection
+        </TYPE>
+
+        <ID>
+            TSPLSimpleUnits
+        </ID>
+
+    </HEADER>
+
+    <BODY>
+
+        <DESC>
+
+            <STATICVARIABLES>
+
+                <SVEXPORTFORMAT>
+                    XML
+                </SVEXPORTFORMAT>
+
+                <SVCURRENTCOMPANY>
+                    ${company}
+                </SVCURRENTCOMPANY>
+
+            </STATICVARIABLES>
+
+            <TDL>
+
+                <TDLMESSAGE>
+
+                    <COLLECTION
+                        NAME="TSPLSimpleUnits"
+                        ISMODIFY="No"
+                        ISFIXED="No"
+                        ISINITIALIZE="No"
+                        ISOPTION="No"
+                        ISINTERNAL="No"
+                    >
+
+                        <TYPE>
+                            Unit
+                        </TYPE>
+
+                        <NATIVEMETHOD>
+                            Name,
+                            OriginalName,
+                            IsSimpleUnit
+                        </NATIVEMETHOD>
+
+                        <FILTERS>
+                            TSPLSimpleUnitsOnly
+                        </FILTERS>
+
+                    </COLLECTION>
+
+                    <SYSTEM
+                        TYPE="Formulae"
+                        NAME="TSPLSimpleUnitsOnly"
+                    >
+
+                        $IsSimpleUnit
+
+                    </SYSTEM>
+
+                </TDLMESSAGE>
+
+            </TDL>
+
+        </DESC>
+
+    </BODY>
+
+</ENVELOPE>
+
+  `;
+
+};
+
+
+export const getAllLedgersXML = (company) => {
+
+  return `
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>AllLedgers</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="AllLedgers">
+
+            <TYPE>Ledger</TYPE>
+
+            <FETCH>
+
+              NAME,
+              ALIAS,
+              PARENT,
+
+              MAILINGNAME,
+              ADDRESS,
+
+              COUNTRYNAME,
+              STATENAME,
+              STATE,
+              LEDSTATENAME,
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+              PHONENUMBER,
+              LEDGERPHONE,
+
+              MOBILE,
+              MOBILENUMBER,
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+              CONTACTDETAILS.*,
+
+              PARTYGSTIN,
+              GSTREGISTRATIONTYPE,
+              PARTYREGISTRATIONTYPE,
+
+              GSTIN,
+              PLACEOFSUPPLY,
+
+              LEDGSTREGDETAILS.*,
+
+              INCOMETAXNUMBER,
+
+              BANKNAME,
+              BANKACCOUNTNUMBER,
+              BANKBRANCHNAME,
+              BANKIFSCODE,
+
+              CREDITPERIOD,
+              CREDITLIMIT,
+
+              OPENINGBALANCE,
+              CLOSINGBALANCE,
+
+              GUID,
+              MASTERID,
+              ALTERID
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
 };

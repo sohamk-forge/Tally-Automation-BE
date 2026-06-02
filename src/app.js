@@ -32,6 +32,9 @@ import "./workers/pushBank.worker.js";
 import "./workers/pushOdBank.worker.js";
 
 
+import "./workers/pushStockItem.worker.js";
+
+
 
 
 
@@ -93,7 +96,14 @@ from "./api/pushOdBank.routes.js";
 
 import invoiceRoutes
 from "./api/invoices.routes.js";
+import unitsRoutes
+from "./api/units.routes.js";
 
+import pushStockItemRoutes
+from "./api/pushStockItem.routes.js";
+
+import allLedgerDetailsRoutes
+from "./api/allLedgerDetails.routes.js";
 
 
 
@@ -242,6 +252,15 @@ app.use(
 );
 
 /* =================================
+   UNITS APIs
+================================= */
+
+app.use(
+  "/api/units",
+  unitsRoutes
+);
+
+/* =================================
    PUSH LEDGER APIs
 ================================= */
 
@@ -266,6 +285,15 @@ app.use(
   invoiceRoutes
 );
 
+app.use(
+  "/api",
+  pushStockItemRoutes
+);
+
+app.use(
+  "/api/all-ledger-details",
+  allLedgerDetailsRoutes
+);
 
 
 /* =================================

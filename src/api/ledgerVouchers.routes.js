@@ -97,12 +97,13 @@ router.get(
 
     FROM app_test.vouchers
 
-        WHERE
+      WHERE
 
-          company_name = $1
+  LOWER(TRIM(company_name))
+  = LOWER(TRIM($1))
 
-          AND DATE(voucher_date)
-          BETWEEN $2 AND $3
+  AND DATE(voucher_date)
+  BETWEEN $2 AND $3
         `;
 
       /* =========================================
@@ -144,7 +145,11 @@ router.get(
          PARTY FILTER
       ========================================= */
 
-      if (party) {
+    if (
+  party &&
+  party !== "undefined" &&
+  party !== "null"
+) {
 
         query +=
 
@@ -176,6 +181,8 @@ router.get(
       /* =========================================
          EXECUTE QUERY
       ========================================= */
+      console.log("REQ QUERY:", req.query);
+console.log("VALUES:", values);
 
       const result =
 
@@ -185,6 +192,11 @@ router.get(
           values
 
         );
+
+        console.log(
+  "ROWS FOUND:",
+  result.rows.length
+);
 
       /* =========================================
          SUCCESS RESPONSE

@@ -1,9 +1,9 @@
 import express from "express";
 import pool from "../db/index.js";
-import axios from "axios";
 import { sendToTally } from "../services/tallyClient.js";
 import {
   getCompaniesXML,
+    getUnitsXML,
   getLedgersXML,
   getLedgerDetailsXML,
   getGroupSummaryCRXML,
@@ -14,11 +14,11 @@ import {
   getGroupBalanceXML,
   getAllParentGroupDetailsXML,
   getProfitLossXML,
-    getStockGroupSummaryXML
+    getStockGroupSummaryXML,
+      getAllLedgersXML
+    
 } from "../services/xmlBuilder.js";
 import { parseXML } from "../services/parser.js";
-import { parseStringPromise }
-from "xml2js";
 import {
   createAuditLog
 } from "../utils/createAuditLog.js";
@@ -58,10 +58,11 @@ const allowedTables = [
   "app_test.all_parent_groups",
   "app_test.profit_loss",
   "app_test.stock_group_summary",
-  "app_test.sales_items"
+  "app_test.sales_items",
+  "app_test.units",
+  "app_test.all_ledger_details"  // ✅ 添加这一行
 
 ];
-
 /* ===================================================
    HELPER FUNCTIONS
 =================================================== */
@@ -237,10 +238,11 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   }
   
   // COMPARE ALTERID
-  const dbAlterId = Number(existing.rows[0]?.alter_id || 0);
-  const newAlterId = Number(alterId || 0);
-  
-  if (newAlterId > dbAlterId) {
+const dbAlterId = Number(existing.rows[0]?.alter_id || 0);
+const newAlterId = Number(alterId || 0);
+
+// Force update
+if (newAlterId >= dbAlterId) {
     const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(", ");
     const updateValues = [...data, newAlterId, finalGuid];
     const query = `
@@ -290,7 +292,12 @@ router.get("/companies", async (req, res) => {
     const uniqueCompanies = new Map();
     
     for (const item of list) {
-      const name = clean(item?.NAME);
+      const rawName = item?.NAME;
+
+const name =
+  typeof rawName === "object"
+    ? rawName?._ || null
+    : clean(rawName);
       if (!name) continue;
       
       // Keep only the first occurrence of each company name
@@ -378,8 +385,10 @@ router.get("/companies", async (req, res) => {
 
     ).map((item) => ({
 
-      name:
-        clean(item?.NAME),
+    name:
+  typeof item?.NAME === "object"
+    ? item?.NAME?._ || null
+    : clean(item?.NAME),
 
       guid:
         item?.GUID || null,
@@ -425,300 +434,233 @@ router.get("/companies", async (req, res) => {
   }
 });
 
-/* ===================================================
-   LEDGER SYNC (UPDATED WITH company_id)
-=================================================== */
-
 router.get("/ledgers", async (req, res) => {
   const company = req.query.company;
   if (!company) {
-    return res.status(400).json({
-      status: "error",
-      message: "company query parameter required"
-    });
+    return res.status(400).json({ status: "error", message: "company query parameter required" });
   }
-  
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    
-    // Get company_id using helper
+
     const companyId = await getCompanyId(company, client);
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
-    
+    if (!companyId) throw new Error("Company not found");
+
     const xml = getLedgersXML(company);
-    const responseXML = await sendToTally(xml);
-    const parsed = await parseXML(responseXML);
-    
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+const responseXML = await sendToTally(xml);
+
+console.log("");
+console.log("=================================");
+console.log("RAW XML RESPONSE");
+console.log("=================================");
+console.log(responseXML);
+
+const parsed = await parseXML(responseXML);
+
+console.log("");
+console.log("=================================");
+console.log("PARSED RESPONSE");
+console.log("=================================");
+console.log(JSON.stringify(parsed, null, 2));
+
+const collection =
+  parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+
+console.log("");
+console.log("=================================");
+console.log("COLLECTION");
+console.log("=================================");
+console.log(collection);
+
+if (!collection) {
+  throw new Error("No ledger collection found");
+}
     if (!collection) throw new Error("No ledger collection found");
-    
+
     const ledgerNames = [];
+
+    function cleanLedgerName(name) {
+      return String(name)
+        .replace(/&#13;&#10;/g, ' ').replace(/&#13;/g, ' ').replace(/&#10;/g, ' ')
+        .replace(/\r\n/g, ' ').replace(/\r/g, ' ').replace(/\n/g, ' ')
+        .replace(/\u200B/g, '').replace(/\u200C/g, '').replace(/\u200D/g, '')
+        .replace(/\u00A0/g, ' ').replace(/\uFEFF/g, '')
+        .replace(/\u2028/g, ' ').replace(/\u2029/g, ' ')
+        .replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+        .replace(/\s+/g, ' ').replace(/\s+,/g, ',').trim();
+    }
+
     function extractNames(obj) {
       if (!obj) return;
-      if (Array.isArray(obj)) return obj.forEach(extractNames);
+      if (Array.isArray(obj)) { obj.forEach(extractNames); return; }
       if (typeof obj === "object") {
-        if (obj.NAME) ledgerNames.push(String(obj.NAME).trim());
+        if (obj.NAME) {
+          let ledgerName = typeof obj.NAME === "object"
+            ? obj.NAME?._ || null
+            : String(obj.NAME).trim();
+          if (ledgerName && ledgerName !== "[object Object]") {
+            ledgerName = cleanLedgerName(ledgerName);
+            if (ledgerName) ledgerNames.push(ledgerName);
+          }
+        }
         Object.values(obj).forEach(extractNames);
       }
     }
+
     extractNames(collection);
     const uniqueLedgers = [...new Set(ledgerNames)];
-    
-    let inserted = 0, updated = 0, ignored = 0;
-    
-    for (const ledgerName of uniqueLedgers) {
+    console.log(`📊 Total ledgers found: ${uniqueLedgers.length}`);
+
+    let inserted = 0, updated = 0;
+    const failedLedgers = [];
+
+    for (let i = 0; i < uniqueLedgers.length; i++) {
+      const ledgerName = uniqueLedgers[i];
+      const savepointName = `sp_ledger_${i}`;
+
+      // ✅ SAVEPOINT per ledger — one failure won't kill the whole transaction
+      await client.query(`SAVEPOINT ${savepointName}`);
+
       try {
-        const detailsXML = getLedgerDetailsXML(company, ledgerName);
+        console.log(`[${i + 1}/${uniqueLedgers.length}] Processing: ${ledgerName}`);
+
+        const xmlSafeName = ledgerName
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+        let guid = null;
+        let gstNumber = null;
+
+        const detailsXML = getLedgerDetailsXML(company, xmlSafeName);
         const detailsResponse = await sendToTally(detailsXML);
-        if (detailsResponse.includes("<ERRORMSG>")) continue;
-        
-        const detailsParsed = await parseXML(detailsResponse);
-        const ledger = detailsParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER;
-        if (!ledger) continue;
-        
-const originalGuid =
-  ledger?.GUID || null;
 
-const guid =
-  originalGuid ||
-  generateFallbackGuid(
-    company,
-    ledgerName,
-    "ledger"
-  );
+        if (
+          detailsResponse &&
+          !detailsResponse.includes("<ERRORMSG>") &&
+          !detailsResponse.includes("Unknown Request") &&
+          !detailsResponse.includes("<STATUS>0</STATUS>")
+        ) {
+          const detailsParsed = await parseXML(detailsResponse);
 
-const masterId =
-  ledger?.MASTERID || null;
+          let ledger =
+            detailsParsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER ||
+            detailsParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER ||
+            detailsParsed?.ENVELOPE?.BODY?.DATA?.LEDGER;
 
-const alterId =
-  ledger?.ALTERID || null;
-
-/* =====================================
-   DEBUG LOG
-===================================== */
-
-console.log(
-  "================================="
-);
-
-console.log(
-  "SYNCING LEDGER:"
-);
-
-console.log(
-  ledgerName
-);
-
-console.log({
-  companyId,
-  guid,
-  masterId,
-  alterId
-});
-
-console.log(
-  "================================="
-);
-
-/* =====================================
-   UPSERT LEDGER
-===================================== */
-
-const result =
-  await upsertRecord(
-
-    "app_test.ledgers",
-
-    guid,
-
-    masterId,
-
-    alterId,
-
-    [
-
-      companyId,
-
-      company,
-
-      clean(ledgerName),
-
-      clean(
-        ledger?.PARENT
-      ),
-
-      Array.isArray(
-        ledger?.["ADDRESS.LIST"]?.ADDRESS
-      )
-        ? ledger[
-            "ADDRESS.LIST"
-          ].ADDRESS
-            .map(a => clean(a))
-            .filter(Boolean)
-            .join(", ")
-        : clean(
-            ledger?.["ADDRESS.LIST"]?.ADDRESS
-          ),
-
-      clean(
-        ledger?.STATENAME
-      ),
-
-      clean(
-        ledger?.COUNTRYNAME
-      ),
-
-      clean(
-        ledger?.PINCODE
-      ),
-
-      clean(
-        ledger?.PARTYGSTIN
-      ),
-
-      clean(
-        ledger?.GSTREGISTRATIONTYPE
-      ),
-
-      clean(
-        ledger?.INCOMETAXNUMBER
-      ),
-
-      clean(
-        ledger?.PHONE
-      ),
-
-      clean(
-        ledger?.MOBILE
-      ),
-
-      clean(
-        ledger?.EMAIL
-      ),
-
-      clean(
-        ledger?.CONTACTPERSON
-      ),
-
-      clean(
-        ledger?.OPENINGBALANCE
-      ),
-
-      clean(
-        ledger?.CLOSINGBALANCE
-      )
-
-    ],
-
-    [
-
-      "company_id",
-      "company_name",
-      "name",
-      "parent_group",
-      "address",
-      "state",
-      "country",
-      "pincode",
-      "gst_number",
-      "gst_type",
-      "pan_number",
-      "phone",
-      "mobile",
-      "email",
-      "contact_person",
-      "opening_balance",
-      "closing_balance"
-
-    ],
-
-    client
-
-  );
-
-/* =====================================
-   COUNTERS
-===================================== */
-
-if (
-  result.action === "inserted"
-) {
-
-  inserted++;
-
-} else if (
-  result.action === "updated"
-) {
-
-  updated++;
-
-} else {
-
-  ignored++;
-
+        if (Array.isArray(ledger)) {
+  ledger = ledger[0];
 }
 
-} catch (innerErr) {
+if (ledger?.GUID) {
 
-  console.log(
-    "================================="
-  );
+  guid = typeof ledger.GUID === "object"
+    ? ledger.GUID?._ || null
+    : String(ledger.GUID).trim();
 
-  console.log(
-    "LEDGER FAILED:"
-  );
+  gstNumber =
+    ledger?.PARTYGSTIN
+      ? (
+          typeof ledger.PARTYGSTIN === "object"
+            ? ledger.PARTYGSTIN?._ || null
+            : String(ledger.PARTYGSTIN).trim()
+        )
+      : null;
 
-  console.log(
-    ledgerName
-  );
+  if (!gstNumber) {
 
-  console.log(
-    "ERROR:"
-  );
+    console.log(
+      "GST DETAILS:",
+      JSON.stringify(
+        ledger?.["LEDGSTREGDETAILS.LIST"],
+        null,
+        2
+      )
+    );
 
-  console.log(
-    innerErr.message
-  );
-
-  console.log(
-    "STACK:"
-  );
-
-  console.log(
-    innerErr.stack
-  );
-
-  console.log(
-    "================================="
-  );
-
+    gstNumber =
+      ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTIN ||
+      ledger?.["LEDGSTREGDETAILS.LIST"]?.REGISTRATIONNUMBER ||
+      ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTREGISTRATIONNUMBER ||
+      null;
+  }
 }
+        }
+
+        if (!guid) {
+          console.log(`❌ No GUID from Tally, skipping: ${ledgerName}`);
+          await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+          failedLedgers.push({ name: ledgerName, reason: "No GUID returned from Tally" });
+          continue;
+        }
+
+        // ✅ Only pass columns your table ACTUALLY has
+        const result = await upsertRecord(
+          "app_test.ledgers",
+          guid,
+          null,
+          null,
+          [companyId, company, ledgerName, gstNumber],
+          ["company_id", "company_name", "name", "gst_number"],
+          client
+        );
+
+        await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+
+        if (result.action === "inserted") { inserted++; console.log(`✅ INSERTED: ${ledgerName}`); }
+        else if (result.action === "updated") { updated++; console.log(`🔄 UPDATED: ${ledgerName}`); }
+
+      } catch (err) {
+        // ✅ Roll back only THIS ledger, transaction stays alive
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+        await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+
+        console.log(`❌ FAILED: ${ledgerName}`);
+        console.log(`   ERROR: ${err.message}`);          // <-- this will show the REAL first error
+        console.log(`   CODE:  ${err.code}`);             // e.g. 42703 = undefined_column
+        console.log(`   DETAIL: ${err.detail || ''}`);
+
+        failedLedgers.push({ name: ledgerName, reason: err.message, code: err.code });
+      }
     }
-    
+
     await client.query("COMMIT");
-    
+
+    if (failedLedgers.length > 0) {
+      console.log("=== FAILED LEDGERS ===");
+      failedLedgers.slice(0, 20).forEach((l, idx) => {
+        console.log(`${idx + 1}. "${l.name}" | code: ${l.code} | reason: ${l.reason}`);
+      });
+    }
+
+    console.log("=================================");
+    console.log(`Total   : ${uniqueLedgers.length}`);
+    console.log(`Inserted: ${inserted} | Updated: ${updated} | Failed: ${failedLedgers.length}`);
+    console.log("=================================");
+
     return res.status(200).json({
       status: "success",
-      source: "tally",
-      message: "Ledgers synced successfully",
       company,
-      summary: { inserted, updated, ignored, total: uniqueLedgers.length }
+      summary: {
+        total_found: uniqueLedgers.length,
+        inserted,
+        updated,
+        failed: failedLedgers.length,
+        // First failed ledger shown to help debug
+        first_failure: failedLedgers[0] || null
+      }
     });
+
   } catch (err) {
     await client.query("ROLLBACK");
     console.log("❌ LEDGER SYNC ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
+    return res.status(500).json({ status: "error", message: err.message });
   } finally {
     client.release();
   }
 });
-
 /* ===================================================
    SUNDRY CREDITORS SYNC (UPDATED WITH company_id)
 =================================================== */
@@ -953,17 +895,44 @@ router.get("/group-summary-bank", async (req, res) => {
     }
     
     const xml = getGroupSummaryBankXML(company);
-    const responseXML = await sendToTally(xml);
+  const responseXML =
+  await sendToTally(xml);
+
+console.log(
+  "RAW TALLY XML:",
+  responseXML
+);
     const parsed = await parseXML(responseXML);
     
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
     const list = Array.isArray(collection) ? collection : [collection];
+    console.log("TOTAL TALLY RECORDS:", list.length);
     
     let inserted = 0, updated = 0, ignored = 0;
     
-    for (const ledger of list) {
-      const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
-      if (!ledgerName) continue;
+   for (const ledger of list) {
+
+  const ledgerName = clean(
+  ledger?.$?.NAME ||
+  ledger?.["@NAME"] ||
+  ledger?.NAME ||
+  ledger?.MAILINGNAME ||
+  ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
+);
+  if (!ledgerName) {
+
+    console.log(
+      "SKIPPED RECORD:",
+      JSON.stringify(ledger, null, 2)
+    );
+
+    continue;
+  }
+
+  console.log(
+    "PROCESSING:",
+    ledgerName
+  );
       
       const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'bank');
@@ -1129,22 +1098,9 @@ router.get("/voucher-sync", async (req, res) => {
         ================================= */
         const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
         const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+        
 
-        /* =================================
-           AMOUNTS
-        ================================= */
-        let debitAmount = 0;
-        let creditAmount = 0;
-        for (const entry of normalized) {
-          const amt = Number(entry?.AMOUNT || 0);
-          if (amt < 0) {
-            debitAmount += Math.abs(amt);
-          } else {
-            creditAmount += amt;
-          }
-        }
-
-        /* ================================
+           /* ================================
            BASIC VALUES
         ================================= */
         const originalGuid = voucher?.GUID || null;
@@ -1152,6 +1108,42 @@ router.get("/voucher-sync", async (req, res) => {
         const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
         const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
 
+        /* =================================
+           AMOUNTS
+        ================================= */
+     let debitAmount = 0;
+let creditAmount = 0;
+
+const partyEntry = normalized.find(
+  entry =>
+    clean(entry?.LEDGERNAME) === partyLedgerName
+);
+
+if (partyEntry) {
+
+  const amount = Number(
+    partyEntry?.AMOUNT || 0
+  );
+
+  if (amount < 0) {
+    debitAmount = Math.abs(amount);
+  } else {
+    creditAmount = amount;
+  }
+
+}
+
+        const balance = debitAmount - creditAmount;
+
+console.log("VOUCHER DEBUG");
+console.log({
+  voucherNumber,
+  debitAmount,
+  creditAmount,
+  balance
+});
+
+     
         /* ================================
            FILTERS
         ================================= */
@@ -1173,9 +1165,40 @@ router.get("/voucher-sync", async (req, res) => {
         );
 
         if (existingVoucher.rows.length > 0) {
-          ignored++;
-          continue;
-        }
+
+  await client.query(
+    `
+    UPDATE app_test.vouchers
+    SET
+      voucher_type = $1,
+      party_ledger_name = $2,
+      narration = $3,
+      ledger_entries = $4,
+      debit_amount = $5,
+      credit_amount = $6,
+      balance = $7,
+      updated_at = NOW()
+    WHERE company_id = $8
+      AND voucher_number = $9
+      AND voucher_date = $10
+    `,
+    [
+      voucherTypeName,
+      partyLedgerName,
+      clean(voucher?.NARRATION),
+      JSON.stringify(normalized),
+      debitAmount,
+      creditAmount,
+      balance,
+      companyId,
+      voucherNumber,
+      voucherDate
+    ]
+  );
+
+  updated++;
+  continue;
+}
 
    /* ================================
    START A NEW TRANSACTION FOR THIS VOUCHER
@@ -1273,7 +1296,7 @@ try {
 
       creditAmount,
 
-      creditAmount - debitAmount
+     balance
 
     ]
 
@@ -1856,10 +1879,8 @@ router.get("/profit-loss-sync", async (req, res) => {
     /* =====================================
        EXTRACT GROUPS FROM PARSED XML
     ===================================== */
-    const groups = 
-      parsed?.ENVELOPE?.BODY?.[0]?.DATA?.[0]?.COLLECTION?.[0]?.GROUP || 
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP ||
-      [];
+    const groups =
+  parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
 
     const list = Array.isArray(groups) ? groups : [groups];
 
@@ -2375,17 +2396,18 @@ router.post(
           companyXML
         );
 
-      const parsed =
-        await parseStringPromise(
-          companyResponse
-        );
+    const parsed =
+  await parseXML(
+    companyResponse
+  );
+      const companies =
+  parsed?.ENVELOPE?.BODY?.DATA
+    ?.COLLECTION?.COMPANY || [];
 
-      const companyList =
-
-        parsed?.ENVELOPE?.BODY?.[0]
-          ?.DATA?.[0]
-          ?.COLLECTION?.[0]
-          ?.COMPANY || [];
+const companyList =
+  Array.isArray(companies)
+    ? companies
+    : [companies];
 
       if (!companyList.length) {
 
@@ -2412,11 +2434,12 @@ router.post(
 
       for (const item of companyList) {
 
-        const company =
+       const rawName = item?.NAME;
 
-          item?.NAME?.[0]?._ ||
-
-          item?.NAME?.[0];
+const company =
+  typeof rawName === "object"
+    ? rawName?._ || null
+    : clean(rawName);
 
         if (!company) {
 
@@ -2541,4 +2564,510 @@ router.post(
 
 );
 
+/* ===================================================
+   UNITS SYNC
+=================================================== */
+
+router.get(
+
+  "/units-sync",
+
+  async (req, res) => {
+
+    const company =
+      req.query.company;
+
+    if (!company) {
+
+      return res.status(400).json({
+
+        status: "error",
+
+        message:
+          "company query parameter required"
+
+      });
+
+    }
+
+    const client =
+      await pool.connect();
+
+    try {
+
+      await client.query(
+        "BEGIN"
+      );
+
+      /* =====================================
+         COMPANY ID
+      ===================================== */
+
+      const companyId =
+        await getCompanyId(
+          company,
+          client
+        );
+
+      if (!companyId) {
+
+        throw new Error(
+          "Company not found"
+        );
+
+      }
+
+      /* =====================================
+         FETCH UNITS FROM TALLY
+      ===================================== */
+
+      const xml =
+        getUnitsXML(
+          company
+        );
+
+      const responseXML =
+        await sendToTally(
+          xml
+        );
+
+      const parsed =
+        await parseXML(
+          responseXML
+        );
+
+      const units =
+        parsed?.ENVELOPE
+          ?.BODY
+          ?.DATA
+          ?.COLLECTION
+          ?.UNIT || [];
+
+      const list =
+        Array.isArray(units)
+          ? units
+          : [units];
+
+      /* =====================================
+         COUNTERS
+      ===================================== */
+
+      let inserted = 0;
+      let updated = 0;
+      let ignored = 0;
+
+      /* =====================================
+         LOOP
+      ===================================== */
+
+      for (const unit of list) {
+
+        const unitName =
+          clean(
+            unit?.NAME
+          );
+
+        if (!unitName) {
+          continue;
+        }
+
+        const guid =
+          generateFallbackGuid(
+
+            company,
+
+            unitName,
+
+            "unit"
+
+          );
+
+        const result =
+          await upsertRecord(
+
+            "app_test.units",
+
+            guid,
+
+            null,
+
+            1,
+
+            [
+
+              companyId,
+
+              company,
+
+              unitName
+
+            ],
+
+            [
+
+              "company_id",
+
+              "company_name",
+
+              "unit_name"
+
+            ],
+
+            client
+
+          );
+
+        if (
+          result.action ===
+          "inserted"
+        ) {
+
+          inserted++;
+
+        } else if (
+
+          result.action ===
+          "updated"
+
+        ) {
+
+          updated++;
+
+        } else {
+
+          ignored++;
+
+        }
+
+      }
+
+      /* =====================================
+         COMMIT
+      ===================================== */
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "tally",
+
+        message:
+          "Units synced successfully",
+
+        company,
+
+        summary: {
+
+          inserted,
+
+          updated,
+
+          ignored,
+
+          total:
+            list.length
+
+        }
+
+      });
+
+    } catch (err) {
+
+      await client.query(
+        "ROLLBACK"
+      );
+
+      console.log(
+
+        "❌ UNITS SYNC ERROR:",
+
+        err.message
+
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
+    } finally {
+
+      client.release();
+
+    }
+
+  }
+
+);
+router.get("/all-ledgers-sync", async (req, res) => {
+  const company = req.query.company;
+  
+  if (!company) {
+    return res.status(400).json({
+      status: "error",
+      message: "company query parameter required"
+    });
+  }
+  
+  const client = await pool.connect();
+  
+  try {
+    await client.query("BEGIN");
+    
+    // Get company_id using helper (like working APIs)
+    const companyId = await getCompanyId(company, client);
+    if (!companyId) {
+      throw new Error("Company not found");
+    }
+    
+    const xml = getAllLedgersXML(company);
+    const responseXML = await sendToTally(xml);
+    const parsed = await parseXML(responseXML);
+    
+    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+    const list = Array.isArray(collection) ? collection : [collection];
+    
+    console.log("=================================");
+    console.log("📊 TOTAL LEDGERS FOUND:", list.length);
+    console.log("=================================");
+    
+    let inserted = 0, updated = 0, ignored = 0;
+    const insertedLedgers = [];
+    const updatedLedgers = [];
+    
+    for (const ledger of list) {
+      // Extract ledger name (multiple fallbacks like working APIs)
+      const ledgerName = clean(
+        ledger?.$?.NAME ||
+        ledger?.["@NAME"] ||
+        ledger?.NAME ||
+        ledger?.MAILINGNAME ||
+        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
+      );
+      
+      if (!ledgerName) {
+        ignored++;
+        console.log(`❌ SKIPPED - NO LEDGER NAME`);
+        continue;
+      }
+      
+      console.log(`📌 PROCESSING: ${ledgerName}`);
+      
+      // Extract GUID (like working APIs)
+      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+      const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'ledger');
+      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+      
+      // Extract balances (like working APIs)
+     // Extract balances
+const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
+const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+
+// Extract balance type
+const openingBalanceRaw = String(
+  ledger?.OPENINGBALANCE || ""
+).trim();
+
+const closingBalanceRaw = String(
+  ledger?.CLOSINGBALANCE || ""
+).trim();
+
+const openingBalanceType =
+  Number(openingBalance) < 0 ? "Dr" : "Cr";
+
+const closingBalanceType =
+  Number(closingBalance) < 0 ? "Dr" : "Cr";
+
+  console.log(
+  "BALANCE CHECK:",
+  ledgerName,
+  openingBalance,
+  openingBalanceType,
+  closingBalance,
+  closingBalanceType
+);
+
+
+      // Extract address (like working APIs)
+      const address = Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+        ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+        : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS);
+      
+      // Extract contact details (like working APIs)
+      const phone = clean(ledger?.PHONE || ledger?.LEDGERPHONE);
+      const mobile = clean(ledger?.MOBILE || ledger?.LEDGERMOBILE);
+      const email = clean(ledger?.EMAIL || ledger?.LEDGEREMAIL);
+      const fax = clean(ledger?.FAX);
+    const contactPerson = clean(
+  ledger?.CONTACTPERSON ||
+  ledger?.["CONTACTDETAILS.LIST"]?.CONTACTPERSON ||
+  ledger?.["CONTACTDETAILS.LIST"]?.NAME ||
+  (
+    Array.isArray(ledger?.["CONTACTDETAILS.LIST"])
+      ? (
+          ledger["CONTACTDETAILS.LIST"][0]?.CONTACTPERSON ||
+          ledger["CONTACTDETAILS.LIST"][0]?.NAME
+        )
+      : null
+  )
+);
+console.log(
+  "CONTACT CHECK:",
+  ledgerName,
+  contactPerson,
+  JSON.stringify(
+    ledger?.["CONTACTDETAILS.LIST"],
+    null,
+    2
+  )
+);
+      // Extract tax details (like working APIs)
+const gstList = ledger?.["LEDGSTREGDETAILS.LIST"];
+
+const gstNumber = clean(
+  Array.isArray(gstList)
+    ? gstList[0]?.GSTIN
+    : gstList?.GSTIN
+);
+
+console.log(
+  "GST CHECK:",
+  ledgerName,
+  gstNumber
+);
+      const panNumber = clean(ledger?.INCOMETAXNUMBER);
+      const gstRegistrationType = clean(ledger?.GSTREGISTRATIONTYPE);
+      
+      // Extract location details (like working APIs)
+      const state = clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME);
+      const country = clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME);
+      const pincode = clean(ledger?.PINCODE);
+      const parentGroup = clean(ledger?.PARENT || ledger?.GROUPNAME);
+
+      const data = [
+  companyId,
+  company,
+  ledgerName,
+  parentGroup,
+  address,
+  state,
+  country,
+  pincode,
+  panNumber,
+  gstNumber,
+  gstRegistrationType,
+  contactPerson,
+  phone,
+  mobile,
+  fax,
+  email,
+  openingBalance,
+  closingBalance,
+  openingBalanceType,
+  closingBalanceType
+];
+      // Prepare data array (matching column order)
+const columns = [
+  "company_id",
+  "company_name",
+  "ledger_name",
+  "parent_group",
+  "address",
+  "state",
+  "country",
+  "pincode",
+  "pan_number",
+  "gst_number",
+  "gst_registration_type",
+  "contact_name",
+  "phone_number",
+  "primary_phone_number",
+  "fax_no",
+  "email",
+  "opening_balance",
+  "closing_balance",
+  "opening_balance_type",
+  "closing_balance_type"
+];
+      
+      // Use upsertRecord like working APIs
+      const result = await upsertRecord(
+        "app_test.all_ledger_details",
+        guid,
+        masterId,
+        alterId,
+        data,
+        columns,
+        client
+      );
+      
+      if (result.action === "inserted") {
+        inserted++;
+        insertedLedgers.push({
+          name: ledgerName,
+          guid: guid,
+          parent_group: parentGroup,
+          gst_number: gstNumber,
+          has_address: !!address,
+          has_phone: !!(phone || mobile)
+        });
+      } else if (result.action === "updated") {
+        updated++;
+        updatedLedgers.push({
+          name: ledgerName,
+          guid: guid,
+          parent_group: parentGroup
+        });
+      } else {
+        ignored++;
+      }
+    }
+    
+    await client.query("COMMIT");
+    
+    // RESPONSE LIKE WORKING APIs WITH DETAILED DATA
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "All ledger details synced successfully",
+      company: company,
+      summary: {
+        total_found: list.length,
+        inserted: inserted,
+        updated: updated,
+        ignored: ignored
+      },
+      // Show sample of what was inserted/updated
+      samples: {
+        inserted: insertedLedgers.slice(0, 5),
+        updated: updatedLedgers.slice(0, 5)
+      },
+      // Data quality summary
+      data_summary: {
+        with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,
+        with_address: insertedLedgers.filter(l => l.has_address).length + updatedLedgers.filter(l => l.has_address).length,
+        with_phone: insertedLedgers.filter(l => l.has_phone).length + updatedLedgers.filter(l => l.has_phone).length
+      }
+    });
+    
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.log("❌ ALL LEDGERS SYNC ERROR:", err.message);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  } finally {
+    client.release();
+  }
+});
 export default router;
