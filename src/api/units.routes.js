@@ -1,166 +1,172 @@
-    import express from "express";
-    import pool from "../db/index.js";
+import express from "express";
+import pool from "../db/index.js";
 
-    const router = express.Router();
+const router = express.Router();
 
-    /* ===================================================
-    UNITS DB API
-    =================================================== */
+/* ===================================================
+   UNITS DB API
+===================================================
 
-    router.get(
+API:
+GET /api/units?company_id=1
 
-    "/",
+=================================================== */
 
-    async (req, res) => {
+router.get(
 
-        try {
+  "/",
 
-        /* =========================================
-            QUERY PARAMS
-        ========================================= */
+  async (req, res) => {
 
-        const company =
-            req.query.company;
+    try {
 
-        /* =========================================
-            VALIDATION
-        ========================================= */
+      /* =========================================
+         QUERY PARAMS
+      ========================================= */
 
-        if (!company) {
+      const companyId =
+        req.query.company_id;
 
-            return res.status(400).json({
+      /* =========================================
+         VALIDATION
+      ========================================= */
 
-            status: "error",
+      if (!companyId) {
 
-            message:
-                "company query parameter required"
+        return res.status(400).json({
 
-            });
+          status: "error",
 
-        }
-
-        /* =========================================
-            DATABASE QUERY
-        ========================================= */
-
-        const result =
-
-            await pool.query(
-
-            `
-            SELECT
-
-                id,
-
-                company_id,
-
-                company_name,
-
-                unit_name,
-
-                created_at,
-
-                updated_at
-
-            FROM app_test.units
-
-            WHERE LOWER(company_name)
-            = LOWER($1)
-
-            ORDER BY unit_name
-            `,
-
-            [company]
-
-            );
-
-        /* =========================================
-            NO DATA
-        ========================================= */
-
-        if (!result.rows.length) {
-
-            return res.status(404).json({
-
-            status: "error",
-
-            source: "database",
-
-            message:
-                "No units found",
-
-            company,
-
-            data: []
-
-            });
-
-        }
-
-        /* =========================================
-            SUCCESS RESPONSE
-        ========================================= */
-
-        return res.status(200).json({
-
-            status: "success",
-
-            source: "database",
-
-            company,
-
-            count:
-            result.rows.length,
-
-            data:
-
-            result.rows.map((row) => ({
-
-                id:
-                Number(row.id),
-
-                company_id:
-                Number(row.company_id),
-
-                company_name:
-                row.company_name,
-
-                unit_name:
-                row.unit_name,
-
-                created_at:
-                row.created_at,
-
-                updated_at:
-                row.updated_at
-
-            }))
+          message:
+            "company_id query parameter required"
 
         });
 
-        } catch (err) {
+      }
 
-        console.log(
+      /* =========================================
+         DATABASE QUERY
+      ========================================= */
 
-            "❌ UNITS DB ERROR:",
+      const result =
 
-            err.message
+        await pool.query(
+
+          `
+          SELECT
+
+            id,
+
+            company_id,
+
+            company_name,
+
+            unit_name,
+
+            created_at,
+
+            updated_at
+
+          FROM app_test.units
+
+          WHERE company_id = $1
+
+          ORDER BY unit_name
+          `,
+
+          [companyId]
 
         );
 
-        return res.status(500).json({
+      /* =========================================
+         NO DATA
+      ========================================= */
 
-            status: "error",
+      if (!result.rows.length) {
 
-            message:
-            err.message
+        return res.status(404).json({
+
+          status: "error",
+
+          source: "database",
+
+          message:
+            "No units found",
+
+          company_id:
+            companyId,
+
+          data: []
 
         });
 
-        }
+      }
+
+      /* =========================================
+         SUCCESS RESPONSE
+      ========================================= */
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "database",
+
+        company_id:
+          companyId,
+
+        count:
+          result.rows.length,
+
+        data:
+
+          result.rows.map((row) => ({
+
+            id:
+              Number(row.id),
+
+            company_id:
+              Number(row.company_id),
+
+            company_name:
+              row.company_name,
+
+            unit_name:
+              row.unit_name,
+
+            created_at:
+              row.created_at,
+
+            updated_at:
+              row.updated_at
+
+          }))
+
+      });
+
+    } catch (err) {
+
+      console.log(
+
+        "❌ UNITS DB ERROR:",
+
+        err.message
+
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
 
     }
 
-    );
+  }
 
-    export default router;
+);
+
+export default router;

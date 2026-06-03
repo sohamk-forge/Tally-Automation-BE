@@ -188,120 +188,126 @@ export const getLedgerDetailsXML = (
 };
 
 
-  export const getGroupSummaryCRXML = (
-    company
-  ) => {
+export const getGroupSummaryCRXML = (company) => {
 
-    return `
-  <ENVELOPE>
+  return `
 
-    <HEADER>
+<ENVELOPE>
 
-      <VERSION>1</VERSION>
+  <HEADER>
 
-      <TALLYREQUEST>Export</TALLYREQUEST>
+    <VERSION>1</VERSION>
 
-      <TYPE>Collection</TYPE>
+    <TALLYREQUEST>Export</TALLYREQUEST>
 
-      <ID>GroupSummaryCR</ID>
+    <TYPE>Collection</TYPE>
 
-    </HEADER>
+    <ID>GroupSummaryCR</ID>
 
-    <BODY>
+  </HEADER>
 
-      <DESC>
+  <BODY>
 
-        <STATICVARIABLES>
+    <DESC>
 
-          <SVCURRENTCOMPANY>
-            ${company}
-          </SVCURRENTCOMPANY>
+      <STATICVARIABLES>
 
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
 
-        </STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 
-        <TDL>
+      </STATICVARIABLES>
 
-          <TDLMESSAGE>
+      <TDL>
 
-            <COLLECTION NAME="GroupSummaryCR">
+        <TDLMESSAGE>
 
-              <TYPE>Ledger</TYPE>
+        <SYSTEM TYPE="Formulae" NAME="CreditorFilter">
+    $Parent = "Sundry Creditors"
+</SYSTEM>
 
-              <CHILDOF>
-                Sundry Creditors
-              </CHILDOF>
+<COLLECTION NAME="GroupSummaryCR">
 
-              <FETCH>
+    <TYPE>Ledger</TYPE>
 
-                NAME,
+    <FILTERS>CreditorFilter</FILTERS>
 
-                ALIAS,
+    <FETCH>
 
-                PARENT,
+              NAME,
+              ALIAS,
+              PARENT,
 
-                ADDRESS,
+              MAILINGNAME,
+              ADDRESS,
 
-                MAILINGNAME,
+              COUNTRYNAME,
+              STATENAME,
+              STATE,
+              LEDSTATENAME,
+              LEDCOUNTRYNAME,
 
-                STATENAME,
+              PINCODE,
 
-                STATE,
+              PHONE,
+              PHONENUMBER,
+              LEDGERPHONE,
 
-                LEDSTATENAME,
+              MOBILE,
+              MOBILENUMBER,
+              LEDGERMOBILE,
 
-                COUNTRYNAME,
+              FAX,
 
-                LEDCOUNTRYNAME,
+              EMAIL,
+              LEDGEREMAIL,
 
-                PINCODE,
+              CONTACTPERSON,
+              CONTACTDETAILS.*,
 
-                PHONE,
+              PARTYGSTIN,
+              GSTREGISTRATIONTYPE,
+              PARTYREGISTRATIONTYPE,
 
-                LEDGERPHONE,
+              GSTIN,
+              PLACEOFSUPPLY,
 
-                MOBILE,
+              LEDGSTREGDETAILS.*,
 
-                LEDGERMOBILE,
+              INCOMETAXNUMBER,
 
-                FAX,
+              BANKNAME,
+              BANKACCOUNTNUMBER,
+              BANKBRANCHNAME,
+              BANKIFSCODE,
 
-                EMAIL,
+              CREDITPERIOD,
+              CREDITLIMIT,
 
-                LEDGEREMAIL,
+              OPENINGBALANCE,
+              CLOSINGBALANCE,
 
-                CONTACTPERSON,
+              GUID,
+              MASTERID,
+              ALTERID
 
-                PARTYGSTIN,
+            </FETCH>
 
-                GSTREGISTRATIONTYPE,
+          </COLLECTION>
 
-                INCOMETAXNUMBER,
+        </TDLMESSAGE>
 
-                OPENINGBALANCE,
+      </TDL>
 
-                CLOSINGBALANCE
+    </DESC>
 
-              </FETCH>
+  </BODY>
 
-            </COLLECTION>
+</ENVELOPE>
 
-          </TDLMESSAGE>
+`;
 
-        </TDL>
-
-      </DESC>
-
-    </BODY>
-
-  </ENVELOPE>
-  `;
-
-  };
-
+};
 
   export const getGroupSummaryDRXML = (
     company
@@ -450,44 +456,75 @@ export const getLedgerDetailsXML = (
                         <TYPE>Ledger</TYPE>
 
                         <FILTERS>BankFilter</FILTERS>
+<FETCH>
 
-                        <FETCH>
-                            NAME,
-                            PARENT,
-                            MAILINGNAME,
-                            ADDRESS,
-                            STATENAME,
-                            LEDSTATENAME,
-                            STATE,
-                            COUNTRYNAME,
-                            PINCODE,
-                            GSTIN,
-                            PARTYGSTIN,
-                            GSTREGISTRATIONTYPE,
-                            ISGSTAPPLICABLE,
-                            LEDGERGSTREGDETAILS.LIST,
-                            ACHOLDERNAME,
-                            BANKACNO,
-                            BANKACCOUNTNO,
-                            BANKACCOUNTNUMBER,
-                            ACNO,
-                            ACCOUNTNO,
-                            ACCOUNTNUMBER,
-                            BANKACNUMBER,
-                            BANKACCOUNT,
-                            IFSCODE,
-                            IFSCCODE,
-                            BANKNAME,
-                            BANKBRANCHNAME,
-                            BRANCHNAME,
-                            SWIFTCODE,
-                            BankAccHolderName,
-                            BankDetails,
-                            BankIBAN,
-                            OpeningBalance,
-                            ClosingBalance,
-                            ODLimit
-                        </FETCH>
+    NAME,
+    PARENT,
+
+    MAILINGNAME,
+    ADDRESS,
+
+    STATENAME,
+    LEDSTATENAME,
+    STATE,
+
+    COUNTRYNAME,
+
+    PINCODE,
+
+    GSTIN,
+    PARTYGSTIN,
+    GSTREGISTRATIONTYPE,
+    ISGSTAPPLICABLE,
+    LEDGERGSTREGDETAILS.LIST,
+
+    ACHOLDERNAME,
+    BANKACNO,
+    BANKACCOUNTNO,
+    BANKACCOUNTNUMBER,
+    ACNO,
+    ACCOUNTNO,
+    ACCOUNTNUMBER,
+    BANKACNUMBER,
+    BANKACCOUNT,
+
+    IFSCODE,
+    IFSCCODE,
+
+    BANKNAME,
+    BANKBRANCHNAME,
+    BRANCHNAME,
+
+    SWIFTCODE,
+
+    BankAccHolderName,
+    BankDetails,
+    BankIBAN,
+
+    PHONE,
+    PHONENUMBER,
+    LEDGERPHONE,
+
+    MOBILE,
+    MOBILENUMBER,
+    LEDGERMOBILE,
+
+    EMAIL,
+    LEDGEREMAIL,
+
+    CONTACTPERSON,
+    CONTACTDETAILS.*,
+
+    OPENINGBALANCE,
+    CLOSINGBALANCE,
+
+    ODLIMIT,
+
+    GUID,
+    MASTERID,
+    ALTERID
+
+</FETCH>
 
                     </COLLECTION>
 

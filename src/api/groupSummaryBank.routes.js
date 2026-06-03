@@ -3,50 +3,135 @@ import pool from "../db/index.js";
 
 const router = express.Router();
 
-router.get("/", async (req, res) => {
+/* ===================================================
+   GROUP SUMMARY BANK DB API
+===================================================
 
-  try {
+API:
+GET /api/group-summary-bank?company_id=1
 
-    const { company_id } = req.query;
+=================================================== */
 
-    if (!company_id) {
-      return res.status(400).json({
-        status: "error",
-        message: "company_id is required"
+router.get(
+
+  "/",
+
+  async (req, res) => {
+
+    try {
+
+      /* =========================================
+         QUERY PARAM
+      ========================================= */
+
+      const companyId =
+        req.query.company_id;
+
+      /* =========================================
+         VALIDATION
+      ========================================= */
+
+      if (!companyId) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "company_id query parameter required"
+
+        });
+
+      }
+
+      /* =========================================
+         DATABASE QUERY
+      ========================================= */
+
+      const result = await pool.query(
+
+        `
+        SELECT *
+
+        FROM app_test.bank_accounts
+
+        WHERE company_id = $1
+
+        ORDER BY ledger_name ASC
+        `,
+
+        [companyId]
+
+      );
+
+      /* =========================================
+         NO DATA
+      ========================================= */
+
+      if (!result.rows.length) {
+
+        return res.status(404).json({
+
+          status: "error",
+
+          source: "database",
+
+          company_id: companyId,
+
+          message:
+            "No bank accounts found",
+
+          total: 0,
+
+          data: []
+
+        });
+
+      }
+
+      /* =========================================
+         RESPONSE
+      ========================================= */
+
+      return res.status(200).json({
+
+        status: "success",
+
+        source: "database",
+
+        company_id: companyId,
+
+        total:
+          result.rows.length,
+
+        data:
+          result.rows
+
       });
+
+    } catch (err) {
+
+      console.log(
+
+        "❌ GROUP SUMMARY BANK DB ERROR:",
+
+        err.message
+
+      );
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message:
+          err.message
+
+      });
+
     }
-
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.bank_accounts
-      WHERE company_id = $1
-      ORDER BY ledger_name ASC
-      `,
-      [company_id]
-    );
-
-    return res.status(200).json({
-      status: "success",
-      source: "database",
-      total: result.rows.length,
-      data: result.rows
-    });
-
-  } catch (err) {
-
-    console.log(
-      "❌ GROUP SUMMARY BANK DB ERROR:",
-      err.message
-    );
-
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
 
   }
 
-});
+);
 
 export default router;

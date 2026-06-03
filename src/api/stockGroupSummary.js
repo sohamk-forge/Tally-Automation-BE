@@ -1,12 +1,15 @@
 import express from "express";
-
-import pool
-from "../db/index.js";
+import pool from "../db/index.js";
 
 const router = express.Router();
 
 /* =========================================
    STOCK GROUP SUMMARY API
+=========================================
+
+API:
+GET /api/stock/group-summary?company_id=1
+
 ========================================= */
 
 router.get(
@@ -18,20 +21,20 @@ router.get(
     try {
 
       /* =====================================
-         COMPANY
+         COMPANY ID
       ===================================== */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            "company required"
+            "company_id required"
 
         });
 
@@ -41,41 +44,63 @@ router.get(
          DATABASE
       ===================================== */
 
-      const result =
+      const result = await pool.query(
 
-        await pool.query(
+        `
+        SELECT
 
-          `
-          SELECT
+          company_id,
 
-            company_name,
+          company_name,
 
-            group_name,
+          group_name,
 
-            item_name,
+          item_name,
 
-            hsn_code,
+          hsn_code,
 
-            quantity,
+          quantity,
 
-            stock_value,
+          stock_value,
 
-            created_at
+          created_at
 
-          FROM
-        
-app_test.stock_group_summary
+        FROM app_test.stock_group_summary
 
-          WHERE
-          company_name = $1
+        WHERE company_id = $1
 
-          ORDER BY
-          id DESC
-          `,
+        ORDER BY id DESC
+        `,
 
-          [company]
+        [companyId]
 
-        );
+      );
+
+      /* =====================================
+         NO DATA
+      ===================================== */
+
+      if (!result.rows.length) {
+
+        return res.status(404).json({
+
+          status: "error",
+
+          source: "database",
+
+          company_id:
+            companyId,
+
+          message:
+            "No stock group summary found",
+
+          total: 0,
+
+          data: []
+
+        });
+
+      }
 
       /* =====================================
          RESPONSE
@@ -87,7 +112,8 @@ app_test.stock_group_summary
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         total:
           result.rows.length,

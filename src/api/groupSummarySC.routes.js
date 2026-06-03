@@ -1,63 +1,47 @@
-import express from "express";
-import pool from "../db/index.js";
+  import express from "express";
+  import pool from "../db/index.js";
 
-const router = express.Router();
+  const router = express.Router();
 
-/* ===================================================
-   GROUP SUMMARY SC DB API
-===================================================
+  /* ===================================================
+    GROUP SUMMARY SC DB API
+  ===================================================
 
-API:
-GET /api/group-summary/sc/sundry-creditors
+  API:
+  GET /api/group-summary/sc/sundry-creditors?company_id=2
 
-=================================================== */
+  =================================================== */
 
-router.get(
-  "/",
-  async (req, res) => {
+  router.get("/", async (req, res) => {
 
     try {
 
-      const company =
-        req.query.company;
+      const companyId = req.query.company_id;
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
-          message:
-            "company query parameter required"
+          message: "company_id query parameter required"
 
         });
 
       }
 
-      /* =========================================
-         DATABASE QUERY
-      ========================================= */
+      const result = await pool.query(
 
-      const result =
-        await pool.query(
-
-          `
-          SELECT *
-
+        `
+        SELECT *
         FROM app_test.sundry_creditors
+        WHERE company_id = $1
+        ORDER BY ledger_name ASC
+        `,
 
-          WHERE company_name = $1
+        [companyId]
 
-          ORDER BY ledger_name ASC
-          `,
-
-          [company]
-
-        );
-
-      /* =========================================
-         RESPONSE
-      ========================================= */
+      );
 
       return res.status(200).json({
 
@@ -65,13 +49,11 @@ router.get(
 
         source: "database",
 
-        company,
+        company_id: companyId,
 
-        total:
-          result.rows.length,
+        total: result.rows.length,
 
-        data:
-          result.rows
+        data: result.rows
 
       });
 
@@ -86,14 +68,12 @@ router.get(
 
         status: "error",
 
-        message:
-          err.message
+        message: err.message
 
       });
 
     }
 
-  }
-);
+  });
 
-export default router;
+  export default router;

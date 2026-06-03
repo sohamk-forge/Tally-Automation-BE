@@ -11,56 +11,36 @@ router.get("/", async (req, res) => {
 
   try {
 
-    /* =========================================
-       QUERY PARAM
-    ========================================= */
+    const companyId = Number(req.query.company_id);
 
-    const company =
-      req.query.company;
-
-    /* =========================================
-       VALIDATION
-    ========================================= */
-
-    if (!company) {
+    if (!companyId || isNaN(companyId)) {
 
       return res.status(400).json({
 
         status: "error",
 
         message:
-          "company query parameter required"
+          "Valid company_id query parameter required"
 
       });
 
     }
 
-    /* =========================================
-       DATABASE QUERY
-    ========================================= */
+    const result = await pool.query(
 
-    const result =
+      `
+      SELECT *
 
-      await pool.query(
+      FROM app_test.all_ledger_details
 
-        `
-        SELECT *
+      WHERE company_id = $1
 
-        FROM app_test.all_ledger_details
+      ORDER BY ledger_name ASC
+      `,
 
-        WHERE LOWER(company_name)
-        = LOWER($1)
+      [companyId]
 
-        ORDER BY ledger_name ASC
-        `,
-
-        [company]
-
-      );
-
-    /* =========================================
-       NO DATA
-    ========================================= */
+    );
 
     if (!result.rows.length) {
 
@@ -70,7 +50,7 @@ router.get("/", async (req, res) => {
 
         source: "database",
 
-        company,
+        company_id: companyId,
 
         message:
           "No ledger details found",
@@ -81,23 +61,17 @@ router.get("/", async (req, res) => {
 
     }
 
-    /* =========================================
-       SUCCESS
-    ========================================= */
-
     return res.status(200).json({
 
       status: "success",
 
       source: "database",
 
-      company,
+      company_id: companyId,
 
-      total:
-        result.rows.length,
+      total: result.rows.length,
 
-      data:
-        result.rows
+      data: result.rows
 
     });
 
@@ -112,8 +86,7 @@ router.get("/", async (req, res) => {
 
       status: "error",
 
-      message:
-        err.message
+      message: err.message
 
     });
 

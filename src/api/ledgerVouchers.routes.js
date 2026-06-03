@@ -1,9 +1,7 @@
 import express from "express";
-
 import pool from "../db/index.js";
 
-const router =
-  express.Router();
+const router = express.Router();
 
 /* ===================================================
    LEDGER VOUCHERS DB API
@@ -15,7 +13,7 @@ GET /api/ledger-vouchers
 Example:
 
 /api/ledger-vouchers
-?company=Venkateshwara Traders
+?company_id=1
 &fromDate=2020-04-01
 &toDate=2021-03-31
 
@@ -33,8 +31,8 @@ router.get(
          QUERY PARAMS
       ========================================= */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
       const fromDate =
         req.query.fromDate;
@@ -54,7 +52,7 @@ router.get(
 
       if (
 
-        !company ||
+        !companyId ||
 
         !fromDate ||
 
@@ -67,7 +65,7 @@ router.get(
           status: "error",
 
           message:
-            "company, fromDate and toDate required"
+            "company_id, fromDate and toDate required"
 
         });
 
@@ -77,34 +75,41 @@ router.get(
          BASE QUERY
       ========================================= */
 
-      let query =
+let query =
 
-        `
-        SELECT
+`
+SELECT
 
-          id,
-          company_name,
-          voucher_date,
-          voucher_type,
-          voucher_number,
-          party_ledger_name,
-          narration,
-          debit_amount,
-          credit_amount,
-          balance,
-          created_at,
-          updated_at
+  id,
+  company_id,
+  company_name,
 
-    FROM app_test.vouchers
+  voucher_date,
+  voucher_type,
+  voucher_number,
 
-      WHERE
+  party_ledger_name,
 
-  LOWER(TRIM(company_name))
-  = LOWER(TRIM($1))
+  ledger_entries,
 
-  AND DATE(voucher_date)
-  BETWEEN $2 AND $3
-        `;
+  narration,
+
+  debit_amount,
+  credit_amount,
+  balance,
+
+  created_at,
+  updated_at
+
+FROM app_test.vouchers
+
+WHERE
+
+company_id = $1
+
+AND DATE(voucher_date)
+BETWEEN $2 AND $3
+`;
 
       /* =========================================
          VALUES ARRAY
@@ -112,7 +117,7 @@ router.get(
 
       const values = [
 
-        company,
+        companyId,
         fromDate,
         toDate
 
@@ -144,27 +149,48 @@ router.get(
       /* =========================================
          PARTY FILTER
       ========================================= */
+if (
 
-    if (
   party &&
   party !== "undefined" &&
   party !== "null"
+
 ) {
 
-        query +=
+  query +=
 
-          `
-          AND LOWER(party_ledger_name)
-          LIKE LOWER($${paramIndex})
-          `;
+    `
+    AND (
 
-        values.push(
-          `%${party}%`
-        );
+      LOWER(party_ledger_name)
+      LIKE LOWER($${paramIndex})
 
-        paramIndex++;
+      OR EXISTS (
 
-      }
+        SELECT 1
+
+        FROM jsonb_array_elements(
+          ledger_entries
+        ) e
+
+        WHERE LOWER(
+          e->>'LEDGERNAME'
+        )
+
+        LIKE LOWER($${paramIndex})
+
+      )
+
+    )
+    `;
+
+  values.push(
+    `%${party}%`
+  );
+
+  paramIndex++;
+
+}
 
       /* =========================================
          ORDER BY
@@ -181,8 +207,9 @@ router.get(
       /* =========================================
          EXECUTE QUERY
       ========================================= */
+
       console.log("REQ QUERY:", req.query);
-console.log("VALUES:", values);
+      console.log("VALUES:", values);
 
       const result =
 
@@ -193,10 +220,10 @@ console.log("VALUES:", values);
 
         );
 
-        console.log(
-  "ROWS FOUND:",
-  result.rows.length
-);
+      console.log(
+        "ROWS FOUND:",
+        result.rows.length
+      );
 
       /* =========================================
          SUCCESS RESPONSE
@@ -208,7 +235,8 @@ console.log("VALUES:", values);
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         fromDate,
 

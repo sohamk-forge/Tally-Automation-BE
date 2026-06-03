@@ -216,10 +216,36 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   const dbClient = client || pool;
   
   // CHECK EXISTING
-  const existing = await dbClient.query(
-    `SELECT id, alter_id FROM ${tableName} WHERE guid = $1`,
+  // CHECK EXISTING BY MASTER ID FIRST
+let existing = { rows: [] };
+
+if (masterId) {
+  existing = await dbClient.query(
+    `
+    SELECT id, guid, master_id, alter_id
+    FROM ${tableName}
+    WHERE master_id = $1
+    `,
+    [masterId]
+  );
+}
+
+// FALLBACK TO GUID
+if (existing.rows.length === 0) {
+  existing = await dbClient.query(
+    `
+    SELECT id, guid, master_id, alter_id
+    FROM ${tableName}
+    WHERE guid = $1
+    `,
     [finalGuid]
   );
+}
+
+console.log(
+  "FOUND EXISTING:",
+  existing.rows[0]
+);
   
   // TOTAL COLUMNS = guid(1) + master_id(2) + alter_id(3) + data columns
   const totalColumns = 3 + columns.length;
@@ -241,20 +267,59 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
 const dbAlterId = Number(existing.rows[0]?.alter_id || 0);
 const newAlterId = Number(alterId || 0);
 
-// Force update
+console.log(
+  "UPDATE CHECK:",
+  tableName,
+  "DB:",
+  dbAlterId,
+  "TALLY:",
+  newAlterId
+);
+
 if (newAlterId >= dbAlterId) {
-    const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(", ");
-    const updateValues = [...data, newAlterId, finalGuid];
-    const query = `
-      UPDATE ${tableName}
-      SET ${setClause}, alter_id = $${columns.length + 1}, updated_at = NOW()
-      WHERE guid = $${columns.length + 2}
-    `;
-    await dbClient.query(query, updateValues);
-    return { action: "updated", oldAlterId: dbAlterId, newAlterId };
-  }
-  
-  return { action: "ignored", reason: "alter_id_not_newer" };
+
+  const setClause = columns
+    .map((col, i) => `${col} = $${i + 1}`)
+    .join(", ");
+
+const updateValues = [
+  ...data,
+  finalGuid,
+  masterId,
+  newAlterId,
+  existing.rows[0].id
+];
+await dbClient.query(
+  `
+  UPDATE ${tableName}
+  SET
+    ${setClause},
+    guid = $${columns.length + 1},
+    master_id = $${columns.length + 2},
+    alter_id = $${columns.length + 3},
+    updated_at = NOW()
+  WHERE id = $${columns.length + 4}
+  `,
+  updateValues
+);
+
+    console.log(
+    "UPDATED:",
+    tableName,
+    finalGuid
+  );  
+
+  return {
+    action: "updated",
+    oldAlterId: dbAlterId,
+    newAlterId
+  };
+}
+
+return {
+  action: "ignored",
+  reason: "alter_id_not_newer"
+};
 }
 
 /* ===================================================
@@ -661,110 +726,139 @@ if (ledger?.GUID) {
     client.release();
   }
 });
-/* ===================================================
-   SUNDRY CREDITORS SYNC (UPDATED WITH company_id)
-=================================================== */
+  /* ===================================================
+    SUNDRY CREDITORS SYNC (UPDATED WITH company_id)
+  =================================================== */
 
-router.get("/group-summary-cr", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({
-      status: "error",
-      message: "company query parameter required"
-    });
-  }
-  
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    
-    // Get company_id using helper
-    const companyId = await getCompanyId(company, client);
-    if (!companyId) {
-      throw new Error("Company not found");
+  router.get("/group-summary-cr", async (req, res) => {
+    const company = req.query.company;
+    if (!company) {
+      return res.status(400).json({
+        status: "error",
+        message: "company query parameter required"
+      });
     }
     
-    const xml = getGroupSummaryCRXML(company);
-    const responseXML = await sendToTally(xml);
-    const parsed = await parseXML(responseXML);
-    
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
-    
-    let inserted = 0, updated = 0, ignored = 0;
-    
-    for (const ledger of list) {
-      const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
-      if (!ledgerName) continue;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
       
-      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'creditor');
-      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
-      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
-      const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
-      const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+      // Get company_id using helper
+      const companyId = await getCompanyId(company, client);
+      if (!companyId) {
+        throw new Error("Company not found");
+      }
       
-      const result = await upsertRecord(
-        "app_test.sundry_creditors", guid, masterId, alterId,
-        [
-          companyId,
-          company,
-          ledgerName,
-          "Sundry Creditors",
-          Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-            ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-            : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
-          clean(ledger?.$?.ALIAS || ledger?.["@ALIAS"] || ledger?.ALIAS),
-          clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
-          clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
-          clean(ledger?.PINCODE),
-          clean(ledger?.INCOMETAXNUMBER),
-          clean(ledger?.PARTYGSTIN),
-          clean(ledger?.GSTREGISTRATIONTYPE),
-          clean(ledger?.CONTACTPERSON),
-          clean(ledger?.PHONE || ledger?.LEDGERPHONE),
-          clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
-          clean(ledger?.FAX),
-          clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
-          openingBalance,
-          closingBalance,
-          openingBalance < 0 ? "Cr" : "Dr",
-          closingBalance < 0 ? "Cr" : "Dr"
-        ],
-        [
-          "company_id", "company_name", "ledger_name", "parent_group", "address", "alias", "state",
-          "country", "pincode", "pan_number", "gst_number", "gst_registration_type",
-          "contact_name", "phone_number", "primary_phone_number", "fax_no", "email",
-          "opening_balance", "closing_balance", "opening_balance_type", "closing_balance_type"
-        ],
-        client
-      );
+      const xml = getGroupSummaryCRXML(company);
+      const responseXML = await sendToTally(xml);
+      const parsed = await parseXML(responseXML);
       
-      if (result.action === "inserted") inserted++;
-      else if (result.action === "updated") updated++;
-      else ignored++;
+      const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+      const list = Array.isArray(collection) ? collection : [collection];
+    console.log("TOTAL LEDGERS:", list.length);
+
+console.log(
+  "XML CONTAINS TEST LEDGER:",
+  responseXML.includes("New ledger testing")
+);
+
+const testLedger = list.find(
+  l =>
+    (l?.$?.NAME ||
+      l?.["@NAME"] ||
+      l?.NAME ||
+      l?.MAILINGNAME) === "New ledger testing"
+);
+
+console.log("FOUND TEST LEDGER:");
+console.log(JSON.stringify(testLedger, null, 2));
+
+console.log(
+  "FIRST LEDGER RAW:"
+);
+console.log(
+  JSON.stringify(list[0], null, 2)
+);
+      let inserted = 0, updated = 0, ignored = 0;
+      
+      for (const ledger of list) {
+        const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
+        if (!ledgerName) continue;
+        
+        const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+        const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'creditor');
+        const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+        const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+        console.log("================================");
+  console.log("LEDGER:", ledgerName);
+  console.log("GUID:", originalGuid);
+  console.log("MASTERID:", masterId);
+  console.log("ALTERID:", alterId);
+  console.log("================================");
+        const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
+        const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+        
+        const result = await upsertRecord(
+          "app_test.sundry_creditors", guid, masterId, alterId,
+          [
+            companyId,
+            company,
+            ledgerName,
+              clean(ledger?.PARENT) || "Sundry Creditors",
+            Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+              ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+              : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
+            clean(ledger?.$?.ALIAS || ledger?.["@ALIAS"] || ledger?.ALIAS),
+            clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
+            clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
+            clean(ledger?.PINCODE),
+            clean(ledger?.INCOMETAXNUMBER),
+            clean(ledger?.PARTYGSTIN),
+            clean(ledger?.GSTREGISTRATIONTYPE),
+            clean(ledger?.CONTACTPERSON),
+            clean(ledger?.PHONE || ledger?.LEDGERPHONE),
+            clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
+            clean(ledger?.FAX),
+            clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
+            openingBalance,
+            closingBalance,
+            openingBalance < 0 ? "Cr" : "Dr",
+            closingBalance < 0 ? "Cr" : "Dr"
+          ],
+          [
+            "company_id", "company_name", "ledger_name", "parent_group", "address", "alias", "state",
+            "country", "pincode", "pan_number", "gst_number", "gst_registration_type",
+            "contact_name", "phone_number", "primary_phone_number", "fax_no", "email",
+            "opening_balance", "closing_balance", "opening_balance_type", "closing_balance_type"
+          ],
+          client
+        );
+        
+        if (result.action === "inserted") inserted++;
+        else if (result.action === "updated") updated++;
+        else ignored++;
+      }
+      
+      await client.query("COMMIT");
+      
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Sundry creditors synced successfully",
+        company,
+        summary: { inserted, updated, ignored, total: list.length }
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.log("❌ SUNDRY CREDITORS ERROR:", err.message);
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+    } finally {
+      client.release();
     }
-    
-    await client.query("COMMIT");
-    
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Sundry creditors synced successfully",
-      company,
-      summary: { inserted, updated, ignored, total: list.length }
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ SUNDRY CREDITORS ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  } finally {
-    client.release();
-  }
-});
+  });
 
 /* ===================================================
    SUNDRY DEBTORS SYNC (UPDATED WITH company_id)
@@ -938,6 +1032,45 @@ console.log(
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'bank');
       const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+
+     const openingBalance = cleanBalance(
+  ledger?.OPENINGBALANCE
+);
+
+const closingBalance = cleanBalance(
+  ledger?.CLOSINGBALANCE
+);
+
+const email = clean(
+  ledger?.EMAIL ||
+  ledger?.LEDGEREMAIL
+);
+
+const phoneNumber = clean(
+  ledger?.PHONE ||
+  ledger?.PHONENUMBER ||
+  ledger?.LEDGERPHONE
+);
+
+const primaryPhoneNumber = clean(
+  ledger?.MOBILE ||
+  ledger?.MOBILENUMBER ||
+  ledger?.LEDGERMOBILE
+);
+
+const gstNumber = clean(
+  ledger?.PARTYGSTIN ||
+  ledger?.GSTIN
+);
+const openingBalanceType =
+  Number(openingBalance) < 0
+    ? "Dr"
+    : "Cr";
+
+const closingBalanceType =
+  Number(closingBalance) < 0
+    ? "Dr"
+    : "Cr";
       
       const result = await upsertRecord(
         "app_test.bank_accounts", guid, masterId, alterId,
@@ -946,7 +1079,11 @@ console.log(
           company,
           ledgerName,
           "Bank Accounts",
-          clean(ledger?.BANKACCHOLDERNAME),
+          clean(
+  ledger?.BANKACCHOLDERNAME ||
+  ledger?.ACHOLDERNAME ||
+  ledger?.BankAccHolderName
+),
           clean(
             ledger?.BANKACCOUNTNUMBER ||
             ledger?.BANKACCOUNTNO ||
@@ -958,22 +1095,67 @@ console.log(
             ledger?.IFSCODE
           ),
           clean(ledger?.SWIFTCODE),
-          clean(
-            ledger?.BANKBRANCHNAME ||
-            ledger?.BRANCHNAME
-          ),
+
+clean(
+  ledger?.BANKNAME
+),
+
+clean(
+  ledger?.BANKBRANCHNAME ||
+  ledger?.BRANCHNAME
+),
           Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
             ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
             : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
           clean(ledger?.STATENAME || ledger?.LEDSTATENAME || ledger?.STATE),
           clean(ledger?.COUNTRYNAME),
-          clean(ledger?.PINCODE)
+         clean(ledger?.PINCODE),
+
+gstNumber,
+
+openingBalance,
+closingBalance,
+openingBalanceType,
+closingBalanceType,
+
+email,
+
+phoneNumber,
+
+primaryPhoneNumber
         ],
-        [
-          "company_id", "company_name", "ledger_name", "parent_group", "account_holder_name",
-          "account_number", "ifsc_code", "swift_code", "branch", "address",
-          "state", "country", "pincode"
-        ],
+       [
+  "company_id",
+  "company_name",
+  "ledger_name",
+  "parent_group",
+
+  "account_holder_name",
+  "account_number",
+
+  "ifsc_code",
+  "swift_code",
+
+  "bank_name",
+  "branch",
+
+  "address",
+  "state",
+  "country",
+  "pincode",
+
+  "gst_number",
+
+  "opening_balance",
+  "closing_balance",
+
+  "opening_balance_type",
+  "closing_balance_type",
+
+  "email",
+  "phone_number",
+  "primary_phone_number"
+],
         client
       );
       
@@ -2844,23 +3026,39 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const updatedLedgers = [];
     
     for (const ledger of list) {
-      // Extract ledger name (multiple fallbacks like working APIs)
-      const ledgerName = clean(
-        ledger?.$?.NAME ||
-        ledger?.["@NAME"] ||
-        ledger?.NAME ||
-        ledger?.MAILINGNAME ||
-        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
-      );
-      
-      if (!ledgerName) {
-        ignored++;
-        console.log(`❌ SKIPPED - NO LEDGER NAME`);
-        continue;
-      }
-      
-      console.log(`📌 PROCESSING: ${ledgerName}`);
-      
+
+let rawLedgerName =
+  ledger?.$?.NAME ||
+  ledger?.["@NAME"] ||
+  ledger?.NAME ||
+  ledger?.MAILINGNAME ||
+  ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
+
+if (Array.isArray(rawLedgerName)) {
+  rawLedgerName = rawLedgerName[0];
+}
+
+const ledgerName = clean(rawLedgerName);
+
+  if (!ledgerName) {
+
+    ignored++;
+
+    console.log(
+      "❌ SKIPPED - NO LEDGER NAME"
+    );
+
+    continue;
+
+  }
+
+  console.log(
+    `📌 PROCESSING: ${ledgerName}`
+  );
+
+  // remaining code...
+
+        
       // Extract GUID (like working APIs)
       const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'ledger');
@@ -2882,11 +3080,14 @@ const closingBalanceRaw = String(
 ).trim();
 
 const openingBalanceType =
-  Number(openingBalance) < 0 ? "Dr" : "Cr";
+  Number(openingBalance) < 0
+    ? "Dr"
+    : "Cr";
 
 const closingBalanceType =
-  Number(closingBalance) < 0 ? "Dr" : "Cr";
-
+  Number(closingBalance) < 0
+    ? "Dr"
+    : "Cr";
   console.log(
   "BALANCE CHECK:",
   ledgerName,

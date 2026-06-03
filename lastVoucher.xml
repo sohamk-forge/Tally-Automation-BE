@@ -1,53 +1,107 @@
 
-  <ENVELOPE>
+<ENVELOPE>
 
-    <HEADER>
+  <HEADER>
 
-      <VERSION>1</VERSION>
+    <VERSION>1</VERSION>
 
-      <TALLYREQUEST>Export</TALLYREQUEST>
+    <TALLYREQUEST>Export</TALLYREQUEST>
 
-      <TYPE>Collection</TYPE>
+    <TYPE>Collection</TYPE>
 
-      <ID>CompanyCollection</ID>
+    <ID>AllLedgers</ID>
 
-    </HEADER>
+  </HEADER>
 
-    <BODY>
+  <BODY>
 
-      <DESC>
+    <DESC>
 
-        <STATICVARIABLES>
+      <STATICVARIABLES>
 
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
+        <SVCURRENTCOMPANY>Nutan Dairy</SVCURRENTCOMPANY>
 
-        </STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 
-        <TDL>
+      </STATICVARIABLES>
 
-          <TDLMESSAGE>
+      <TDL>
 
-            <COLLECTION NAME="CompanyCollection">
+        <TDLMESSAGE>
 
-              <TYPE>Company</TYPE>
+          <COLLECTION NAME="AllLedgers">
 
-              <FETCH>
-                NAME,
-                BOOKSFROM,
-                ENDINGAT
-              </FETCH>
+            <TYPE>Ledger</TYPE>
 
-            </COLLECTION>
+            <FETCH>
 
-          </TDLMESSAGE>
+              NAME,
+              ALIAS,
+              PARENT,
 
-        </TDL>
+              MAILINGNAME,
+              ADDRESS,
 
-      </DESC>
+              COUNTRYNAME,
+              STATENAME,
+              STATE,
+              LEDSTATENAME,
+              LEDCOUNTRYNAME,
 
-    </BODY>
+              PINCODE,
 
-  </ENVELOPE>
-  
+              PHONE,
+              PHONENUMBER,
+              LEDGERPHONE,
+
+              MOBILE,
+              MOBILENUMBER,
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+              CONTACTDETAILS.*,
+
+              PARTYGSTIN,
+              GSTREGISTRATIONTYPE,
+              PARTYREGISTRATIONTYPE,
+
+              GSTIN,
+              PLACEOFSUPPLY,
+
+              LEDGSTREGDETAILS.*,
+
+              INCOMETAXNUMBER,
+
+              BANKNAME,
+              BANKACCOUNTNUMBER,
+              BANKBRANCHNAME,
+              BANKIFSCODE,
+
+              CREDITPERIOD,
+              CREDITLIMIT,
+
+              OPENINGBALANCE,
+              CLOSINGBALANCE,
+
+              GUID,
+              MASTERID,
+              ALTERID
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
