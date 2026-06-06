@@ -1,28 +1,45 @@
+// =========================================
 // src/api/invoices.routes.js
+// =========================================
 
 import express from "express";
 import pool from "../db/index.js";
 
-import { generateXml } from "../services/xmlGenerator.js";
-import { sendToTally } from "../services/tallyClient.js";
-
 const router = express.Router();
 
 router.post("/invoices", async (req, res) => {
-  try {
-    const { company, invoice_data } = req.body;
 
-    if (!company || !invoice_data) {
+  console.log("BODY RECEIVED:");
+  console.log(JSON.stringify(req.body, null, 2));
+
+  try {
+
+    const {
+      company,
+      invoice_data
+    } = req.body;
+
+    if (
+      !company ||
+      !invoice_data
+    ) {
+
       return res.status(400).json({
         status: "error",
-        message: "company and invoice_data required",
+        message: "company and invoice_data required"
       });
+
     }
 
-    // 1. Save in DB
-    const dbResult = await pool.query(
+    console.log("");
+    console.log("====================================");
+    console.log("🚀 INVOICE API HIT");
+    console.log("====================================");
+
+    const result = await pool.query(
       `
-      INSERT INTO app_test.invoice_extractions
+      INSERT INTO
+      app_test.invoice_extractions
       (
         company_name,
         vendor_name,
@@ -31,13 +48,22 @@ router.post("/invoices", async (req, res) => {
         invoice_date,
         raw_json,
         sync_status,
+        error_count,
+        last_error,
         created_at,
         updated_at
       )
       VALUES
       (
-        $1,$2,$3,$4,$5,$6,
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
         'pending',
+        0,
+        NULL,
         NOW(),
         NOW()
       )
@@ -46,54 +72,54 @@ router.post("/invoices", async (req, res) => {
       [
         company.trim(),
         invoice_data.vendor_name || "",
-        invoice_data.vendor_gstin || "",
+        invoice_data.gstin || "",
         invoice_data.invoice_no || "",
         invoice_data.invoice_date || "",
-        invoice_data,
+        invoice_data
       ]
     );
 
-    const invoiceId = dbResult.rows[0].id;
+    const invoiceId =
+      result.rows[0].id;
 
-    // 2. Generate XML
-    const xml = await generateXml({
-      company,
-      ...invoice_data,
-    });
-
-    console.log("📤 XML GENERATED");
-
-    // 3. Send to Tally
-    const tallyResponse = await sendToTally(xml);
-
-    // 4. Update status
-    await pool.query(
-      `
-      UPDATE app_test.invoice_extractions
-      SET
-        sync_status = 'completed',
-        updated_at = NOW()
-      WHERE id = $1
-      `,
-      [invoiceId]
+    console.log(
+      `✅ Invoice Queued : ${invoiceId}`
     );
 
-    // 5. Return response
     return res.status(200).json({
+
       status: "success",
-      invoice_id: invoiceId,
-      tally_response: tallyResponse,
+
+      message:
+        "Invoice queued successfully",
+
+      invoice_id:
+        invoiceId,
+
+      sync_status:
+        "pending"
+
     });
 
   } catch (err) {
 
-    console.log("INVOICE ERROR:", err.message);
+    console.log("");
+    console.log("====================================");
+    console.log("💥 INVOICE API ERROR");
+    console.log("====================================");
+    console.log(err);
 
     return res.status(500).json({
+
       status: "error",
-      message: err.message,
+
+      message:
+        err.message
+
     });
+
   }
+
 });
 
 export default router;

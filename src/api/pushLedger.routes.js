@@ -4,8 +4,10 @@
 
 import express from "express";
 
-import pool
-from "../db/index.js";
+import pool from "../db/index.js";
+
+import { ledgerQueue }
+from "../queues/ledger.queue.js";
 
 const router =
   express.Router();
@@ -21,10 +23,6 @@ router.post(
   async (req, res) => {
 
     try {
-
-      /* ==============================
-         REQUEST BODY
-      ============================== */
 
       const data =
         req.body;
@@ -51,31 +49,24 @@ router.post(
       }
 
       /* ==============================
-         COMPANY ID
+         COMPANY
       ============================== */
 
       const companyResult =
-
         await pool.query(
 
           `
           SELECT id
-
           FROM app_test.companies
-
-          WHERE TRIM(name) = TRIM($1)
+          WHERE TRIM(name)=TRIM($1)
+          LIMIT 1
           `,
 
-          [
-
-            data.company
-
-          ]
+          [data.company]
 
         );
 
       const companyId =
-
         companyResult.rows[0]?.id || null;
 
       /* ==============================
@@ -83,32 +74,37 @@ router.post(
       ============================== */
 
       const duplicateResult =
-
         await pool.query(
 
           `
           SELECT id
-
           FROM app_test.push_ledger
-
-          WHERE TRIM(company_name) = TRIM($1)
-
-          AND TRIM(ledger_name) = TRIM($2)
-
-          AND status IN ('pending', 'success')
+          WHERE
+            LOWER(TRIM(company_name))
+              = LOWER(TRIM($1))
+          AND
+            LOWER(TRIM(ledger_name))
+              = LOWER(TRIM($2))
+          AND
+            status IN
+            (
+              'pending',
+              'processing',
+              'success'
+            )
+          LIMIT 1
           `,
 
           [
-
             data.company,
-
             data.ledger_name
-
           ]
 
         );
 
-      if (duplicateResult.rows.length) {
+      if (
+        duplicateResult.rows.length
+      ) {
 
         return res.status(400).json({
 
@@ -122,104 +118,162 @@ router.post(
       }
 
       /* ==============================
-         INSERT PENDING RECORD
+         INSERT
       ============================== */
 
-      await pool.query(
+      const insertResult =
+        await pool.query(
 
-        `
-        INSERT INTO app_test.push_ledger (
+          `
+          INSERT INTO app_test.push_ledger
+          (
 
-          company_id,
-          company_name,
-          ledger_name,
-          parent_name,
-          opening_balance,
-          bill_wise,
-          address,
-          pincode,
-          state,
-          country,
-          contact_person,
-          phone,
-          mobile,
-          email,
-          website,
-          pan,
-          gstin,
-          gst_registration_type,
-          status,
-          created_at,
-          updated_at
+            company_id,
+            company_name,
+            ledger_name,
+            parent_name,
+            opening_balance,
+            bill_wise,
+            address,
+            pincode,
+            state,
+            country,
+            contact_person,
+            phone,
+            mobile,
+            email,
+            website,
+            pan,
+            gstin,
+            gst_registration_type,
+            status,
+            created_at,
+            updated_at
 
-        )
+          )
 
-        VALUES (
+          VALUES
+          (
 
-          $1, $2, $3, $4, $5,
-          $6, $7, $8, $9, $10,
-          $11, $12, $13, $14, $15,
-          $16, $17, $18, $19,
-          NOW(),
-          NOW()
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,
+            $16,$17,$18,
+            'pending',
+            NOW(),
+            NOW()
 
-        )
-        `,
+          )
 
-        [
+          RETURNING id
+          `,
 
-          companyId,
+          [
 
-          data.company?.trim(),
+            companyId,
 
-          data.ledger_name?.trim(),
+            data.company?.trim(),
 
-          data.parent?.trim(),
+            data.ledger_name?.trim(),
 
-          data.opening_balance || 0,
+            data.parent?.trim(),
 
-          data.bill_wise || "No",
+            Number(
+              data.opening_balance || 0
+            ),
 
-          data.address || "",
+            data.bill_wise || "No",
 
-          data.pincode || "",
+            data.address || "",
 
-          data.state || "",
+            data.pincode || "",
 
-          data.country || "India",
+            data.state || "",
 
-          data.contact_person || "",
+            data.country || "India",
 
-          data.phone || "",
+            data.contact_person || "",
 
-          data.mobile || "",
+            data.phone || "",
 
-          data.email || "",
+            data.mobile || "",
 
-          data.website || "",
+            data.email || "",
 
-          data.pan || "",
+            data.website || "",
 
-          data.gstin || "",
+            data.pan || "",
 
-          data.gst_registration_type || "",
+            data.gstin || "",
 
-          "pending"
+            data.gst_registration_type || ""
 
-        ]
+          ]
+
+        );
+
+      const ledgerId =
+        insertResult.rows[0].id;
+
+      /* ==============================
+         ADD TO BULLMQ
+      ============================== */
+
+      const job =
+        await ledgerQueue.add(
+
+          "push-ledger",
+
+          {
+            ledgerId
+          },
+
+          {
+
+            attempts: 5,
+
+            backoff: {
+
+              type:
+                "exponential",
+
+              delay:
+                5000
+
+            },
+
+            removeOnComplete:
+              100,
+
+            removeOnFail:
+              100
+
+          }
+
+        );
+
+      console.log(
+
+        `📥 QUEUED LEDGER ${ledgerId}`
 
       );
 
       /* ==============================
-         SUCCESS RESPONSE
+         RESPONSE
       ============================== */
 
       return res.status(200).json({
 
-        status: "success",
+        status:
+          "success",
 
         message:
-          "Ledger queued successfully"
+          "Ledger queued successfully",
+
+        ledgerId,
+
+        jobId:
+          job.id
 
       });
 
@@ -235,7 +289,8 @@ router.post(
 
       return res.status(500).json({
 
-        status: "error",
+        status:
+          "error",
 
         message:
           err.message

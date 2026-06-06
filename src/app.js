@@ -13,11 +13,6 @@ import "./cron/dailySync.cron.js";
 import "./workers/sync.worker.js";
 
 
-/* =================================
-   DAILY CRON
-================================= */
-
-import "./cron/dailySync.cron.js";
 
 
 
@@ -34,6 +29,7 @@ import "./workers/pushOdBank.worker.js";
 
 import "./workers/pushStockItem.worker.js";
 
+import "./workers/pushInvoice.worker.js";
 
 
 
@@ -61,11 +57,6 @@ from "./api/parentGroups.routes.js";
 import allParentGroupsRoutes
 from "./api/allParentGroups.routes.js";
 
-import groupSummarySC
-from "./api/groupSummarySC.routes.js";
-
-import groupSummarySD
-from "./api/groupSummarySD.routes.js";
 
 import groupSummaryBank
 from "./api/groupSummaryBank.routes.js";
@@ -174,18 +165,8 @@ app.use(
 );
 
 /* =================================
-   GROUP SUMMARY APIs
+   GROUP SUMMARY BANK APIs
 ================================= */
-
-app.use(
-  "/api/group-summary-cr",
-  groupSummarySC
-);
-
-app.use(
-  "/api/group-summary-dr",
-  groupSummarySD
-);
 
 app.use(
   "/api/group-summary-bank",

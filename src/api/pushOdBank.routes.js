@@ -4,6 +4,11 @@
 
 import express from "express";
 import pool from "../db/index.js";
+import {
+  odBankQueue,
+  OD_BANK_JOB_OPTIONS,
+  getOdBankJobId
+} from "../queues/odBank.queue.js";
 
 const router = express.Router();
 
@@ -106,7 +111,7 @@ router.post(
          INSERT QUEUE
       ===================================== */
 
-      await pool.query(
+      const insertResult = await pool.query(
 
         `
         INSERT INTO app_test.bank_od_accounts
@@ -148,6 +153,7 @@ router.post(
           NOW()
 
         )
+        RETURNING id
         `,
 
         [
@@ -192,6 +198,17 @@ router.post(
 
         ]
 
+      );
+
+      const odBankId = insertResult.rows[0].id;
+
+      await odBankQueue.add(
+        "push-od-bank",
+        { odBankId },
+        {
+          ...OD_BANK_JOB_OPTIONS,
+          jobId: getOdBankJobId(odBankId)
+        }
       );
 
       return res.status(200).json({

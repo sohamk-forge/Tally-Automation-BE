@@ -1,137 +1,321 @@
+import { Worker } from "bullmq";
+import IORedis from "ioredis";
+
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
 import { getStockItemCreateXML } from "../services/pushXmlBuilder.js";
+import {
+  stockItemQueue,
+  STOCK_ITEM_JOB_OPTIONS,
+  STOCK_ITEM_QUEUE_NAME,
+  getStockItemJobId
+} from "../queues/stockItem.queue.js";
 
-let isProcessing = false;
+const connection = new IORedis({
+  host: process.env.REDIS_HOST || "127.0.0.1",
+  port: Number(process.env.REDIS_PORT || 6379),
+  maxRetriesPerRequest: null
+});
 
-const processPushStockItemJobs = async () => {
-  if (isProcessing) {
-    console.log("⚠️ Previous worker still running, skipping this cycle");
-    return;
-  }
+function isTemporaryStockItemError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || "").toLowerCase();
 
-  isProcessing = true;
+  return [
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "ENOTFOUND"
+  ].includes(code) ||
+    message.includes("connection timeout") ||
+    message.includes("timeout") ||
+    message.includes("tally server unavailable") ||
+    message.includes("server unavailable") ||
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("socket hang up") ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("etimedout");
+}
 
-  try {
-    const result = await pool.query(`
-      SELECT *
-      FROM app_test.push_stock_item
-      WHERE status = 'pending'
-      ORDER BY id ASC
-      LIMIT 5
-    `);
+async function enqueuePendingStockItemJobs() {
+  const result = await pool.query(
+    `
+    SELECT id
+    FROM app_test.push_stock_item
+    WHERE status = 'pending'
+    ORDER BY id ASC
+    `
+  );
 
-    if (!result.rows.length) {
-      console.log("📭 No pending stock items to process");
-      return;
+  for (const row of result.rows) {
+    const jobId = getStockItemJobId(row.id);
+    const existingJob = await stockItemQueue.getJob(jobId);
+
+    if (existingJob) {
+      const state = await existingJob.getState();
+      const isProcessable = [
+        "waiting",
+        "active",
+        "delayed",
+        "prioritized",
+        "paused",
+        "waiting-children"
+      ].includes(state);
+
+      if (isProcessable) {
+        continue;
+      }
+
+      await existingJob.remove();
     }
 
-    console.log(`📋 Found ${result.rows.length} pending items to process`);
+    await stockItemQueue.add(
+      "push-stock-item",
+      { stockItemId: row.id },
+      {
+        ...STOCK_ITEM_JOB_OPTIONS,
+        jobId
+      }
+    );
+  }
+}
 
-    for (const row of result.rows) {
-      let tallyResponse = null;
+const worker = new Worker(
+  STOCK_ITEM_QUEUE_NAME,
+  async (job) => {
+    const { stockItemId } = job.data;
 
-      try {
-        console.log("\n" + "=".repeat(60));
-        console.log(`🔄 PROCESSING ITEM ID: ${row.id}`);
-        console.log(`📦 ITEM NAME: ${row.item_name}`);
-        console.log("=".repeat(60));
-        
-        console.log("📊 GST Configuration:");
-        console.log(`   - GST Applicable: ${row.gst_applicable || 'Not Applicable'}`);
-        console.log(`   - Parent Group: ${row.parent_group || 'Primary'}`);
-        console.log(`   - HSN Code: ${row.hsn_code || 'Not provided'}`);
-        console.log(`   - CGST: ${row.cgst_rate || 0}%`);
-        console.log(`   - SGST: ${row.sgst_rate || 0}%`);
-        console.log(`   - IGST: ${row.igst_rate || 0}%`);
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM app_test.push_stock_item
+      WHERE id = $1
+      `,
+      [stockItemId]
+    );
 
-        const xml = getStockItemCreateXML({
-          company: row.company_name,
-          itemName: row.item_name,
-          alias: row.alias_name,
-          unit: row.unit_name,
-          description: row.description,
-          hsnCode: row.hsn_code,
-          cgst: row.cgst_rate,
-          sgst: row.sgst_rate,
-          igst: row.igst_rate,
-          gstApplicable: row.gst_applicable,
-          parentGroup: row.parent_group
-        });
+    const row = result.rows[0];
 
-        console.log("\n🚀 Sending to Tally...");
-        tallyResponse = await sendToTally(xml);
-        
-        console.log("\n📥 RAW XML RESPONSE:");
-        console.log(tallyResponse);
+    if (!row) {
+      console.error(
+        `Stock item ${stockItemId} not found`
+      );
 
-        const createdMatch = tallyResponse.match(/<CREATED>(\d+)<\/CREATED>/);
-        const created = createdMatch ? Number(createdMatch[1]) : 0;
-        
-        const alteredMatch = tallyResponse.match(/<ALTERED>(\d+)<\/ALTERED>/);
-        const altered = alteredMatch ? Number(alteredMatch[1]) : 0;
-        
-        const lineErrorMatch = tallyResponse.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
-        const lineError = lineErrorMatch ? lineErrorMatch[1] : null;
+      return { stockItemId, status: "not_found" };
+    }
 
-        console.log(`\n📊 SUMMARY - Created: ${created}, Altered: ${altered}`);
-        if (lineError) console.log(`   Line Error: ${lineError}`);
+    try {
+      const xml = getStockItemCreateXML({
+        company: row.company_name,
+        itemName: row.item_name,
+        alias: row.alias_name,
+        unit: row.unit_name,
+        description: row.description,
+        hsnCode: row.hsn_code,
+        cgst: row.cgst_rate,
+        sgst: row.sgst_rate,
+        igst: row.igst_rate,
+        gstApplicable: row.gst_applicable,
+        parentGroup: row.parent_group,
+        applicableFrom: "20250401"
+      });
 
-        const isSuccess = created === 1 || altered === 1;
-        
-        if (!isSuccess) {
-          console.log(`\n❌ FAILED: ${row.item_name}`);
-          
-          await pool.query(`
-            UPDATE app_test.push_stock_item
-            SET 
-              status = 'failed',
-              tally_response = $1,
-              error_count = COALESCE(error_count, 0) + 1,
-              last_error = $2,
-              updated_at = NOW()
-            WHERE id = $3
-          `, [tallyResponse, lineError || 'No line error provided', row.id]);
-          
-          continue;
-        }
+      const tallyResponse =
+        await sendToTally(xml);
 
-        console.log(`\n✅ SUCCESS: ${row.item_name}`);
-        
-        await pool.query(`
+      const createdMatch =
+        tallyResponse.match(
+          /<CREATED>(\d+)<\/CREATED>/
+        );
+
+      const created = createdMatch
+        ? Number(createdMatch[1])
+        : 0;
+
+      const alteredMatch =
+        tallyResponse.match(
+          /<ALTERED>(\d+)<\/ALTERED>/
+        );
+
+      const altered = alteredMatch
+        ? Number(alteredMatch[1])
+        : 0;
+
+      const lineErrorMatch =
+        tallyResponse.match(
+          /<LINEERROR>(.*?)<\/LINEERROR>/
+        );
+
+      const lineError = lineErrorMatch
+        ? lineErrorMatch[1]
+        : null;
+
+      const isSuccess =
+        created === 1 ||
+        altered === 1;
+
+      if (!isSuccess) {
+        const errorMessage =
+          lineError || "Tally push failed";
+
+        await pool.query(
+          `
           UPDATE app_test.push_stock_item
-          SET 
-            status = 'success',
+          SET
+            status = 'failed',
             tally_response = $1,
-            error_count = 0,
-            last_error = NULL,
+            error_count = COALESCE(error_count, 0) + 1,
+            last_error = $2,
             updated_at = NOW()
-          WHERE id = $2
-        `, [tallyResponse, row.id]);
+          WHERE id = $3
+          `,
+          [
+            tallyResponse,
+            errorMessage,
+            stockItemId
+          ]
+        );
 
-      } catch (err) {
-        console.log(`\n💥 ERROR: ${row.item_name} - ${err.message}`);
-        
-        await pool.query(`
+        return {
+          stockItemId,
+          status: "failed"
+        };
+      }
+
+      await pool.query(
+        `
+        UPDATE app_test.push_stock_item
+        SET
+          status = 'success',
+          tally_response = $1,
+          error_count = 0,
+          last_error = NULL,
+          updated_at = NOW()
+        WHERE id = $2
+        `,
+        [
+          tallyResponse,
+          stockItemId
+        ]
+      );
+
+      return { stockItemId };
+    } catch (error) {
+      if (isTemporaryStockItemError(error)) {
+        await pool.query(
+          `
           UPDATE app_test.push_stock_item
-          SET 
+          SET
             status = 'pending',
             error_count = COALESCE(error_count, 0) + 1,
             last_error = $1,
             updated_at = NOW()
           WHERE id = $2
-        `, [err.message, row.id]);
+          `,
+          [
+            error.message,
+            stockItemId
+          ]
+        );
+
+        throw error;
       }
+
+      await pool.query(
+        `
+        UPDATE app_test.push_stock_item
+        SET
+          status = 'failed',
+          error_count = COALESCE(error_count, 0) + 1,
+          last_error = $1,
+          updated_at = NOW()
+        WHERE id = $2
+        `,
+        [
+          error.message,
+          stockItemId
+        ]
+      );
+
+      return {
+        stockItemId,
+        status: "failed"
+      };
     }
-
-  } catch (err) {
-    console.error("\n💥 WORKER CRITICAL ERROR:", err.message);
-  } finally {
-    isProcessing = false;
+  },
+  {
+    connection,
+    concurrency: 5
   }
-};
+);
 
-setInterval(processPushStockItemJobs, 30000);
-console.log("✅ Push Stock Item Worker Started");
+worker.on("completed", (job) => {
+  console.log(
+    `Stock item job completed: ${job.id}`
+  );
+});
 
-processPushStockItemJobs();
+worker.on("failed", async (job, error) => {
+  console.error(
+    `Stock item job failed: ${job?.id}`,
+    error.message
+  );
+
+  if (!job) {
+    return;
+  }
+
+  const maximumAttempts =
+    Number(job.opts.attempts || 1);
+
+  if (job.attemptsMade < maximumAttempts) {
+    return;
+  }
+
+  try {
+    const { stockItemId } = job.data;
+
+    await pool.query(
+      `
+      UPDATE app_test.push_stock_item
+      SET
+        status = 'failed',
+        last_error = $1,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [
+        error.message,
+        stockItemId
+      ]
+    );
+  } catch (updateError) {
+    console.error(
+      `Stock item final failure update failed: ${job.id}`,
+      updateError.message
+    );
+  }
+});
+
+worker.on("error", (error) => {
+  console.error(
+    "Stock item worker error:",
+    error.message
+  );
+});
+
+enqueuePendingStockItemJobs().catch((error) => {
+  console.error(
+    "Stock item startup recovery failed:",
+    error.message
+  );
+});
+
+console.log(
+  "Push Stock Item BullMQ Worker Started"
+);
+
+export default worker;

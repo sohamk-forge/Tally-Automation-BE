@@ -67,7 +67,11 @@ voucher_number = str(invoice.get("voucher_number", ""))
 invoice_no     = invoice.get("invoice_no", "")
 reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("vendor_name", "")
-party_gstin    = invoice.get("vendor_gstin", "")
+party_gstin = (
+    invoice.get("vendor_gstin")
+    or invoice.get("gstin")
+    or ""
+)
 
 # =========================================
 # AMOUNTS
@@ -133,12 +137,12 @@ sub(vch, "ISINVOICE",       "Yes")
 # INVENTORY ENTRIES
 # =========================================
 for item in line_items:
-    name   = item.get("name", "")
+    name = item.get("item_name") or item.get("name", "")
     qty    = float(item.get("qty", 1))
     unit   = item.get("unit", "nos")
     rate   = float(item.get("rate", 0))
     amount = float(item.get("amount", 0))
-    ledger = item.get("ledger", "GST Purchase")
+    ledger = item.get("ledger", "Purchase")
 
     ail = sub(vch, "ALLINVENTORYENTRIES.LIST")
     sub(ail, "STOCKITEMNAME",   name)
@@ -180,9 +184,9 @@ if sgst > 0:
     sub(lel, "AMOUNT",          str(-sgst))
 
 # Roundoff
-if round_off != 0:
+if abs(round_off) >= 0.01:
     lel = sub(vch, "LEDGERENTRIES.LIST")
-    sub(lel, "LEDGERNAME",      "Rounded Off")
+    sub(lel, "LEDGERNAME", "Round Off")
     sub(lel, "ISDEEMEDPOSITIVE","Yes")
     sub(lel, "AMOUNT",          str(-round_off))
 

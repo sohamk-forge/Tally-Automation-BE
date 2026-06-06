@@ -4,8 +4,12 @@
 
 import express from "express";
 
-import pool
-from "../db/index.js";
+import pool from "../db/index.js";
+import {
+  bankQueue,
+  BANK_JOB_OPTIONS,
+  getBankJobId
+} from "../queues/bank.queue.js";
 
 const router =
   express.Router();
@@ -140,7 +144,7 @@ router.post(
          INSERT QUEUE RECORD
       ===================================== */
 
-      await pool.query(
+      const insertResult = await pool.query(
 
         `
         INSERT INTO app_test.push_bank
@@ -200,6 +204,8 @@ router.post(
           NOW()
 
         )
+
+        RETURNING id
         `,
 
         [
@@ -242,6 +248,17 @@ router.post(
 
         ]
 
+      );
+
+      const bankId = insertResult.rows[0].id;
+
+      await bankQueue.add(
+        "push-bank",
+        { bankId },
+        {
+          ...BANK_JOB_OPTIONS,
+          jobId: getBankJobId(bankId)
+        }
       );
 
       /* =====================================

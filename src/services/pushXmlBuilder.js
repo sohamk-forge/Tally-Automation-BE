@@ -520,6 +520,15 @@ ${safe(data.ledger_name)}
 
 export const createOdBankXML = (data) => {
 
+    const parentGroup =
+  data.account_type === "OCC"
+    ? "Bank OCC A/c"
+    : "Bank OD A/c";
+
+    const isOD =
+    data.account_type === "OD";
+
+
 return `
 
 <ENVELOPE>
@@ -574,19 +583,19 @@ return `
 
                         <!-- OD / OCC GROUP -->
 
-                        <PARENT>
-                            Bank OD A/c
-                        </PARENT>
+                       <PARENT>
+    ${parentGroup}
+</PARENT>
 
                         <!-- OD FLAGS -->
 
-                        <ISODACCOUNT>
-                            Yes
-                        </ISODACCOUNT>
+                       <ISODACCOUNT>
+    ${isOD ? "Yes" : "No"}
+</ISODACCOUNT>
 
-                        <ISLOANACCOUNT>
-                            Yes
-                        </ISLOANACCOUNT>
+<ISLOANACCOUNT>
+    ${isOD ? "Yes" : "No"}
+</ISLOANACCOUNT>
 
                         <ISINTERESTON>
                             No
@@ -801,154 +810,300 @@ return `
 };
 
 
-export const getStockItemCreateXML = ({
-  company,
-  itemName,
-  alias,
-  unit,
-  description,
-  hsnCode,
-  cgst,
-  sgst,
-  igst,
-  gstApplicable,
-  parentGroup
-}) => {
 
-  const finalGSTApplicable = gstApplicable || "Not Applicable";
+const escapeXml = (value = "") =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 
-  let gstDetailsSection = "";
+    export const getStockItemCreateXML = ({
+    company,
+    itemName,
+    alias,
+    unit,
+    description,
+    hsnCode,
+    cgst,
+    sgst,
+    igst,
+    gstApplicable,
+    parentGroup,
+    applicableFrom
+    }) => {
 
-  if (finalGSTApplicable === "Applicable") {
+    const finalGSTApplicable =
+        gstApplicable === "Applicable"
+        ? "Applicable"
+        : "Not Applicable";
 
-    gstDetailsSection = `
+    const finalApplicableFrom =
+        applicableFrom || "20250401";
 
-      <GSTDETAILS.LIST>
+  const finalParentGroup =
+    String(parentGroup || "").trim();
+        const parentXML =
+  finalParentGroup
+    ? `
+<PARENT>${escapeXml(finalParentGroup)}</PARENT>
+`
+    : `
+<PARENT/>
+`;
 
-        <APPLICABLEFROM>20260401</APPLICABLEFROM>
+    const gstSection =
+        finalGSTApplicable === "Applicable"
+        ? `
+    <GSTDETAILS.LIST>
 
-        <TAXABILITY>Taxable</TAXABILITY>
+  <APPLICABLEFROM>
+  ${finalApplicableFrom}
+</APPLICABLEFROM>
+    <TAXABILITY>
+        Taxable
+    </TAXABILITY>
 
-        <SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>
+    <SRCOFGSTDETAILS>
+        Specify Details Here
+    </SRCOFGSTDETAILS>
 
-        <STATEWISEDETAILS.LIST>
+    <GSTCALCSLABONMRP>
+        No
+    </GSTCALCSLABONMRP>
 
-          <STATENAME>&#4; Any</STATENAME>
+    <ISREVERSECHARGEAPPLICABLE>
+        No
+    </ISREVERSECHARGEAPPLICABLE>
 
-          <RATEDETAILS.LIST>
-            <GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD>
-            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
-            <GSTRATE>${cgst || 0}</GSTRATE>
-          </RATEDETAILS.LIST>
+    <ISNONGSTGOODS>
+        No
+    </ISNONGSTGOODS>
 
-          <RATEDETAILS.LIST>
-            <GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD>
-            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
-            <GSTRATE>${sgst || 0}</GSTRATE>
-          </RATEDETAILS.LIST>
+    <GSTINELIGIBLEITC>
+        No
+    </GSTINELIGIBLEITC>
 
-          <RATEDETAILS.LIST>
-            <GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD>
-            <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
-            <GSTRATE>${igst || 0}</GSTRATE>
-          </RATEDETAILS.LIST>
+    <INCLUDEEXPFORSLABCALC>
+        No
+    </INCLUDEEXPFORSLABCALC>
 
-        </STATEWISEDETAILS.LIST>
+    <STATEWISEDETAILS.LIST>
 
-      </GSTDETAILS.LIST>
+        <STATENAME>
+        &#4; Any
+        </STATENAME>
 
-      <HSNDETAILS.LIST>
+        <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>
+            CGST
+        </GSTRATEDUTYHEAD>
+        <GSTRATEVALUATIONTYPE>
+            Based on Value
+        </GSTRATEVALUATIONTYPE>
+        <GSTRATE>
+            ${Number(cgst) || 0}
+        </GSTRATE>
+        </RATEDETAILS.LIST>
 
-        <APPLICABLEFROM>20260401</APPLICABLEFROM>
+        <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>
+            SGST/UTGST
+        </GSTRATEDUTYHEAD>
+        <GSTRATEVALUATIONTYPE>
+            Based on Value
+        </GSTRATEVALUATIONTYPE>
+        <GSTRATE>
+            ${Number(sgst) || 0}
+        </GSTRATE>
+        </RATEDETAILS.LIST>
 
-        <HSNCODE>${hsnCode || ""}</HSNCODE>
+        <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>
+            IGST
+        </GSTRATEDUTYHEAD>
+        <GSTRATEVALUATIONTYPE>
+            Based on Value
+        </GSTRATEVALUATIONTYPE>
+        <GSTRATE>
+            ${Number(igst) || 0}
+        </GSTRATE>
+        </RATEDETAILS.LIST>
 
-        <SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>
+        <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>
+            Cess
+        </GSTRATEDUTYHEAD>
+        <GSTRATEVALUATIONTYPE>
+            &#4; Not Applicable
+        </GSTRATEVALUATIONTYPE>
+        </RATEDETAILS.LIST>
 
-      </HSNDETAILS.LIST>
+        <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>
+            State Cess
+        </GSTRATEDUTYHEAD>
+        <GSTRATEVALUATIONTYPE>
+            Based on Value
+        </GSTRATEVALUATIONTYPE>
+        </RATEDETAILS.LIST>
+
+    </STATEWISEDETAILS.LIST>
+
+    </GSTDETAILS.LIST>
+
+    <HSNDETAILS.LIST>
+<APPLICABLEFROM>
+  ${finalApplicableFrom}
+</APPLICABLEFROM>
+
+    <HSNCODE>
+        ${escapeXml(hsnCode || "")}
+    </HSNCODE>
+
+    <SRCOFHSNDETAILS>
+        Specify Details Here
+    </SRCOFHSNDETAILS>
+
+    </HSNDETAILS.LIST>
+    `
+        : "";
+
+    return `
+
+    <ENVELOPE>
+
+    <HEADER>
+
+        <TALLYREQUEST>
+        Import Data
+        </TALLYREQUEST>
+
+    </HEADER>
+
+    <BODY>
+
+        <IMPORTDATA>
+
+        <REQUESTDESC>
+
+            <REPORTNAME>
+            All Masters
+            </REPORTNAME>
+
+            <STATICVARIABLES>
+
+            <SVCURRENTCOMPANY>
+                ${escapeXml(company)}
+            </SVCURRENTCOMPANY>
+
+            </STATICVARIABLES>
+
+        </REQUESTDESC>
+
+        <REQUESTDATA>
+
+            <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+            <STOCKITEM
+                NAME="${escapeXml(itemName)}"
+                ACTION="Create"
+            >
+
+              <NAME>
+  ${escapeXml(itemName)}
+</NAME>
+
+${parentXML}
+
+<GSTAPPLICABLE>
+  &#4; ${finalGSTApplicable}
+</GSTAPPLICABLE>
+
+                <TAXCLASSIFICATIONNAME>
+                &#4; Not Applicable
+                </TAXCLASSIFICATIONNAME>
+
+                <GSTTYPEOFSUPPLY>
+                Goods
+                </GSTTYPEOFSUPPLY>
+
+                <COSTINGMETHOD>
+                Avg. Cost
+                </COSTINGMETHOD>
+
+                <VALUATIONMETHOD>
+                Avg. Price
+                </VALUATIONMETHOD>
+
+                <BASEUNITS>
+                ${escapeXml(unit)}
+                </BASEUNITS>
+
+                <ADDITIONALUNITS>
+                &#4; Not Applicable
+                </ADDITIONALUNITS>
+
+                <DESCRIPTION>
+                ${escapeXml(description || "")}
+                </DESCRIPTION>
+
+                <ISCOSTCENTRESON>
+                No
+                </ISCOSTCENTRESON>
+
+                <ISBATCHWISEON>
+                No
+                </ISBATCHWISEON>
+
+                <ISPERISHABLEON>
+                No
+                </ISPERISHABLEON>
+
+                <IGNORENEGATIVESTOCK>
+                No
+                </IGNORENEGATIVESTOCK>
+
+                <ASORIGINAL>
+                Yes
+                </ASORIGINAL>
+
+                ${gstSection}
+
+                <LANGUAGENAME.LIST>
+
+                <NAME.LIST TYPE="String">
+
+                    <NAME>
+                    ${escapeXml(itemName)}
+                    </NAME>
+
+                    ${
+                String(alias || "").trim()
+                        ? `<NAME>${escapeXml(alias)}</NAME>`
+                        : ""
+                    }
+
+                </NAME.LIST>
+
+                <LANGUAGEID>
+                    1033
+                </LANGUAGEID>
+
+                </LANGUAGENAME.LIST>
+
+            </STOCKITEM>
+
+            </TALLYMESSAGE>
+
+        </REQUESTDATA>
+
+        </IMPORTDATA>
+
+    </BODY>
+
+    </ENVELOPE>
 
     `;
-  }
-
-  return `
-
-<ENVELOPE>
-
- <HEADER>
-  <TALLYREQUEST>Import Data</TALLYREQUEST>
- </HEADER>
-
- <BODY>
-
-  <IMPORTDATA>
-
-   <REQUESTDESC>
-
-    <REPORTNAME>All Masters</REPORTNAME>
-
-    <STATICVARIABLES>
-
-      <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
-
-    </STATICVARIABLES>
-
-   </REQUESTDESC>
-
-   <REQUESTDATA>
-
-    <TALLYMESSAGE xmlns:UDF="TallyUDF">
-
-      <STOCKITEM NAME="${itemName}" ACTION="Create">
-
-        <NAME>${itemName}</NAME>
-
-        <PARENT>${parentGroup}</PARENT>
-
-        <CATEGORY>&#4; Not Applicable</CATEGORY>
-
-        <GSTAPPLICABLE>&#4; ${finalGSTApplicable}</GSTAPPLICABLE>
-
-        <TAXCLASSIFICATIONNAME>&#4; Not Applicable</TAXCLASSIFICATIONNAME>
-
-        <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
-
-        <COSTINGMETHOD>Avg. Cost</COSTINGMETHOD>
-
-        <VALUATIONMETHOD>Avg. Price</VALUATIONMETHOD>
-
-        <BASEUNITS>${unit}</BASEUNITS>
-
-        <ADDITIONALUNITS>&#4; Not Applicable</ADDITIONALUNITS>
-
-        <DESCRIPTION>${description}</DESCRIPTION>
-
-        ${gstDetailsSection}
-
-        <LANGUAGENAME.LIST>
-
-          <NAME.LIST TYPE="String">
-
-            <NAME>${itemName}</NAME>
-
-            <NAME>${alias || itemName}</NAME>
-
-          </NAME.LIST>
-
-          <LANGUAGEID>1033</LANGUAGEID>
-
-        </LANGUAGENAME.LIST>
-
-      </STOCKITEM>
-
-    </TALLYMESSAGE>
-
-   </REQUESTDATA>
-
-  </IMPORTDATA>
-
- </BODY>
-
-</ENVELOPE>
-
-`;
-};
+    };
