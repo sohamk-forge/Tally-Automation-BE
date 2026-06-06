@@ -1107,3 +1107,81 @@ ${parentXML}
 
     `;
     };
+
+ export const getStockItemOpeningXML = ({
+  company,
+  itemName,
+  unit,
+  openingQuantity,
+  openingRate,
+  openingValue
+}) => {
+
+  return `
+
+<ENVELOPE>
+
+    <HEADER>
+
+        <VERSION>1</VERSION>
+
+        <TALLYREQUEST>Import</TALLYREQUEST>
+
+        <TYPE>Data</TYPE>
+
+        <ID>All Masters</ID>
+
+    </HEADER>
+
+    <BODY>
+
+        <DESC>
+
+            <STATICVARIABLES>
+
+                <SVCURRENTCOMPANY>
+                    ${escapeXml(company)}
+                </SVCURRENTCOMPANY>
+
+            </STATICVARIABLES>
+
+        </DESC>
+
+        <DATA>
+
+            <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+                <STOCKITEM
+                    NAME="${escapeXml(itemName)}"
+                    ACTION="Alter"
+                >
+
+                    <NAME>
+                        ${escapeXml(itemName)}
+                    </NAME>
+
+                    <OPENINGBALANCE>
+                        ${Number(openingQuantity) || 0}
+                    </OPENINGBALANCE>
+
+                    <OPENINGRATE>
+                        ${Number(openingRate) || 0}/${escapeXml(unit)}
+                    </OPENINGRATE>
+
+                    <OPENINGVALUE>
+                        ${Number(openingValue) || 0}
+                    </OPENINGVALUE>
+
+                </STOCKITEM>
+
+            </TALLYMESSAGE>
+
+        </DATA>
+
+    </BODY>
+
+</ENVELOPE>
+
+`;
+
+};

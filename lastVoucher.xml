@@ -1,107 +1,65 @@
 
+
 <ENVELOPE>
 
-  <HEADER>
+    <HEADER>
 
-    <VERSION>1</VERSION>
+        <VERSION>1</VERSION>
 
-    <TALLYREQUEST>Export</TALLYREQUEST>
+        <TALLYREQUEST>Import</TALLYREQUEST>
 
-    <TYPE>Collection</TYPE>
+        <TYPE>Data</TYPE>
 
-    <ID>AllLedgers</ID>
+        <ID>All Masters</ID>
 
-  </HEADER>
+    </HEADER>
 
-  <BODY>
+    <BODY>
 
-    <DESC>
+        <DESC>
 
-      <STATICVARIABLES>
+            <STATICVARIABLES>
 
-        <SVCURRENTCOMPANY>Ratanseva Automobiles Pvt.Ltd. 2025-2026 - (from 1-Apr-25)</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>
+                    Nutan Dairy
+                </SVCURRENTCOMPANY>
 
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
 
-      </STATICVARIABLES>
+        </DESC>
 
-      <TDL>
+        <DATA>
 
-        <TDLMESSAGE>
+            <TALLYMESSAGE xmlns:UDF="TallyUDF">
 
-          <COLLECTION NAME="AllLedgers">
+                <STOCKITEM
+                    NAME="BullMQ Test Item 001"
+                    ACTION="Alter"
+                >
 
-            <TYPE>Ledger</TYPE>
+                    <NAME>
+                        BullMQ Test Item 001
+                    </NAME>
 
-            <FETCH>
+                    <OPENINGBALANCE>
+                        10
+                    </OPENINGBALANCE>
 
-              NAME,
-              ALIAS,
-              PARENT,
+                    <OPENINGRATE>
+                        27/Nos
+                    </OPENINGRATE>
 
-              MAILINGNAME,
-              ADDRESS,
+                    <OPENINGVALUE>
+                        2
+                    </OPENINGVALUE>
 
-              COUNTRYNAME,
-              STATENAME,
-              STATE,
-              LEDSTATENAME,
-              LEDCOUNTRYNAME,
+                </STOCKITEM>
 
-              PINCODE,
+            </TALLYMESSAGE>
 
-              PHONE,
-              PHONENUMBER,
-              LEDGERPHONE,
+        </DATA>
 
-              MOBILE,
-              MOBILENUMBER,
-              LEDGERMOBILE,
-
-              FAX,
-
-              EMAIL,
-              LEDGEREMAIL,
-
-              CONTACTPERSON,
-              CONTACTDETAILS.*,
-
-              PARTYGSTIN,
-              GSTREGISTRATIONTYPE,
-              PARTYREGISTRATIONTYPE,
-
-              GSTIN,
-              PLACEOFSUPPLY,
-
-              LEDGSTREGDETAILS.*,
-
-              INCOMETAXNUMBER,
-
-              BANKNAME,
-              BANKACCOUNTNUMBER,
-              BANKBRANCHNAME,
-              BANKIFSCODE,
-
-              CREDITPERIOD,
-              CREDITLIMIT,
-
-              OPENINGBALANCE,
-              CLOSINGBALANCE,
-
-              GUID,
-              MASTERID,
-              ALTERID
-
-            </FETCH>
-
-          </COLLECTION>
-
-        </TDLMESSAGE>
-
-      </TDL>
-
-    </DESC>
-
-  </BODY>
+    </BODY>
 
 </ENVELOPE>
+

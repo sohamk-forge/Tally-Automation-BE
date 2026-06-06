@@ -31,6 +31,8 @@ import "./workers/pushStockItem.worker.js";
 
 import "./workers/pushInvoice.worker.js";
 
+import "./workers/pushAlterStockItem.worker.js";
+
 
 
 
@@ -96,6 +98,8 @@ from "./api/pushStockItem.routes.js";
 import allLedgerDetailsRoutes
 from "./api/allLedgerDetails.routes.js";
 
+import pushStockItemOpeningRoutes
+from "./api/pushStockItemOpening.routes.js";
 
 
 /* =================================
@@ -269,6 +273,11 @@ app.use(
 app.use(
   "/api",
   pushStockItemRoutes
+);
+
+app.use(
+  "/api",
+  pushStockItemOpeningRoutes
 );
 
 app.use(

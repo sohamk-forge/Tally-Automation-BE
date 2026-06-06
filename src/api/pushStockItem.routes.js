@@ -69,46 +69,46 @@ router.post("/push/stock-item", async (req, res) => {
     }
 
     // Insert record
-    const insertResult = await pool.query(
-      `INSERT INTO app_test.push_stock_item (
-        company_id,
-        company_name,
-        item_name,
-        alias_name,
-        unit_name,
-        description,
-        hsn_code,
-        cgst_rate,
-        sgst_rate,
-        igst_rate,
-        gst_applicable,
-        parent_group,
-        status,
-        created_at,
-        updated_at
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-        NOW(),
-        NOW()
-      )
-      RETURNING *`,
-      [
-        companyId,
-        data.company?.trim(),
-        data.item_name?.trim(),
-        data.alias_name || "",
-        data.unit?.trim(),
-        data.description || "",
-        data.hsn_code || "",
-        data.cgst_rate || 0,
-        data.sgst_rate || 0,
-        data.igst_rate || 0,
-        gstApplicable,
-        data.parent_group || "",
-        "pending"
-      ]
-    );
-
+const insertResult = await pool.query(
+  `INSERT INTO app_test.push_stock_item (
+    company_id,
+    company_name,
+    item_name,
+    alias_name,
+    unit_name,
+    description,
+    hsn_code,
+    cgst_rate,
+    sgst_rate,
+    igst_rate,
+    gst_applicable,
+    parent_group,
+    status,
+    created_at,
+    updated_at
+  )
+  VALUES (
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+    NOW(),
+    NOW()
+  )
+  RETURNING *`,
+  [
+    companyId,
+    data.company?.trim(),
+    data.item_name?.trim(),
+    data.alias_name || "",
+    data.unit?.trim(),
+    data.description || "",
+    data.hsn_code || "",
+    data.cgst_rate || 0,
+    data.sgst_rate || 0,
+    data.igst_rate || 0,
+    gstApplicable,
+    data.parent_group || "",
+    "pending"
+  ]
+);
     console.log(
       "Saved Parent Group:",
       insertResult.rows[0].parent_group
