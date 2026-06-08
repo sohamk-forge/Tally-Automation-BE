@@ -33,6 +33,10 @@ import "./workers/pushInvoice.worker.js";
 
 import "./workers/pushAlterStockItem.worker.js";
 
+import "./workers/stockAlert.worker.js";
+
+import "./workers/bulkStockItem.worker.js";
+
 
 
 
@@ -100,6 +104,13 @@ from "./api/allLedgerDetails.routes.js";
 
 import pushStockItemOpeningRoutes
 from "./api/pushStockItemOpening.routes.js";
+import stockAlertRoutes
+from "./api/stockAlert.routes.js";
+import pullStockAlertRoutes
+from "./api/pullStockAlert.routes.js";
+
+import bulkStockItemRoutes
+from "./api/bulkStockItem.routes.js";
 
 
 /* =================================
@@ -246,6 +257,19 @@ app.use(
 );
 
 /* =================================
+   STOCK ALERT APIs
+================================= */
+
+app.use(
+  "/api",
+  stockAlertRoutes
+);
+
+app.use(
+  "/api",
+  pullStockAlertRoutes
+);
+/* =================================
    PUSH LEDGER APIs
 ================================= */
 
@@ -285,6 +309,10 @@ app.use(
   allLedgerDetailsRoutes
 );
 
+app.use(
+  "/api",
+  bulkStockItemRoutes
+);
 
 /* =================================
    DEFAULT API

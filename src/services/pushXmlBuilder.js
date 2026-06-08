@@ -1118,70 +1118,42 @@ ${parentXML}
 }) => {
 
   return `
-
 <ENVELOPE>
-
     <HEADER>
-
         <VERSION>1</VERSION>
-
         <TALLYREQUEST>Import</TALLYREQUEST>
-
         <TYPE>Data</TYPE>
-
         <ID>All Masters</ID>
-
     </HEADER>
 
     <BODY>
-
         <DESC>
-
             <STATICVARIABLES>
-
-                <SVCURRENTCOMPANY>
-                    ${escapeXml(company)}
-                </SVCURRENTCOMPANY>
-
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
             </STATICVARIABLES>
-
         </DESC>
 
         <DATA>
-
             <TALLYMESSAGE xmlns:UDF="TallyUDF">
 
                 <STOCKITEM
-                    NAME="${escapeXml(itemName)}"
+                    NAME="${itemName}"
                     ACTION="Alter"
                 >
 
-                    <NAME>
-                        ${escapeXml(itemName)}
-                    </NAME>
+                    <NAME>${itemName}</NAME>
 
-                    <OPENINGBALANCE>
-                        ${Number(openingQuantity) || 0}
-                    </OPENINGBALANCE>
+                    <OPENINGBALANCE>${openingQuantity}</OPENINGBALANCE>
 
-                    <OPENINGRATE>
-                        ${Number(openingRate) || 0}/${escapeXml(unit)}
-                    </OPENINGRATE>
+                    <OPENINGRATE>${openingRate}/${unit}</OPENINGRATE>
 
-                    <OPENINGVALUE>
-                        ${Number(openingValue) || 0}
-                    </OPENINGVALUE>
+                    <OPENINGVALUE>${openingValue}</OPENINGVALUE>
 
                 </STOCKITEM>
 
             </TALLYMESSAGE>
-
         </DATA>
-
     </BODY>
-
 </ENVELOPE>
-
 `;
-
 };

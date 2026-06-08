@@ -1,65 +1,38 @@
 
-
 <ENVELOPE>
-
     <HEADER>
-
         <VERSION>1</VERSION>
-
         <TALLYREQUEST>Import</TALLYREQUEST>
-
         <TYPE>Data</TYPE>
-
         <ID>All Masters</ID>
-
     </HEADER>
 
     <BODY>
-
         <DESC>
-
             <STATICVARIABLES>
-
-                <SVCURRENTCOMPANY>
-                    Nutan Dairy
-                </SVCURRENTCOMPANY>
-
+                <SVCURRENTCOMPANY>Sai Sanjivani Enterprise (Eicher Workshop)</SVCURRENTCOMPANY>
             </STATICVARIABLES>
-
         </DESC>
 
         <DATA>
-
             <TALLYMESSAGE xmlns:UDF="TallyUDF">
 
                 <STOCKITEM
-                    NAME="BullMQ Test Item 001"
+                    NAME="INLET VALVE"
                     ACTION="Alter"
                 >
 
-                    <NAME>
-                        BullMQ Test Item 001
-                    </NAME>
+                    <NAME>INLET VALVE</NAME>
 
-                    <OPENINGBALANCE>
-                        10
-                    </OPENINGBALANCE>
+                    <OPENINGBALANCE>190.00</OPENINGBALANCE>
 
-                    <OPENINGRATE>
-                        27/Nos
-                    </OPENINGRATE>
+                    <OPENINGRATE>231.00/NOS</OPENINGRATE>
 
-                    <OPENINGVALUE>
-                        2
-                    </OPENINGVALUE>
+                    <OPENINGVALUE>-43890.00</OPENINGVALUE>
 
                 </STOCKITEM>
 
             </TALLYMESSAGE>
-
         </DATA>
-
     </BODY>
-
 </ENVELOPE>
-

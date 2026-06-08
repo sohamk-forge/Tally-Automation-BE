@@ -77,10 +77,12 @@ async function enqueuePendingAlterJobs() {
 
   for (const row of result.rows) {
 
+    // FOR TESTING ONLY - creates unique job IDs
     const jobId =
-      getAlterStockItemJobId(
-        row.id
-      );
+      `alter-stock-item-${row.id}-${Date.now()}`;
+    
+    // FOR PRODUCTION - use this instead:
+    // const jobId = getAlterStockItemJobId(row.id);
 
     const existingJob =
       await alterStockItemQueue.getJob(
@@ -140,65 +142,59 @@ const worker = new Worker(
         [stockItemId]
       );
 
-    const row =
-      result.rows[0];
-      console.log("STOCK ITEM DATA:");
-console.log({
-  id: row.id,
-  item_name: row.item_name,
-  company_name: row.company_name,
-  opening_quantity: row.opening_quantity,
-  opening_rate: row.opening_rate,
-  opening_value: row.opening_value
-});
+    const row = result.rows[0];
 
+    // BUG 1 FIX: Check if row exists BEFORE using it
     if (!row) {
-
       console.error(
         `Stock Item ${stockItemId} not found`
       );
-
       return;
     }
+
+    console.log("STOCK ITEM DATA:");
+    console.log({
+      id: row.id,
+      item_name: row.item_name,
+      company_name: row.company_name,
+      opening_quantity: row.opening_quantity,
+      opening_rate: row.opening_rate,
+      opening_value: row.opening_value
+    });
 
     try {
 
       const xml =
-  getStockItemOpeningXML({
+        getStockItemOpeningXML({
 
-    company:
-      row.company_name,
+          company:
+            row.company_name,
 
-    itemName:
-      row.item_name,
+          itemName:
+            row.item_name,
 
-    unit:
-      row.unit_name,
+          unit:
+            row.unit_name,
 
-    openingQuantity:
-      row.opening_quantity,
+          openingQuantity:
+            row.opening_quantity,
 
-    openingRate:
-      row.opening_rate,
+          openingRate:
+            row.opening_rate,
 
-    openingValue:
-      row.opening_value
+          openingValue:
+            row.opening_value
 
-  });
-console.log(
-  "ALTER XML:"
-);
-
+        });
+      
+      console.log("ALTER XML:");
+      console.log(xml);
 
       const tallyResponse =
         await sendToTally(xml);
-        console.log(
-  "ALTER RESPONSE:"
-);
-
-console.log(
-  tallyResponse
-);
+        
+      console.log("ALTER RESPONSE:");
+      console.log(tallyResponse);
 
       const createdMatch =
         tallyResponse.match(
@@ -208,6 +204,11 @@ console.log(
       const alteredMatch =
         tallyResponse.match(
           /<ALTERED>(\d+)<\/ALTERED>/
+        );
+      
+      const exceptionMatch =
+        tallyResponse.match(
+          /<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/
         );
 
       const created =
@@ -219,6 +220,15 @@ console.log(
         alteredMatch
           ? Number(alteredMatch[1])
           : 0;
+      
+      const exceptions =
+        exceptionMatch
+          ? Number(exceptionMatch[1])
+          : 0;
+
+      console.log("CREATED:", created);
+      console.log("ALTERED:", altered);
+      console.log("EXCEPTIONS:", exceptions);
 
       const isSuccess =
         created === 1 ||
@@ -227,7 +237,7 @@ console.log(
       if (!isSuccess) {
 
         throw new Error(
-          "Opening stock alter failed"
+          `Opening stock alter failed - CREATED: ${created}, ALTERED: ${altered}, EXCEPTIONS: ${exceptions}`
         );
       }
 
@@ -308,9 +318,9 @@ worker.on(
   }
 );
 
+// FOR TESTING ONLY - uncomment to enable recovery
 // enqueuePendingAlterJobs()
 //   .catch((error) => {
-
 //     console.error(
 //       "Alter Stock Item Recovery Failed:",
 //       error.message

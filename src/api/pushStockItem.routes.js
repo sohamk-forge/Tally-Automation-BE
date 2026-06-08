@@ -70,7 +70,8 @@ router.post("/push/stock-item", async (req, res) => {
 
     // Insert record
 const insertResult = await pool.query(
-  `INSERT INTO app_test.push_stock_item (
+  `
+  INSERT INTO app_test.push_stock_item (
     company_id,
     company_name,
     item_name,
@@ -83,16 +84,24 @@ const insertResult = await pool.query(
     igst_rate,
     gst_applicable,
     parent_group,
+
+    opening_quantity,
+    opening_rate,
+    opening_value,
+
     status,
     created_at,
     updated_at
   )
   VALUES (
-    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+    $13,$14,$15,
+    $16,
     NOW(),
     NOW()
   )
-  RETURNING *`,
+  RETURNING *
+  `,
   [
     companyId,
     data.company?.trim(),
@@ -106,6 +115,11 @@ const insertResult = await pool.query(
     data.igst_rate || 0,
     gstApplicable,
     data.parent_group || "",
+
+    Number(data.opening_quantity || 0),
+    Number(data.opening_rate || 0),
+    Number(data.opening_value || 0),
+
     "pending"
   ]
 );
