@@ -42,7 +42,7 @@ export async function up(knex) {
           "sync_status"
         )
         .defaultTo(
-          "pending"
+          "pending" 
         );
 
         table.text(

@@ -8,9 +8,8 @@ const BASE_URL =
 
 let isProcessing = false;
 
-// ADDED: Temporary error detection function
 function isTemporaryInvoiceError(error) {
-  const code = String(error?.code || "").toUpperCase();
+  const code    = String(error?.code    || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
 
   return [
@@ -36,9 +35,7 @@ function isTemporaryInvoiceError(error) {
 
 const processInvoiceJobs = async () => {
 
-  if (isProcessing) {
-    return;
-  }
+  if (isProcessing) return;
 
   isProcessing = true;
 
@@ -57,9 +54,7 @@ const processInvoiceJobs = async () => {
       return;
     }
 
-    console.log(
-      `📋 Found ${result.rows.length} Pending Invoices`
-    );
+    console.log(`📋 Found ${result.rows.length} Pending Invoices`);
 
     for (const row of result.rows) {
 
@@ -71,8 +66,8 @@ const processInvoiceJobs = async () => {
         console.log("================================");
 
         const invoiceData = row.raw_json;
-        const company = row.company_name;
-        const vendorName = invoiceData.vendor_name?.trim() || "";
+        const company     = row.company_name;
+        const vendorName  = invoiceData.vendor_name?.trim() || "";
 
         /*
         ====================================
@@ -107,17 +102,80 @@ const processInvoiceJobs = async () => {
           `,
           [company]
         );
-
         const companyId = companyResult.rows[0]?.id;
+
+if (!companyId) {
+  await pool.query(
+    `
+    UPDATE app_test.invoice_extractions
+    SET
+      sync_status = 'failed',
+      error_message = 'Company not found',
+      updated_at = NOW()
+    WHERE id = $1
+    `,
+    [row.id]
+  );
+
+  console.log(`❌ Company Not Found : ${company}`);
+  continue;
+}
+
+const companyDetails = await pool.query(
+  `
+  SELECT financial_year_start, financial_year_end
+  FROM app_test.companies
+  WHERE id = $1
+  `,
+  [companyId]
+);
+
+const companyInfo = companyDetails.rows[0];
+
+const invoiceDate = invoiceData.invoice_date; // 24-03-2026
+
+if (invoiceDate) {
+
+  const [day, month, year] = invoiceDate.split("-").map(Number);
+
+  const invoiceJsDate = new Date(year, month - 1, day);
+
+const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
+const fyEnd   = new Date(companyInfo.financial_year_end, 2, 31); // 31 Mar
+
+  if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
+
+    await pool.query(
+      `
+      UPDATE app_test.invoice_extractions
+      SET
+        sync_status = 'failed',
+        error_message = $1,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [
+        `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
+        row.id
+      ]
+    );
+
+    console.log(
+      `❌ Invoice Date Outside Financial Year : ${invoiceDate}`
+    );
+
+    continue;
+  }
+}
 
         if (!companyId) {
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
-            SET 
-              sync_status = 'failed', 
+            SET
+              sync_status   = 'failed',
               error_message = 'Company not found',
-              updated_at = NOW()
+              updated_at    = NOW()
             WHERE id = $1
             `,
             [row.id]
@@ -125,6 +183,116 @@ const processInvoiceJobs = async () => {
           console.log(`❌ Company Not Found : ${company}`);
           continue;
         }
+
+        /*
+        ====================================
+        STEP 2.5
+        FETCH LEDGER MAPPING
+        from app_test.company_ledger_mappings
+        ====================================
+        */
+
+        const mappingResult = await pool.query(
+          `
+          SELECT *
+          FROM app_test.company_ledger_mappings
+          WHERE company_id = $1
+          LIMIT 1
+          `,
+          [companyId]
+        );
+
+        if (!mappingResult.rows.length) {
+          await pool.query(
+            `
+            UPDATE app_test.invoice_extractions
+            SET
+              sync_status   = 'failed',
+              error_message = 'Ledger mapping not configured for this company. Please save mapping first.',
+              updated_at    = NOW()
+            WHERE id = $1
+            `,
+            [row.id]
+          );
+          console.log(`❌ Ledger Mapping Not Configured : ${company}`);
+          continue;
+        }
+
+        const mapping = mappingResult.rows[0];
+
+        console.log("✅ Ledger Mapping Found");
+        console.log(`   Purchase Group : ${mapping.invoice_parent_group}`);
+        console.log(`   CGST           : ${mapping.cgst_ledger}`);
+        console.log(`   SGST           : ${mapping.sgst_ledger}`);
+        console.log(`   IGST           : ${mapping.igst_ledger || "N/A"}`);
+        console.log(`   TDS            : ${mapping.tds_ledger  || "N/A"}`);
+        console.log(`   CESS           : ${mapping.cess_ledger || "N/A"}`);
+        console.log(`   Round Off      : ${mapping.rounded_off_ledger}`);
+
+        /*
+        ====================================
+        STEP 2.6
+        VALIDATE ALL MAPPED LEDGERS EXIST IN TALLY
+        checked against app_test.all_ledger_details
+        ====================================
+        */
+
+        const ledgersToValidate = [
+          { field: "invoice_parent_group", value: mapping.invoice_parent_group },
+          { field: "cgst_ledger",          value: mapping.cgst_ledger          },
+          { field: "sgst_ledger",          value: mapping.sgst_ledger          },
+          { field: "rounded_off_ledger",   value: mapping.rounded_off_ledger   },
+          // Optional — only validate if mapped
+          ...(mapping.igst_ledger ? [{ field: "igst_ledger", value: mapping.igst_ledger }] : []),
+          ...(mapping.tds_ledger  ? [{ field: "tds_ledger",  value: mapping.tds_ledger  }] : []),
+          ...(mapping.cess_ledger ? [{ field: "cess_ledger", value: mapping.cess_ledger }] : []),
+        ];
+
+        let mappingLedgerMissing = false;
+        let missingMappingLedger = "";
+        let missingMappingField  = "";
+
+        for (const { field, value } of ledgersToValidate) {
+
+          const checkResult = await pool.query(
+            `
+            SELECT 1
+            FROM app_test.all_ledger_details
+            WHERE company_id = $1
+            AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+            LIMIT 1
+            `,
+            [companyId, value]
+          );
+
+          if (!checkResult.rows.length) {
+            mappingLedgerMissing = true;
+            missingMappingLedger = value;
+            missingMappingField  = field;
+            break;
+          }
+        }
+
+        if (mappingLedgerMissing) {
+          await pool.query(
+            `
+            UPDATE app_test.invoice_extractions
+            SET
+              sync_status   = 'ledger_missing',
+              error_message = $1,
+              updated_at    = NOW()
+            WHERE id = $2
+            `,
+            [
+              `Mapped ledger not found in Tally: "${missingMappingLedger}" (field: ${missingMappingField})`,
+              row.id
+            ]
+          );
+          console.log(`❌ Mapped Ledger Not Found In Tally : ${missingMappingLedger} (${missingMappingField})`);
+          continue;
+        }
+
+        console.log("✅ All Mapped Ledgers Validated");
 
         /*
         ====================================
@@ -148,19 +316,19 @@ const processInvoiceJobs = async () => {
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
-            SET 
-              sync_status = 'ledger_missing', 
+            SET
+              sync_status   = 'ledger_missing',
               error_message = $1,
-              updated_at = NOW()
+              updated_at    = NOW()
             WHERE id = $2
             `,
-            [`Ledger not found: ${vendorName}`, row.id]
+            [`Vendor ledger not found: ${vendorName}`, row.id]
           );
-          console.log(`❌ Ledger Not Found : ${vendorName}`);
+          console.log(`❌ Vendor Ledger Not Found : ${vendorName}`);
           continue;
         }
 
-        console.log(`✅ Ledger Found : ${vendorName}`);
+        console.log(`✅ Vendor Ledger Found : ${vendorName}`);
 
         /*
         ====================================
@@ -183,18 +351,16 @@ const processInvoiceJobs = async () => {
         ====================================
         STEP 5
         CHECK STOCK ITEMS
-        ✅ FIX: item.name → item.item_name
         ====================================
         */
 
         const items = invoiceData.line_items || [];
 
         let stockMissing = false;
-        let missingItem = "";
+        let missingItem  = "";
 
         for (const item of items) {
 
-          // ✅ FIX: was item.name (always undefined), now item.item_name
           const itemName = item.item_name?.trim() || "";
 
           console.log(`🔍 Checking Stock : "${itemName}"`);
@@ -212,7 +378,7 @@ const processInvoiceJobs = async () => {
 
           if (!stockResult.rows.length) {
             stockMissing = true;
-            missingItem = itemName;
+            missingItem  = itemName;
             break;
           }
         }
@@ -221,10 +387,10 @@ const processInvoiceJobs = async () => {
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
-            SET 
-              sync_status = 'stock_missing', 
+            SET
+              sync_status   = 'stock_missing',
               error_message = $1,
-              updated_at = NOW()
+              updated_at    = NOW()
             WHERE id = $2
             `,
             [`Stock item not found: ${missingItem}`, row.id]
@@ -238,27 +404,40 @@ const processInvoiceJobs = async () => {
         /*
         ====================================
         STEP 5.5
-        SANITIZE LINE ITEMS BEFORE XML
-        ✅ FIX: strip any rogue "ledger" field,
-                force it to "Purchase" so Python
-                never picks up "Catel Felds" or
-                any other stale value
+        SANITIZE LINE ITEMS
+        INJECT DYNAMIC LEDGER MAPPING
+        All values come from company_ledger_mappings table
         ====================================
         */
 
         const sanitizedInvoiceData = {
           ...invoiceData,
+
+          // ✅ All ledger names from company_ledger_mappings — zero hardcoding
+          purchase_ledger    : mapping.invoice_parent_group,
+          cgst_ledger        : mapping.cgst_ledger,
+          sgst_ledger        : mapping.sgst_ledger,
+          igst_ledger        : mapping.igst_ledger        || "",
+          tds_ledger         : mapping.tds_ledger         || "",
+          cess_ledger        : mapping.cess_ledger        || "",
+          rounded_off_ledger : mapping.rounded_off_ledger,
+
+          // ✅ Each line item ledger = dynamic purchase group
           line_items: items.map((item) => ({
             ...item,
             item_name : item.item_name?.trim() || "",
-            ledger    : "Purchase",   // ✅ FIX: force correct ledger
+            ledger    : mapping.invoice_parent_group,
           })),
         };
 
-        console.log(
-          "🧹 Sanitized Line Items :",
-          JSON.stringify(sanitizedInvoiceData.line_items, null, 2)
-        );
+        console.log("🧹 Ledger Mapping Injected :");
+        console.log(`   Purchase Ledger  : ${mapping.invoice_parent_group}`);
+        console.log(`   CGST Ledger      : ${mapping.cgst_ledger}`);
+        console.log(`   SGST Ledger      : ${mapping.sgst_ledger}`);
+        console.log(`   IGST Ledger      : ${mapping.igst_ledger        || "N/A"}`);
+        console.log(`   TDS Ledger       : ${mapping.tds_ledger         || "N/A"}`);
+        console.log(`   CESS Ledger      : ${mapping.cess_ledger        || "N/A"}`);
+        console.log(`   Round Off Ledger : ${mapping.rounded_off_ledger}`);
 
         /*
         ====================================
@@ -269,7 +448,7 @@ const processInvoiceJobs = async () => {
 
         const xml = await generateXml({
           company,
-          ...sanitizedInvoiceData,  // ✅ use sanitized data
+          ...sanitizedInvoiceData,
         });
 
         console.log("📤 XML Generated");
@@ -285,61 +464,31 @@ const processInvoiceJobs = async () => {
 
         console.log("📥 Tally Response Received");
 
-        // REPLACED: Extract LINEERROR from response
-        const lineErrorMatch =
-          tallyResponse.match(
-            /<LINEERROR>(.*?)<\/LINEERROR>/
-          );
+        const lineErrorMatch = tallyResponse.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
+        const lineError      = lineErrorMatch ? lineErrorMatch[1].trim() : null;
 
-        const lineError =
-  lineErrorMatch
-    ? lineErrorMatch[1].trim()
-    : null;
+        const createdMatch = tallyResponse.match(/<CREATED>(\d+)<\/CREATED>/);
+        const created      = createdMatch ? Number(createdMatch[1]) : 0;
 
-        const createdMatch =
-          tallyResponse.match(
-            /<CREATED>(\d+)<\/CREATED>/
-          );
+        const alteredMatch = tallyResponse.match(/<ALTERED>(\d+)<\/ALTERED>/);
+        const altered      = alteredMatch ? Number(alteredMatch[1]) : 0;
 
-        const created =
-          createdMatch
-            ? Number(createdMatch[1])
-            : 0;
-
-        const alteredMatch =
-          tallyResponse.match(
-            /<ALTERED>(\d+)<\/ALTERED>/
-          );
-
-        const altered =
-          alteredMatch
-            ? Number(alteredMatch[1])
-            : 0;
-
-        const isSuccess =
-          created === 1 ||
-          altered === 1;
+        const isSuccess = created === 1 || altered === 1;
 
         if (!isSuccess) {
-          const errorMessage =
-            lineError ||
-            "Tally push failed";
+          const errorMessage = lineError || "Tally push failed";
 
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
             SET
-              sync_status = 'failed',
+              sync_status    = 'failed',
               tally_response = $1,
-              error_message = $2,
-              updated_at = NOW()
+              error_message  = $2,
+              updated_at     = NOW()
             WHERE id = $3
             `,
-            [
-              tallyResponse,
-              errorMessage,
-              row.id
-            ]
+            [tallyResponse, errorMessage, row.id]
           );
 
           console.log(`❌ Invoice Failed (Tally Error): ${row.id} - ${errorMessage}`);
@@ -357,10 +506,10 @@ const processInvoiceJobs = async () => {
           `
           UPDATE app_test.invoice_extractions
           SET
-            sync_status = 'completed',
+            sync_status    = 'completed',
             tally_response = $1,
-            error_message = NULL,
-            updated_at = NOW()
+            error_message  = NULL,
+            updated_at     = NOW()
           WHERE id = $2
           `,
           [tallyResponse, row.id]
@@ -373,15 +522,14 @@ const processInvoiceJobs = async () => {
         console.log(`💥 Invoice Failed : ${row.id}`);
         console.log(err.message);
 
-        // REPLACED: Use isTemporaryInvoiceError for better error classification
         if (isTemporaryInvoiceError(err)) {
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
             SET
-              sync_status = 'pending',
+              sync_status   = 'pending',
               error_message = $1,
-              updated_at = NOW()
+              updated_at    = NOW()
             WHERE id = $2
             `,
             [err.message, row.id]
@@ -392,9 +540,9 @@ const processInvoiceJobs = async () => {
             `
             UPDATE app_test.invoice_extractions
             SET
-              sync_status = 'failed',
+              sync_status   = 'failed',
               error_message = $1,
-              updated_at = NOW()
+              updated_at    = NOW()
             WHERE id = $2
             `,
             [err.message, row.id]
@@ -418,7 +566,6 @@ const processInvoiceJobs = async () => {
 
 console.log("✅ Push Invoice Worker Started");
 
-// Run continuously with delay
 const runContinuously = async () => {
   while (true) {
     await processInvoiceJobs();

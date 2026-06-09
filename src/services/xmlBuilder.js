@@ -1309,3 +1309,62 @@ export const getAllLedgersXML = (company) => {
 </ENVELOPE>
 `;
 };
+
+
+
+export const getPurchaseSalesLedgersXML = (company) => `
+<ENVELOPE>
+    <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>PurchaseSalesLedgers</ID>
+    </HEADER>
+
+    <BODY>
+        <DESC>
+
+            <STATICVARIABLES>
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+
+            <TDL>
+                <TDLMESSAGE>
+
+                    <COLLECTION
+                        NAME="PurchaseSalesLedgers"
+                        ISMODIFY="No"
+                    >
+                        <TYPE>Ledger</TYPE>
+
+                        <FILTER>
+                            IsPurchaseOrSales
+                        </FILTER>
+
+                        <FETCH>
+                            NAME,
+                            PARENT,
+                            MASTERID,
+                            ALTERID,
+                            GUID
+                        </FETCH>
+
+                    </COLLECTION>
+
+                    <SYSTEM
+                        TYPE="Formulae"
+                        NAME="IsPurchaseOrSales"
+                    >
+                        $Parent = "Purchase Accounts"
+                        OR
+                        $Parent = "Sales Accounts"
+                    </SYSTEM>
+
+                </TDLMESSAGE>
+            </TDL>
+
+        </DESC>
+    </BODY>
+</ENVELOPE>
+`;

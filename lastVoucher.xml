@@ -2,37 +2,54 @@
 <ENVELOPE>
     <HEADER>
         <VERSION>1</VERSION>
-        <TALLYREQUEST>Import</TALLYREQUEST>
-        <TYPE>Data</TYPE>
-        <ID>All Masters</ID>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>PurchaseSalesLedgers</ID>
     </HEADER>
 
     <BODY>
         <DESC>
+
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>Sai Sanjivani Enterprise (Eicher Workshop)</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>Nutan Dairy</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
+
+            <TDL>
+                <TDLMESSAGE>
+
+                    <COLLECTION
+                        NAME="PurchaseSalesLedgers"
+                        ISMODIFY="No"
+                    >
+                        <TYPE>Ledger</TYPE>
+
+                        <FILTER>
+                            IsPurchaseOrSales
+                        </FILTER>
+
+                        <FETCH>
+                            NAME,
+                            PARENT,
+                            MASTERID,
+                            ALTERID,
+                            GUID
+                        </FETCH>
+
+                    </COLLECTION>
+
+                    <SYSTEM
+                        TYPE="Formulae"
+                        NAME="IsPurchaseOrSales"
+                    >
+                        $Parent = "Purchase Accounts"
+                        OR
+                        $Parent = "Sales Accounts"
+                    </SYSTEM>
+
+                </TDLMESSAGE>
+            </TDL>
+
         </DESC>
-
-        <DATA>
-            <TALLYMESSAGE xmlns:UDF="TallyUDF">
-
-                <STOCKITEM
-                    NAME="INLET VALVE"
-                    ACTION="Alter"
-                >
-
-                    <NAME>INLET VALVE</NAME>
-
-                    <OPENINGBALANCE>190.00</OPENINGBALANCE>
-
-                    <OPENINGRATE>231.00/NOS</OPENINGRATE>
-
-                    <OPENINGVALUE>-43890.00</OPENINGVALUE>
-
-                </STOCKITEM>
-
-            </TALLYMESSAGE>
-        </DATA>
     </BODY>
 </ENVELOPE>

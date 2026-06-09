@@ -112,6 +112,12 @@ from "./api/pullStockAlert.routes.js";
 import bulkStockItemRoutes
 from "./api/bulkStockItem.routes.js";
 
+import purchaseLedgerMappingRoutes
+from "./api/purchaseLedgerMapping.routes.js";
+
+import purchaseSalesLedgerRoutes
+from "./api/purchaseSalesLedger.routes.js";
+
 
 /* =================================
    MIDDLEWARE
@@ -312,6 +318,16 @@ app.use(
 app.use(
   "/api",
   bulkStockItemRoutes
+);
+
+app.use(
+  "/api",
+  purchaseLedgerMappingRoutes
+);
+
+app.use(
+  "/api",
+  purchaseSalesLedgerRoutes
 );
 
 /* =================================

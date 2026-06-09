@@ -13,7 +13,8 @@ import {
   getAllParentGroupDetailsXML,
   getProfitLossXML,
     getStockGroupSummaryXML,
-      getAllLedgersXML
+      getAllLedgersXML,
+        getPurchaseSalesLedgersXML
     
 } from "../services/xmlBuilder.js";
 import { parseXML } from "../services/parser.js";
@@ -3058,4 +3059,201 @@ const columns = [
     client.release();
   }
 });
+
+/* ===================================================
+   Purchase and sales Ledger
+=================================================== */
+router.get(
+  "/purchase-sales-ledgers-sync",
+  async (req, res) => {
+
+    const company = req.query.company;
+
+    if (!company) {
+      return res.status(400).json({
+        status: "error",
+        message: "company query parameter required"
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+
+      await client.query("BEGIN");
+
+      const companyId = await getCompanyId(company, client);
+
+      if (!companyId) {
+        throw new Error("Company not found");
+      }
+
+      const xml = getPurchaseSalesLedgersXML(company);
+      const responseXML = await sendToTally(xml);
+      const parsed = await parseXML(responseXML);
+
+      const ledgers =
+        parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+
+      const list = Array.isArray(ledgers) ? ledgers : [ledgers];
+
+      console.log("=================================");
+      console.log("📊 TOTAL PURCHASE/SALES LEDGERS:", list.length);
+      console.log("=================================");
+
+      let inserted = 0;
+      let updated = 0;
+      let ignored = 0;
+
+      for (const ledger of list) {
+
+        /* ================================
+           EXTRACT LEDGER NAME
+        ================================ */
+        let rawName =
+          ledger?.$?.NAME ||
+          ledger?.["@NAME"] ||
+          ledger?.NAME ||
+          ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+          null;
+
+        if (Array.isArray(rawName)) rawName = rawName[0];
+        if (typeof rawName === "object" && rawName !== null) rawName = rawName?._ || null;
+
+        const ledgerName = clean(rawName);
+
+        if (!ledgerName) {
+          ignored++;
+          console.log("⚠️ SKIPPED — no ledger name");
+          continue;
+        }
+
+        /* ================================
+           EXTRACT PARENT GROUP
+        ================================ */
+        const parentGroup = clean(
+          ledger?.PARENT || ledger?.$?.PARENT || ""
+        )?.replace(/&#4;/g, "").trim() || null;
+
+        console.log(`📌 LEDGER: "${ledgerName}" | PARENT: "${parentGroup}"`);
+
+        /* ================================
+           DETERMINE LEDGER TYPE
+        ================================ */
+        const normalizedParent = (parentGroup || "").toLowerCase().trim();
+
+        let ledgerType = null;
+
+        if (normalizedParent.includes("purchase")) {
+          ledgerType = "PURCHASE";
+        } else if (normalizedParent.includes("sales")) {
+          ledgerType = "SALES";
+        } else {
+          ignored++;
+          console.log(`⚠️ SKIPPED — unknown parent group: "${parentGroup}"`);
+          continue;
+        }
+
+        console.log(`✅ TYPE: ${ledgerType}`);
+
+        /* ================================
+           CHECK EXISTING
+        ================================ */
+        const existing = await client.query(
+          `
+          SELECT id
+          FROM app_test.company_purchase_sales_ledgers
+          WHERE company_id = $1
+          AND ledger_name = $2
+          `,
+          [companyId, ledgerName]
+        );
+
+        /* ================================
+           UPDATE
+        ================================ */
+        if (existing.rows.length) {
+
+          await client.query(
+            `
+            UPDATE app_test.company_purchase_sales_ledgers
+            SET
+              parent_group = $1,
+              ledger_type  = $2,
+              updated_at   = NOW()
+            WHERE id = $3
+            `,
+            [parentGroup, ledgerType, existing.rows[0].id]
+          );
+
+          updated++;
+          console.log(`🔄 UPDATED: ${ledgerName}`);
+
+        } else {
+
+          /* ================================
+             INSERT
+          ================================ */
+          await client.query(
+            `
+            INSERT INTO app_test.company_purchase_sales_ledgers
+            (
+              company_id,
+              ledger_name,
+              parent_group,
+              ledger_type,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            `,
+            [companyId, ledgerName, parentGroup, ledgerType]
+          );
+
+          inserted++;
+          console.log(`✅ INSERTED: ${ledgerName}`);
+
+        }
+      }
+
+      await client.query("COMMIT");
+
+      console.log("=================================");
+      console.log(`Total   : ${list.length}`);
+      console.log(`Inserted: ${inserted} | Updated: ${updated} | Ignored: ${ignored}`);
+      console.log("=================================");
+
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Purchase/Sales ledgers synced successfully",
+        company,
+        summary: {
+          inserted,
+          updated,
+          ignored,
+          total: list.length
+        }
+      });
+
+    } catch (err) {
+
+      await client.query("ROLLBACK");
+
+      console.log("❌ PURCHASE/SALES LEDGER SYNC ERROR:", err.message);
+
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+
+    } finally {
+
+      client.release();
+
+    }
+
+  }
+);
+
 export default router;
