@@ -1368,3 +1368,44 @@ export const getPurchaseSalesLedgersXML = (company) => `
     </BODY>
 </ENVELOPE>
 `;
+
+export const getGodownsXML = (company) => {
+
+  return `
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export Data</TALLYREQUEST>
+  </HEADER>
+
+  <BODY>
+
+    <EXPORTDATA>
+
+      <REQUESTDESC>
+
+        <REPORTNAME>
+          Godown Summary
+        </REPORTNAME>
+
+        <STATICVARIABLES>
+
+          <SVEXPORTFORMAT>
+            $$SysName:XML
+          </SVEXPORTFORMAT>
+
+          <SVCURRENTCOMPANY>
+            ${company}
+          </SVCURRENTCOMPANY>
+
+        </STATICVARIABLES>
+
+      </REQUESTDESC>
+
+    </EXPORTDATA>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+
+};

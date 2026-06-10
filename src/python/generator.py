@@ -164,6 +164,11 @@ for item in line_items:
     # ✅ Dynamic: comes from item.ledger (set by worker from mapping table)
     # Falls back to purchase_ledger (also dynamic, from mapping table)
     ledger = item.get("ledger") or purchase_ledger
+    godown = (
+    item.get("godown_name")
+    or invoice.get("godown_name")
+    or ""
+)
 
     ail = sub(vch, "ALLINVENTORYENTRIES.LIST")
     sub(ail, "STOCKITEMNAME",    name)
@@ -172,6 +177,8 @@ for item in line_items:
     sub(ail, "AMOUNT",           str(-amount))
     sub(ail, "ACTUALQTY",        f"{qty} {unit}")
     sub(ail, "BILLEDQTY",        f"{qty} {unit}")
+if godown:
+    sub(ail, "GODOWNNAME", godown)
 
     aa = sub(ail, "ACCOUNTINGALLOCATIONS.LIST")
     sub(aa, "LEDGERNAME",        ledger)           # ✅ dynamic

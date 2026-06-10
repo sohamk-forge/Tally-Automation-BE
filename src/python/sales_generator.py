@@ -1,0 +1,234 @@
+import json
+import sys
+import os
+from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.dom import minidom
+
+if len(sys.argv) >= 2 and sys.argv[1].endswith(".json"):
+    with open(sys.argv[1], encoding="utf-8") as f:
+        invoice = json.load(f)
+else:
+    invoice = json.loads(sys.stdin.read())
+
+COUNTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sales_voucher_counter.txt")
+
+def get_next_voucher_number():
+    if os.path.exists(COUNTER_FILE):
+        with open(COUNTER_FILE, "r") as f:
+            num = int(f.read().strip())
+    else:
+        num = 0
+    num += 1
+    with open(COUNTER_FILE, "w") as f:
+        f.write(str(num))
+    return str(num)
+
+if "voucher_number" not in invoice:
+    invoice["voucher_number"] = get_next_voucher_number()
+
+COMPANY_NAME       = invoice.get("company", "")
+sales_ledger       = invoice.get("sales_ledger",       "Sales")
+cgst_ledger        = invoice.get("cgst_ledger",        "CGST")
+sgst_ledger        = invoice.get("sgst_ledger",        "SGST")
+igst_ledger        = invoice.get("igst_ledger",        "IGST")
+tds_ledger         = invoice.get("tds_ledger",         "")
+cess_ledger        = invoice.get("cess_ledger",        "")
+rounded_off_ledger = invoice.get("rounded_off_ledger", "Round Off")
+
+def parse_date(d):
+    if not d:
+        return ""
+    if "-" in d:
+        parts = d.split("-")
+        if len(parts[0]) == 4:
+            return d.replace("-", "")
+        else:
+            day, mon, yr = parts
+            return f"{yr}{mon}{day}"
+    return d
+
+date     = parse_date(invoice.get("invoice_date", ""))
+ref_date = parse_date(invoice.get("reference_date", invoice.get("invoice_date", "")))
+
+voucher_number = str(invoice.get("invoice_no") or invoice.get("voucher_number") or "")
+invoice_no     = invoice.get("invoice_no", "")
+reference      = invoice.get("reference", invoice_no)
+party_name     = invoice.get("customer_name", "")
+party_gstin    = invoice.get("customer_gstin") or invoice.get("gstin") or ""
+
+line_items   = invoice.get("line_items", [])
+sales_amount = round(sum(float(i.get("amount", 0)) for i in line_items), 2)
+
+# ✅ EDITED: Auto-calculate GST
+gst_rate = float(invoice.get("gst_rate", 18))
+is_interstate = invoice.get("is_interstate", False)
+
+if is_interstate:
+    igst_amount = round(sales_amount * (gst_rate / 100), 2)
+    cgst_amount = 0
+    sgst_amount = 0
+else:
+    igst_amount = 0
+    cgst_amount = round(sales_amount * (gst_rate / 2 / 100), 2)
+    sgst_amount = round(sales_amount * (gst_rate / 2 / 100), 2)
+
+# Allow override from input
+cgst_amount = round(float(invoice.get("cgst_amount", cgst_amount)), 2)
+sgst_amount = round(float(invoice.get("sgst_amount", sgst_amount)), 2)
+igst_amount = round(float(invoice.get("igst_amount", igst_amount)), 2)
+tds_amount   = round(float(invoice.get("tds_amount",  0)), 2)
+cess_amount  = round(float(invoice.get("cess_amount", 0)), 2)
+
+grand_total = round(
+    float(
+        invoice.get("grand_total")
+        or (
+            sales_amount +
+            cgst_amount +
+            sgst_amount +
+            igst_amount -
+            tds_amount +
+            cess_amount
+        )
+    ),
+    2
+)
+
+calculated = round(sales_amount + cgst_amount + sgst_amount + igst_amount, 2)
+round_off  = round(grand_total - calculated, 2)
+
+print(f"DATE        = {date}",         file=sys.stderr)
+print(f"PARTY       = {party_name}",   file=sys.stderr)
+print(f"VOUCHER     = {voucher_number}", file=sys.stderr)
+print(f"SALES AMT   = {sales_amount}", file=sys.stderr)
+print(f"CGST        = {cgst_amount}",  file=sys.stderr)
+print(f"SGST        = {sgst_amount}",  file=sys.stderr)
+print(f"IGST        = {igst_amount}",  file=sys.stderr)
+print(f"GRAND TOTAL = {grand_total}",  file=sys.stderr)
+
+if not date:
+    print("ERROR: invoice_date is empty or could not be parsed", file=sys.stderr)
+    sys.exit(1)
+
+def sub(parent, tag, text=""):
+    el = SubElement(parent, tag)
+    if text:
+        el.text = str(text)
+    return el
+
+envelope = Element("ENVELOPE")
+
+header = sub(envelope, "HEADER")
+sub(header, "VERSION",      "1")
+sub(header, "TALLYREQUEST", "Import")
+sub(header, "TYPE",         "Data")
+sub(header, "ID",           "Vouchers")
+
+body = sub(envelope, "BODY")
+desc = sub(body, "DESC")
+
+sv = sub(desc, "STATICVARIABLES")
+sub(sv, "SVVCHIMPORTFORMAT", "XML")
+sub(sv, "SVCURRENTCOMPANY",  COMPANY_NAME)
+
+tm = sub(desc, "TALLYMESSAGE")
+tm.set("xmlns:UDF", "TallyUDF")
+
+vch = sub(tm, "VOUCHER")
+vch.set("VCHTYPE", "Sales")
+vch.set("ACTION",  "Create")
+
+sub(vch, "DATE",            date)
+sub(vch, "VCHSTATUSDATE",   date)
+sub(vch, "REFERENCEDATE",   ref_date)
+sub(vch, "VOUCHERTYPENAME", "Sales")
+sub(vch, "VOUCHERNUMBER",   voucher_number)
+sub(vch, "REFERENCE",       reference)
+sub(vch, "PARTYNAME",       party_name)
+sub(vch, "PARTYLEDGERNAME", party_name)
+sub(vch, "PARTYGSTIN",      party_gstin)
+sub(vch, "ISINVOICE",       "Yes")
+
+for item in line_items:
+    name   = item.get("item_name") or item.get("name", "")
+    qty    = float(item.get("quantity") or item.get("qty") or 1)
+    unit   = item.get("unit", "nos")
+    rate   = float(item.get("rate", 0))
+    amount = float(item.get("amount") or (qty * rate))
+    ledger = item.get("ledger") or sales_ledger
+    godown = item.get("godown_name") or invoice.get("godown_name")
+
+    ail = sub(vch, "ALLINVENTORYENTRIES.LIST")
+
+    sub(ail, "STOCKITEMNAME", name)
+    sub(ail, "ISDEEMEDPOSITIVE", "No")
+    
+    # ✅ EDITED: Removed /unit
+    sub(ail, "RATE", f"{rate:.2f}")
+    
+    sub(ail, "AMOUNT", f"{-amount:.2f}")
+    
+    # ✅ EDITED: Removed unit text
+    sub(ail, "ACTUALQTY", f"{qty:.2f}")
+    sub(ail, "BILLEDQTY", f"{qty:.2f}")
+
+    if godown:
+        sub(ail, "GODOWNNAME", godown)
+
+    aa = sub(ail, "ACCOUNTINGALLOCATIONS.LIST")
+    sub(aa, "LEDGERNAME", ledger)
+    sub(aa, "ISDEEMEDPOSITIVE", "No")
+    sub(aa, "AMOUNT", f"{-amount:.2f}")
+
+# Party ledger
+plel = sub(vch, "LEDGERENTRIES.LIST")
+sub(plel, "LEDGERNAME",       party_name)
+sub(plel, "ISDEEMEDPOSITIVE", "No")
+sub(plel, "ISPARTYLEDGER",    "Yes")
+sub(plel, "AMOUNT",           f"{grand_total:.2f}")
+
+if cgst_amount > 0:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       cgst_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-cgst_amount:.2f}")
+
+if sgst_amount > 0:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       sgst_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-sgst_amount:.2f}")
+
+if igst_amount > 0:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       igst_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-igst_amount:.2f}")
+
+if tds_amount > 0 and tds_ledger:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       tds_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-tds_amount:.2f}")
+
+if cess_amount > 0 and cess_ledger:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       cess_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-cess_amount:.2f}")
+
+if abs(round_off) >= 0.01:
+    lel = sub(vch, "LEDGERENTRIES.LIST")
+    sub(lel, "LEDGERNAME",       rounded_off_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
+    sub(lel, "AMOUNT",           f"{-round_off:.2f}")
+
+raw    = tostring(envelope, encoding="unicode")
+parsed = minidom.parseString(raw)
+pretty_bytes = parsed.toprettyxml(indent=" ", encoding="utf-8")
+
+if len(sys.argv) >= 3:
+    with open(sys.argv[2], "wb") as f:
+        f.write(pretty_bytes)
+else:
+    sys.stdout.buffer.write(pretty_bytes)

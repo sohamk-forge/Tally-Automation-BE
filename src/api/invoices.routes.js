@@ -38,45 +38,47 @@ router.post("/invoices", async (req, res) => {
 
     const result = await pool.query(
       `
-      INSERT INTO
-      app_test.invoice_extractions
-      (
-        company_name,
-        vendor_name,
-        gstin,
-        invoice_no,
-        invoice_date,
-        raw_json,
-        sync_status,
-        error_count,
-        last_error,
-        created_at,
-        updated_at
-      )
-      VALUES
-      (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        'pending',
-        0,
-        NULL,
-        NOW(),
-        NOW()
-      )
+     INSERT INTO app_test.invoice_extractions
+(
+  company_name,
+  vendor_name,
+  gstin,
+  invoice_no,
+  invoice_date,
+  godown_name,
+  raw_json,
+  sync_status,
+  error_count,
+  last_error,
+  created_at,
+  updated_at
+)
+VALUES
+(
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  'pending',
+  0,
+  NULL,
+  NOW(),
+  NOW()
+)
       RETURNING id
       `,
       [
-        company.trim(),
-        invoice_data.vendor_name || "",
-        invoice_data.gstin || "",
-        invoice_data.invoice_no || "",
-        invoice_data.invoice_date || "",
-        invoice_data
-      ]
+  company.trim(),
+  invoice_data.vendor_name || "",
+  invoice_data.gstin || "",
+  invoice_data.invoice_no || "",
+  invoice_data.invoice_date || "",
+  invoice_data.godown_name || "",
+  invoice_data
+]
     );
 
     const invoiceId =

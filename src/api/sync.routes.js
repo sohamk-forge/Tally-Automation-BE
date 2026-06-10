@@ -14,7 +14,8 @@ import {
   getProfitLossXML,
     getStockGroupSummaryXML,
       getAllLedgersXML,
-        getPurchaseSalesLedgersXML
+        getPurchaseSalesLedgersXML,
+        getGodownsXML
     
 } from "../services/xmlBuilder.js";
 import { parseXML } from "../services/parser.js";
@@ -65,7 +66,8 @@ const allowedTables = [
   "app_test.stock_group_summary",
   "app_test.sales_items",
   "app_test.units",
-  "app_test.all_ledger_details"  // ✅ 添加这一行
+  "app_test.all_ledger_details",
+  "app_test.godown_details" 
 
 ];
 /* ===================================================
@@ -2114,6 +2116,10 @@ router.get(
       ===================================== */
       const parsed = await parseXML(responseXML);
 
+      console.log(
+  "RAW STOCK ITEM:",
+  JSON.stringify(item, null, 2)
+);
       /* =====================================
          STOCK ITEMS
       ===================================== */
@@ -2280,11 +2286,11 @@ itemName = clean(itemName);
              DEBUG
           ============================= */
           console.log({
-            item_name: item?.NAME || item?.["@_NAME"],
-            quantity,
-            rawStockValue,
-            finalStockValue: stockValue
-          });
+  item_name: itemName,
+  quantity,
+  rawStockValue,
+  finalStockValue: stockValue
+});
 
           /* =============================
              RETURN
@@ -3091,6 +3097,7 @@ router.get(
       const xml = getPurchaseSalesLedgersXML(company);
       const responseXML = await sendToTally(xml);
       const parsed = await parseXML(responseXML);
+      
 
       const ledgers =
         parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -3256,4 +3263,158 @@ router.get(
   }
 );
 
+/* ===================================================
+   GODOWN SYNC
+=================================================== */
+
+router.get("/godown-sync", async (req, res) => {
+
+  const company = req.query.company;
+
+  if (!company) {
+    return res.status(400).json({
+      status  : "error",
+      message : "company query parameter required"
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+
+    await client.query("BEGIN");
+
+    const companyId = await getCompanyId(company, client);
+
+    if (!companyId) {
+      throw new Error("Company not found");
+    }
+
+    /*
+    ====================================
+    STEP 1 — FETCH GODOWNS FROM TALLY
+    ====================================
+    */
+
+    const xml         = getGodownsXML(company);
+    const responseXML = await sendToTally(xml);
+    const parsed      = await parseXML(responseXML);
+
+    console.log("=================================");
+    console.log("PARSED GODOWN RESPONSE");
+    console.log("=================================");
+    console.log(JSON.stringify(parsed, null, 2));
+
+    /*
+    ====================================
+    STEP 2 — EXTRACT GODOWN LIST
+    ====================================
+    */
+
+    const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
+    const list       = Array.isArray(rawGodowns) ? rawGodowns : [rawGodowns];
+
+    let inserted = 0;
+    let updated  = 0;
+    let ignored  = 0;
+
+    /*
+    ====================================
+    STEP 3 — UPSERT INTO DB
+    ====================================
+    */
+
+    for (const godown of list) {
+
+      let godownName = godown?.DSPDISPNAME || null;
+
+      if (Array.isArray(godownName)) {
+        godownName = godownName[0];
+      }
+
+      godownName = clean(godownName);
+
+      if (!godownName) {
+        ignored++;
+        continue;
+      }
+
+      const existing = await client.query(
+        `SELECT id
+         FROM app_test.godown_details
+         WHERE company_id = $1
+           AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
+         LIMIT 1`,
+        [companyId, godownName]
+      );
+
+      if (existing.rows.length) {
+
+        await client.query(
+          `UPDATE app_test.godown_details
+           SET updated_at = NOW()
+           WHERE id = $1`,
+          [existing.rows[0].id]
+        );
+
+        updated++;
+        console.log(`✅ GODOWN UPDATED  : ${godownName}`);
+
+      } else {
+
+        await client.query(
+          `INSERT INTO app_test.godown_details
+           (company_id, company_name, godown_name, created_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())`,
+          [companyId, company, godownName]
+        );
+
+        inserted++;
+        console.log(`✅ GODOWN INSERTED : ${godownName}`);
+
+      }
+
+    }
+
+    await client.query("COMMIT");
+
+    console.log("=================================");
+    console.log("GODOWN SYNC COMPLETE");
+    console.log(`   Inserted : ${inserted}`);
+    console.log(`   Updated  : ${updated}`);
+    console.log(`   Ignored  : ${ignored}`);
+    console.log(`   Total    : ${list.length}`);
+    console.log("=================================");
+
+    return res.status(200).json({
+      status  : "success",
+      source  : "tally",
+      message : "Godowns synced successfully",
+      company,
+      summary : {
+        inserted,
+        updated,
+        ignored,
+        total : list.length
+      }
+    });
+
+  } catch (err) {
+
+    await client.query("ROLLBACK");
+
+    console.log("❌ GODOWN SYNC ERROR:", err.message);
+
+    return res.status(500).json({
+      status  : "error",
+      message : err.message
+    });
+
+  } finally {
+
+    client.release();
+
+  }
+
+});
 export default router;

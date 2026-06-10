@@ -1,43 +1,17 @@
 import { Worker } from "bullmq";
-import IORedis from "ioredis";
+import { redisConnection } from "../config/redis.js";
+import { SALES_QUEUE_NAME, getSalesJobId } from "../queues/sales.queue.js";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
 import { generateSalesXml } from "../services/salesXmlGenerator.js";
 
-const connection = new IORedis({
-  host: process.env.REDIS_HOST || "127.0.0.1",
-  port: Number(process.env.REDIS_PORT || 6379),
-  maxRetriesPerRequest: null
-});
-
-// Queue configuration
-export const SALES_QUEUE_NAME = "sales-invoice-queue";
-export const SALES_JOB_OPTIONS = {
-  attempts: 3,
-  backoff: {
-    type: "exponential",
-    delay: 5000
-  },
-  removeOnComplete: 100,
-  removeOnFail: 500
-};
-
-export function getSalesJobId(salesId) {
-  return `sales-${salesId}`;
-}
-
-// Initialize queue (to be exported for enqueueing)
-import { Queue } from "bullmq";
-export const salesQueue = new Queue(SALES_QUEUE_NAME, {
-  connection,
-  defaultJobOptions: SALES_JOB_OPTIONS
-});
+const BASE_URL = process.env.BASE_URL || "http://localhost:5000";
 
 function isTemporarySalesError(error) {
   const code = String(error?.code || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
 
-  // ONLY retry for Tally connection issues
+  // ONLY retry for Tally connection issues - NOT for data/validation errors
   return [
     "ECONNRESET",
     "ECONNREFUSED",
@@ -54,54 +28,8 @@ function isTemporarySalesError(error) {
     message.includes("socket hang up") ||
     message.includes("econnreset") ||
     message.includes("econnrefused") ||
-    message.includes("etimedout");
-}
-
-async function enqueuePendingSalesJobs() {
-  const result = await pool.query(
-    `
-    SELECT id
-    FROM app_test.sales_invoice_extractions
-    WHERE sync_status = 'pending'
-    ORDER BY id ASC
-    `
-  );
-
-  for (const row of result.rows) {
-    const jobId = getSalesJobId(row.id);
-
-    const existingJob = await salesQueue.getJob(jobId);
-
-    if (existingJob) {
-      const state = await existingJob.getState();
-
-      const isProcessable = [
-        "waiting",
-        "active",
-        "delayed",
-        "prioritized",
-        "paused",
-        "waiting-children"
-      ].includes(state);
-
-      if (isProcessable) {
-        continue;
-      }
-
-      await existingJob.remove();
-    }
-
-    await salesQueue.add(
-      "push-sales-invoice",
-      {
-        salesId: row.id
-      },
-      {
-        ...SALES_JOB_OPTIONS,
-        jobId
-      }
-    );
-  }
+    message.includes("etimedout") ||
+    message.includes("ledger sync failed");
 }
 
 const worker = new Worker(
@@ -110,11 +38,7 @@ const worker = new Worker(
     const { salesId } = job.data;
 
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.sales_invoice_extractions
-      WHERE id = $1
-      `,
+      `SELECT * FROM app_test.sales_invoice_extractions WHERE id = $1`,
       [salesId]
     );
 
@@ -142,8 +66,6 @@ const worker = new Worker(
 
       console.log("Syncing Ledgers...");
 
-      const BASE_URL = process.env.BASE_URL || "http://localhost:5000";
-      
       const ledgerSyncResponse = await fetch(
         `${BASE_URL}/api/sync/all-ledgers-sync?company=${encodeURIComponent(company)}`
       );
@@ -175,44 +97,44 @@ const worker = new Worker(
         return { salesId, status: "failed" };
       }
 
-      const companyDetails = await pool.query(
-        `SELECT financial_year_start, financial_year_end FROM app_test.companies WHERE id = $1`,
-        [companyId]
-      );
-      const companyInfo = companyDetails.rows[0];
+      // const companyDetails = await pool.query(
+      //   `SELECT financial_year_start, financial_year_end FROM app_test.companies WHERE id = $1`,
+      //   [companyId]
+      // );
+      // const companyInfo = companyDetails.rows[0];
 
-      const invoiceDate = invoiceData.invoice_date;
+      // const invoiceDate = invoiceData.invoice_date;
 
-      if (!invoiceDate) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = 'invoice_date is missing', updated_at = NOW()
-           WHERE id = $1`,
-          [salesId]
-        );
-        console.log(`Invoice Date Missing for row ${salesId}`);
-        return { salesId, status: "failed" };
-      }
+      // if (!invoiceDate) {
+      //   await pool.query(
+      //     `UPDATE app_test.sales_invoice_extractions
+      //      SET sync_status = 'failed', error_message = 'invoice_date is missing', updated_at = NOW()
+      //      WHERE id = $1`,
+      //     [salesId]
+      //   );
+      //   console.log(`Invoice Date Missing for row ${salesId}`);
+      //   return { salesId, status: "failed" };
+      // }
 
-      // FY boundary check
-      const [day, month, year] = invoiceDate.split("-").map(Number);
-      const invoiceJsDate = new Date(year, month - 1, day);
-      const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
-      const fyEnd = new Date(companyInfo.financial_year_end, 2, 31);
+      // // FY boundary check
+      // const [day, month, year] = invoiceDate.split("-").map(Number);
+      // const invoiceJsDate = new Date(year, month - 1, day);
+      // const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
+      // const fyEnd = new Date(companyInfo.financial_year_end, 2, 31);
 
-      if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [
-            `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
-            salesId
-          ]
-        );
-        console.log(`Invoice Date Outside Financial Year : ${invoiceDate}`);
-        return { salesId, status: "failed" };
-      }
+      // if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
+      //   await pool.query(
+      //     `UPDATE app_test.sales_invoice_extractions
+      //      SET sync_status = 'failed', error_message = $1, updated_at = NOW()
+      //      WHERE id = $2`,
+      //     [
+      //       `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
+      //       salesId
+      //     ]
+      //   );
+      //   console.log(`Invoice Date Outside Financial Year : ${invoiceDate}`);
+      //   return { salesId, status: "failed" };
+      // }
 
       /*
       ====================================
@@ -326,7 +248,7 @@ const worker = new Worker(
 
       /*
       ====================================
-      STEP 4 — CHECK STOCK ITEMS (NO SYNC, JUST VALIDATE FROM DB)
+      STEP 4 — CHECK STOCK ITEMS (NO API CALL - DIRECT DB VALIDATION)
       ====================================
       */
 
@@ -338,7 +260,10 @@ const worker = new Worker(
       let missingItem = "";
 
       for (const item of items) {
-        const itemName = item.item_name?.trim() || "";
+        const itemName =
+  item.item_name?.trim() ||
+  item.name?.trim() ||
+  "";
         console.log(`Checking Stock : "${itemName}"`);
 
         const stockResult = await pool.query(
@@ -373,9 +298,8 @@ const worker = new Worker(
       ====================================
       */
 
-      const resolvedGodownName =
-        invoiceData.godown_name?.trim() ||
-        "Main Location";
+     const resolvedGodownName =
+  invoiceData.godown_name?.trim() || ""; 
 
       console.log(`Godown Name : ${resolvedGodownName}`);
 
@@ -397,7 +321,10 @@ const worker = new Worker(
         godown_name: resolvedGodownName,
         line_items: items.map((item) => ({
           ...item,
-          item_name: item.item_name?.trim() || "",
+         item_name :
+  item.item_name?.trim() ||
+  item.name?.trim() ||
+  "",
           ledger: mapping.sales_parent_group,
           godown_name: resolvedGodownName
         })),
@@ -480,33 +407,22 @@ const worker = new Worker(
     } catch (error) {
       console.error(`SALES ATTEMPT FAILED: ${salesId}`, error.message);
 
-      // Only retry for Tally connection issues
+      // ONLY retry for Tally connection issues
       if (isTemporarySalesError(error)) {
         await pool.query(
-          `
-          UPDATE app_test.sales_invoice_extractions
-          SET
-            sync_status = 'pending',
-            error_message = $1,
-            updated_at = NOW()
-          WHERE id = $2
-          `,
+          `UPDATE app_test.sales_invoice_extractions
+           SET sync_status = 'pending', error_message = $1, updated_at = NOW()
+           WHERE id = $2`,
           [error.message, salesId]
         );
-
         throw error; // BullMQ will retry
       }
 
       // Permanent error - mark as failed
       await pool.query(
-        `
-        UPDATE app_test.sales_invoice_extractions
-        SET
-          sync_status = 'failed',
-          error_message = $1,
-          updated_at = NOW()
-        WHERE id = $2
-        `,
+        `UPDATE app_test.sales_invoice_extractions
+         SET sync_status = 'failed', error_message = $1, updated_at = NOW()
+         WHERE id = $2`,
         [error.message, salesId]
       );
 
@@ -514,7 +430,7 @@ const worker = new Worker(
     }
   },
   {
-    connection,
+    connection: redisConnection,
     concurrency: 5
   }
 );
@@ -530,24 +446,19 @@ worker.on("failed", async (job, error) => {
     return;
   }
 
-  const maximumAttempts = Number(job.opts.attempts || 1);
+  const maximumAttempts = Number(job.opts.attempts || 3);
 
   if (job.attemptsMade < maximumAttempts) {
-    return;
+    return; // BullMQ will retry
   }
 
+  // Final failure after all retries
   try {
     const { salesId } = job.data;
-
     await pool.query(
-      `
-      UPDATE app_test.sales_invoice_extractions
-      SET
-        sync_status = 'failed',
-        error_message = $1,
-        updated_at = NOW()
-      WHERE id = $2
-      `,
+      `UPDATE app_test.sales_invoice_extractions
+       SET sync_status = 'failed', error_message = $1, updated_at = NOW()
+       WHERE id = $2`,
       [error.message, salesId]
     );
   } catch (updateError) {
@@ -557,11 +468,6 @@ worker.on("failed", async (job, error) => {
 
 worker.on("error", (error) => {
   console.error("Sales worker error:", error.message);
-});
-
-// Enqueue pending jobs on startup
-enqueuePendingSalesJobs().catch((error) => {
-  console.error("Sales startup recovery failed:", error.message);
 });
 
 console.log("Push Sales Invoice BullMQ Worker Started");

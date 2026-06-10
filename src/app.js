@@ -31,6 +31,8 @@ import "./workers/pushStockItem.worker.js";
 
 import "./workers/pushInvoice.worker.js";
 
+import "./workers/pushSalesInvoice.worker.js";
+
 import "./workers/pushAlterStockItem.worker.js";
 
 import "./workers/stockAlert.worker.js";
@@ -93,6 +95,10 @@ from "./api/pushOdBank.routes.js";
 
 import invoiceRoutes
 from "./api/invoices.routes.js";
+
+import salesInvoiceRoutes
+from "./api/salesInvoices.routes.js";
+
 import unitsRoutes
 from "./api/units.routes.js";
 
@@ -115,8 +121,14 @@ from "./api/bulkStockItem.routes.js";
 import purchaseLedgerMappingRoutes
 from "./api/purchaseLedgerMapping.routes.js";
 
+import salesLedgerMappingRoutes
+from "./api/salesLedgerMapping.routes.js";
+
 import purchaseSalesLedgerRoutes
 from "./api/purchaseSalesLedger.routes.js";
+
+import godownRoutes
+from "./api/godown.routes.js";
 
 
 /* =================================
@@ -302,6 +314,11 @@ app.use(
 
 app.use(
   "/api",
+  salesInvoiceRoutes
+);
+
+app.use(
+  "/api",
   pushStockItemRoutes
 );
 
@@ -327,7 +344,21 @@ app.use(
 
 app.use(
   "/api",
+  salesLedgerMappingRoutes
+);
+
+app.use(
+  "/api",
   purchaseSalesLedgerRoutes
+);
+
+/* =================================
+   GODOWN APIs
+================================= */
+
+app.use(
+  "/api",
+  godownRoutes
 );
 
 /* =================================

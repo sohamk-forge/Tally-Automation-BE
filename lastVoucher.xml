@@ -1,55 +1,117 @@
 
+
 <ENVELOPE>
-    <HEADER>
-        <VERSION>1</VERSION>
-        <TALLYREQUEST>Export</TALLYREQUEST>
-        <TYPE>Collection</TYPE>
-        <ID>PurchaseSalesLedgers</ID>
-    </HEADER>
 
-    <BODY>
-        <DESC>
+  <HEADER>
 
-            <STATICVARIABLES>
-                <SVCURRENTCOMPANY>Nutan Dairy</SVCURRENTCOMPANY>
-                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            </STATICVARIABLES>
+    <VERSION>1</VERSION>
 
-            <TDL>
-                <TDLMESSAGE>
+    <TALLYREQUEST>
+      Export
+    </TALLYREQUEST>
 
-                    <COLLECTION
-                        NAME="PurchaseSalesLedgers"
-                        ISMODIFY="No"
-                    >
-                        <TYPE>Ledger</TYPE>
+    <TYPE>
+      Collection
+    </TYPE>
 
-                        <FILTER>
-                            IsPurchaseOrSales
-                        </FILTER>
+    <ID>
+      AllParentGroupDetails
+    </ID>
 
-                        <FETCH>
-                            NAME,
-                            PARENT,
-                            MASTERID,
-                            ALTERID,
-                            GUID
-                        </FETCH>
+  </HEADER>
 
-                    </COLLECTION>
+  <BODY>
 
-                    <SYSTEM
-                        TYPE="Formulae"
-                        NAME="IsPurchaseOrSales"
-                    >
-                        $Parent = "Purchase Accounts"
-                        OR
-                        $Parent = "Sales Accounts"
-                    </SYSTEM>
+    <DESC>
 
-                </TDLMESSAGE>
-            </TDL>
+      <STATICVARIABLES>
 
-        </DESC>
-    </BODY>
+        <SVCURRENTCOMPANY>
+          Nutan Dairy
+        </SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION
+            NAME="AllParentGroupDetails"
+          >
+
+            <TYPE>
+              Ledger
+            </TYPE>
+
+            <CHILDOF>
+              Sundry Creditors
+            </CHILDOF>
+
+            <FETCH>
+
+              NAME,
+
+              PARENT,
+
+              ADDRESS,
+
+              MAILINGNAME,
+
+              STATENAME,
+
+              STATE,
+
+              LEDSTATENAME,
+
+              COUNTRYNAME,
+
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+
+              LEDGERPHONE,
+
+              MOBILE,
+
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+
+              PARTYGSTIN,
+
+              GSTREGISTRATIONTYPE,
+
+              INCOMETAXNUMBER,
+
+              OPENINGBALANCE,
+
+              CLOSINGBALANCE
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
 </ENVELOPE>
+
+  
