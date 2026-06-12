@@ -131,39 +131,32 @@ const companyDetails = await pool.query(
 );
 
 const companyInfo = companyDetails.rows[0];
-
-const invoiceDate = invoiceData.invoice_date; // 24-03-2026
+const invoiceDate = invoiceData.invoice_date; // "24-03-2026"
 
 if (invoiceDate) {
-
   const [day, month, year] = invoiceDate.split("-").map(Number);
-
   const invoiceJsDate = new Date(year, month - 1, day);
 
-const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
-const fyEnd   = new Date(companyInfo.financial_year_end, 2, 31); // 31 Mar
+  // ✅ Fully dynamic — FY always starts April 1 of start year, ends March 31 of end year
+  const fyStartYear = Number(companyInfo.financial_year_start);
+  const fyEndYear   = Number(companyInfo.financial_year_end);
+
+  const fyStart = new Date(fyStartYear, 3, 1);   // April 1  of start year
+  const fyEnd   = new Date(fyEndYear,   2, 31);   // March 31 of end year
 
   if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
-
     await pool.query(
-      `
-      UPDATE app_test.invoice_extractions
-      SET
-        sync_status = 'failed',
-        error_message = $1,
-        updated_at = NOW()
-      WHERE id = $2
-      `,
+      `UPDATE app_test.invoice_extractions
+       SET sync_status = 'failed',
+           error_message = $1,
+           updated_at = NOW()
+       WHERE id = $2`,
       [
-        `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
+        `Invoice date ${invoiceDate} is outside FY ${fyStartYear}-${fyEndYear}`,
         row.id
       ]
     );
-
-    console.log(
-      `❌ Invoice Date Outside Financial Year : ${invoiceDate}`
-    );
-
+    console.log(`❌ Invoice Date Outside Financial Year : ${invoiceDate}`);
     continue;
   }
 }

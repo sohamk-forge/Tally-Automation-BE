@@ -227,31 +227,41 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   
   const dbClient = client || pool;
   
+  const companyIdIndex = columns.indexOf("company_id");
+
+const companyId =
+  companyIdIndex !== -1
+    ? data[companyIdIndex]
+    : null;
+
+console.log("DEBUG companyId:", companyId);
   // CHECK EXISTING BY MASTER ID FIRST
   let existing = { rows: [] };
   
-  if (masterId) {
-    existing = await dbClient.query(
-      `
-      SELECT id, guid, master_id, alter_id
-      FROM ${tableName}
-      WHERE master_id = $1
-      `,
-      [masterId]
-    );
-  }
+if (masterId && companyId) {
+  existing = await dbClient.query(
+    `
+    SELECT id, guid, master_id, alter_id
+    FROM ${tableName}
+    WHERE master_id = $1
+      AND company_id = $2
+    `,
+    [masterId, companyId]
+  );
+}
   
   // FALLBACK TO GUID (only if no master_id match)
-  if (existing.rows.length === 0) {
-    existing = await dbClient.query(
-      `
-      SELECT id, guid, master_id, alter_id
-      FROM ${tableName}
-      WHERE guid = $1
-      `,
-      [finalGuid]
-    );
-  }
+if (existing.rows.length === 0 && companyId) {
+  existing = await dbClient.query(
+    `
+    SELECT id, guid, master_id, alter_id
+    FROM ${tableName}
+    WHERE guid = $1
+      AND company_id = $2
+    `,
+    [finalGuid, companyId]
+  );
+}
   
   // INSERT NEW RECORD
   if (existing.rows.length === 0) {
@@ -340,7 +350,7 @@ if (isSameMaster && guidChanged) {
   }
 }
   // Case 2: Normal alter_id comparison (same GUID or different master_id)
-  else if (newAlterId < dbAlterId) {
+ else if (newAlterId <= dbAlterId) {
     // LOG IGNORED RECORDS FOR DEBUGGING
     const ignoreReason = guidChanged ? "guid_changed_but_different_master" : "alter_id_not_newer";
     

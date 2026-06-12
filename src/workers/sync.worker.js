@@ -92,9 +92,9 @@ async function processJob(job) {
     }
 
     const fromDate = companyResult.rows[0].financial_year_start;
-    const toDate = companyResult.rows[0].financial_year_end;
+    const toDate   = companyResult.rows[0].financial_year_end;
     const finalFromDate = `${fromDate}0401`;
-    const finalToDate = `${toDate}0331`;
+    const finalToDate   = `${toDate}0331`;
 
     if (!fromDate || !toDate) {
       throw new Error(`Financial year not found for ${company}`);
@@ -103,7 +103,7 @@ async function processJob(job) {
     console.log(`Company: ${company}`);
 
     /* =====================================
-       LEDGER SYNC
+       1. LEDGER SYNC
     ===================================== */
     console.log("Syncing Ledgers...");
     await api.get("/api/sync/ledgers", {
@@ -113,7 +113,7 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       VOUCHER SYNC
+       2. VOUCHER SYNC
     ===================================== */
     console.log("fromDate =", fromDate);
     console.log("toDate =", toDate);
@@ -132,7 +132,7 @@ async function processJob(job) {
     await delay(5000);
 
     /* =====================================
-       ALL LEDGER DETAILS
+       3. ALL LEDGER DETAILS
     ===================================== */
     console.log("Syncing All Ledger Details...");
     await api.get("/api/sync/all-ledgers-sync", {
@@ -142,7 +142,7 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       BANKS
+       4. BANKS
     ===================================== */
     console.log("Syncing Banks...");
     await api.get("/api/sync/group-summary-bank", {
@@ -152,7 +152,7 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       PARENT GROUPS
+       5. PARENT GROUPS
     ===================================== */
     console.log("Syncing Parent Groups...");
     const parentGroupsResponse = await api.get("/api/sync/parent-groups", {
@@ -162,21 +162,17 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       ALL PARENT GROUPS
+       6. ALL PARENT GROUPS (LOOP)
     ===================================== */
     const parentGroups = parentGroupsResponse?.data?.data || [];
     for (const group of parentGroups) {
       try {
         const groupName = group?.group_name;
-        if (!groupName) {
-          continue;
-        }
+        if (!groupName) continue;
+
         console.log(`Syncing Group: ${groupName}`);
         await api.get("/api/sync/all-parent-groups", {
-          params: {
-            company,
-            groupName
-          }
+          params: { company, groupName }
         });
         console.log(`${groupName} Synced`);
         await delay(3000);
@@ -186,7 +182,17 @@ async function processJob(job) {
     }
 
     /* =====================================
-       STOCK SUMMARY
+       7. PAYABLE DEBTORS (GROUP BALANCES)
+    ===================================== */
+    console.log("Syncing Payable Debtors...");
+    await api.get("/api/sync/payable-debtors", {
+      params: { company }
+    });
+    console.log("Payable Debtors Synced");
+    await delay(3000);
+
+    /* =====================================
+       8. STOCK SUMMARY
     ===================================== */
     console.log("Syncing Stock Summary...");
     await api.get("/api/sync/stock-group-summary-sync", {
@@ -196,7 +202,7 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       UNITS
+       9. UNITS
     ===================================== */
     console.log("Syncing Units...");
     await api.get("/api/sync/units-sync", {
@@ -206,7 +212,27 @@ async function processJob(job) {
     await delay(3000);
 
     /* =====================================
-       PROFIT LOSS
+       10. PURCHASE / SALES LEDGERS
+    ===================================== */
+    console.log("Syncing Purchase/Sales Ledgers...");
+    await api.get("/api/sync/purchase-sales-ledgers-sync", {
+      params: { company }
+    });
+    console.log("Purchase/Sales Ledgers Synced");
+    await delay(3000);
+
+    /* =====================================
+       11. GODOWNS
+    ===================================== */
+    console.log("Syncing Godowns...");
+    await api.get("/api/sync/godown-sync", {
+      params: { company }
+    });
+    console.log("Godowns Synced");
+    await delay(3000);
+
+    /* =====================================
+       12. PROFIT LOSS
     ===================================== */
     console.log("Syncing Profit Loss...");
     await api.get("/api/sync/profit-loss-sync", {
@@ -255,7 +281,7 @@ async function processJob(job) {
       `,
       [`${err.config?.url || "unknown-url"} | ${err.message}`, id]
     );
-    
+
     // Re-throw for BullMQ retry mechanism
     throw err;
   }

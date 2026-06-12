@@ -132,6 +132,9 @@ from "./api/godown.routes.js";
 import bulkSalesUploadRoutes
  from "./api/bulkSalesUpload.routes.js";
 
+ import connectorRoutes
+from "./api/connector.routes.js";
+
 
 /* =================================
    MIDDLEWARE
@@ -366,6 +369,15 @@ app.use(
 app.use(
   "/api",
   bulkSalesUploadRoutes
+);
+
+/* =================================
+   CONNECTOR APIs
+================================= */
+
+app.use(
+  "/api/connector",
+  connectorRoutes
 );
 /* =================================
    DEFAULT API
