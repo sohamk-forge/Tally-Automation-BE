@@ -6,11 +6,7 @@ import cors from "cors";
 ================================= */
 
 import "./cron/dailySync.cron.js";
-/* =================================
-   SYNC WORKER
-================================= */
 
-import "./workers/sync.worker.js";
 
 
 
@@ -19,6 +15,8 @@ import "./workers/sync.worker.js";
 /* =================================
    WORKERS
 ================================= */
+
+import "./workers/sync.worker.js";
 
 import "./workers/pushLedger.worker.js";
 
@@ -39,6 +37,7 @@ import "./workers/stockAlert.worker.js";
 
 import "./workers/bulkStockItem.worker.js";
 
+import "./workers/bulkSales.worker.js";
 
 
 
@@ -129,6 +128,9 @@ from "./api/purchaseSalesLedger.routes.js";
 
 import godownRoutes
 from "./api/godown.routes.js";
+
+import bulkSalesUploadRoutes
+ from "./api/bulkSalesUpload.routes.js";
 
 
 /* =================================
@@ -361,6 +363,10 @@ app.use(
   godownRoutes
 );
 
+app.use(
+  "/api",
+  bulkSalesUploadRoutes
+);
 /* =================================
    DEFAULT API
 ================================= */

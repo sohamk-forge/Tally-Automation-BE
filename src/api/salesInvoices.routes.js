@@ -4,7 +4,6 @@
 
 import express from "express";
 import pool from "../db/index.js";
-
 import {
   salesQueue,
   getSalesJobId
@@ -21,25 +20,30 @@ router.post("/sales-invoices", async (req, res) => {
 
     const {
       company,
-      invoice_data
+      invoice_data,
+      narration
     } = req.body;
 
-    if (
-      !company ||
-      !invoice_data
-    ) {
-
+    if (!company || !invoice_data) {
       return res.status(400).json({
         status: "error",
         message: "company and invoice_data required"
       });
-
     }
 
     console.log("");
     console.log("====================================");
     console.log("SALES INVOICE API HIT");
     console.log("====================================");
+
+    const cleanInvoiceData = JSON.parse(JSON.stringify(invoice_data));
+
+    if (narration) {
+      cleanInvoiceData.narration = narration;
+    }
+
+    // ✅ No flipping — store everything as-is from frontend
+    // Python handles all sign logic internally
 
     const result = await pool.query(
       `
@@ -61,66 +65,36 @@ router.post("/sales-invoices", async (req, res) => {
       )
       VALUES
       (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        $7,
-        'pending',
-        0,
-        NULL,
-        NOW(),
-        NOW()
+        $1, $2, $3, $4, $5, $6, $7, 'pending', 0, NULL, NOW(), NOW()
       )
       RETURNING id
       `,
       [
         company.trim(),
         invoice_data.customer_name || "",
-        invoice_data.gstin || "",
-        invoice_data.invoice_no || "",
-        invoice_data.invoice_date || "",
-        invoice_data.godown_name || null,
-        invoice_data
+        invoice_data.gstin         || "",
+        invoice_data.invoice_no    || "",
+        invoice_data.invoice_date  || "",
+        invoice_data.godown_name   || null,
+        cleanInvoiceData
       ]
     );
 
-    const invoiceId =
-      result.rows[0].id;
-
-    // =====================================
-    // ADD JOB TO BULLMQ
-    // =====================================
+    const invoiceId = result.rows[0].id;
 
     await salesQueue.add(
       "sales-invoice",
-      {
-        salesId: invoiceId
-      },
-      {
-        jobId: getSalesJobId(invoiceId)
-      }
+      { salesId: invoiceId },
+      { jobId: getSalesJobId(invoiceId) }
     );
 
-    console.log(
-      `✅ Sales Invoice Queued : ${invoiceId}`
-    );
+    console.log(`✅ Sales Invoice Queued : ${invoiceId}`);
 
     return res.status(200).json({
-
-      status: "success",
-
-      message:
-        "Sales invoice queued successfully",
-
-      invoice_id:
-        invoiceId,
-
-      sync_status:
-        "pending"
-
+      status:       "success",
+      message:      "Sales invoice queued successfully",
+      invoice_id:   invoiceId,
+      sync_status:  "pending"
     });
 
   } catch (err) {
@@ -132,12 +106,8 @@ router.post("/sales-invoices", async (req, res) => {
     console.log(err);
 
     return res.status(500).json({
-
-      status: "error",
-
-      message:
-        err.message
-
+      status:  "error",
+      message: err.message
     });
 
   }

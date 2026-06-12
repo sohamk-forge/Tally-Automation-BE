@@ -59,20 +59,20 @@ const worker = new Worker(
       const customerName = invoiceData.customer_name?.trim() || "";
 
       /*
-      ====================================
-      STEP 1 — SYNC LEDGERS
-      ====================================
-      */
+      // ====================================
+      // STEP 1 — SYNC LEDGERS
+      // ====================================
+      // */
 
-      console.log("Syncing Ledgers...");
+      // console.log("Syncing Ledgers...");
 
-      const ledgerSyncResponse = await fetch(
-        `${BASE_URL}/api/sync/all-ledgers-sync?company=${encodeURIComponent(company)}`
-      );
+      // const ledgerSyncResponse = await fetch(
+      //   `${BASE_URL}/api/sync/all-ledgers-sync?company=${encodeURIComponent(company)}`
+      // );
 
-      if (!ledgerSyncResponse.ok) {
-        throw new Error("Ledger Sync Failed");
-      }
+      // if (!ledgerSyncResponse.ok) {
+      //   throw new Error("Ledger Sync Failed");
+      // }
 
       /*
       ====================================
@@ -103,7 +103,7 @@ const worker = new Worker(
       // );
       // const companyInfo = companyDetails.rows[0];
 
-      // const invoiceDate = invoiceData.invoice_date;
+      // // const invoiceDate = invoiceData.invoice_date;
 
       // if (!invoiceDate) {
       //   await pool.query(
