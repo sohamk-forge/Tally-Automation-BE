@@ -143,6 +143,7 @@ console.log("================================");
       if (!invoiceNo) {
         continue;
       }
+      
 
       // Debug invoice fields
       console.log("Invoice Debug:", {
@@ -172,16 +173,58 @@ console.log("================================");
         ])
       });
 
-      if (!invoices[invoiceNo]) {
+if (!invoices[invoiceNo]) {
 
-        const gstin = String(getValue(row, [
-          "GSTIN (URC/GSTN)",
-          "GSTIN",
-          "GST No",
-          "GST Number"
-        ])).trim();
+  const gstin = String(getValue(row, [
+    "GSTIN (URC/GSTN)",
+    "GSTIN",
+    "GST No",
+    "GST Number"
+  ])).trim();
 
-       const taxableAmount = safeNumber(getValue(row, [
+  invoices[invoiceNo] = {
+    customer_name: String(getValue(row, [
+      "Party Name",
+      "Party",
+      "Customer Name",
+      "Customer"
+    ])).trim(),
+
+    customer_gstin: gstin,
+    invoice_no: invoiceNo,
+
+    invoice_date: formatDate(getValue(row, [
+      "invoice date",
+      "invoice date (dd-mm-yyyy)",
+      "date"
+    ])),
+
+    narration: "",
+
+    godown_name: (() => {
+      const godown = getValue(row, [
+        "Godown Name",
+        "Godown",
+        "Location"
+      ]);
+
+      return godown && String(godown).trim()
+        ? String(godown).trim()
+        : null;
+    })(),
+
+    taxable_amount: 0,
+    grand_total: 0,
+
+    cgst_amount: 0,
+    sgst_amount: 0,
+    igst_amount: 0,
+
+    line_items: []
+  };
+}
+
+const taxableAmount = safeNumber(getValue(row, [
   "Taxable Amount",
   "Taxable Amount INR",
   "Taxable amount",
@@ -189,62 +232,15 @@ console.log("================================");
   "TaxableValue"
 ]));
 
-       const totalAmount = safeNumber(getValue(row, [
+const totalAmount = safeNumber(getValue(row, [
   "Total Amount",
   "total amount",
   "Grand Total",
   "Total"
 ]));
 
-        const gstAmount = totalAmount - taxableAmount;
-        const stateCode = gstin.substring(0, 2);
-
-        let cgstAmount = 0;
-        let sgstAmount = 0;
-        let igstAmount = 0;
-
-        // Maharashtra
-        if (stateCode === "27") {
-          cgstAmount = Number((gstAmount / 2).toFixed(2));
-          sgstAmount = Number((gstAmount / 2).toFixed(2));
-        } else {
-          igstAmount = Number(gstAmount.toFixed(2));
-        }
-
-        invoices[invoiceNo] = {
-          customer_name: String(getValue(row, [
-            "Party Name",
-            "Party",
-            "Customer Name",
-            "Customer"
-          ])).trim(),
-          customer_gstin: gstin,
-          invoice_no: invoiceNo,
-         invoice_date: formatDate(getValue(row, [
-  "invoice date",
-  "invoice date (dd-mm-yyyy)",
-  "date"
-])),
-          narration: String(getValue(row, [
-            "Narration",
-            "narration",
-            "Remarks"
-          ])).trim(),
-          godown_name: (() => {
-            const godown = getValue(row, [
-              "Godown Name",
-              "Godown",
-              "Location"
-            ]);
-            return godown && String(godown).trim() ? String(godown).trim() : null;
-          })(),
-          cgst_amount: cgstAmount,
-          sgst_amount: sgstAmount,
-          igst_amount: igstAmount,
-          grand_total: totalAmount,
-          line_items: []
-        };
-      }
+invoices[invoiceNo].taxable_amount += taxableAmount;
+invoices[invoiceNo].grand_total += totalAmount;
 
       // Get line item details
       const itemName = String(getValue(row, [
@@ -280,9 +276,47 @@ console.log("================================");
       }
     }
 
-    let successCount = 0;
-    let failCount = 0;
+    
+Object.values(invoices).forEach(invoice => {
 
+  const gstAmount =
+    invoice.grand_total - invoice.taxable_amount;
+
+  const stateCode =
+    invoice.customer_gstin?.substring(0, 2);
+
+  if (stateCode === "27" || !stateCode) {   // ← ONLY THIS LINE CHANGED
+
+    invoice.cgst_amount =
+      Number((gstAmount / 2).toFixed(2));
+
+    invoice.sgst_amount =
+      Number((gstAmount - invoice.cgst_amount).toFixed(2));
+
+    invoice.igst_amount = 0;
+
+  } else {
+
+    invoice.cgst_amount = 0;
+    invoice.sgst_amount = 0;
+
+    invoice.igst_amount =
+      Number(gstAmount.toFixed(2));
+  }
+
+  console.log("FINAL GST CHECK", {
+    invoice: invoice.invoice_no,
+    taxable: invoice.taxable_amount,
+    grand_total: invoice.grand_total,
+    gst: gstAmount,
+    cgst: invoice.cgst_amount,
+    sgst: invoice.sgst_amount,
+    igst: invoice.igst_amount
+  });
+
+});
+let successCount = 0;
+let failCount = 0;
     for (const invoiceNo of Object.keys(invoices)) {
       try {
         const invoiceData = invoices[invoiceNo];
@@ -297,48 +331,45 @@ console.log("================================");
         if (!invoiceData.invoice_date) {
           console.log(`⚠️ Warning: Invoice ${invoiceNo} has no invoice date`);
         }
+        const companyResult = await pool.query(
+  `
+  SELECT id
+  FROM app_test.companies
+  WHERE TRIM(name) = TRIM($1)
+  LIMIT 1
+  `,
+  [company]
+);
 
-        const insertResult = await pool.query(
-          `
-          INSERT INTO app_test.sales_invoice_extractions
-          (
-            company_name,
-            customer_name,
-            gstin,
-            invoice_no,
-            invoice_date,
-            godown_name,
-            raw_json,
-            sync_status,
-            error_count,
-            last_error,
-            created_at,
-            updated_at
-          )
-          VALUES
-          (
-            $1,$2,$3,$4,$5,$6,
-            $7,
-            'pending',
-            0,
-            NULL,
-            NOW(),
-            NOW()
-          )
-          RETURNING id
-          `,
-          [
-            company,
-            invoiceData.customer_name,
-            invoiceData.customer_gstin,
-            invoiceData.invoice_no,
-            invoiceData.invoice_date,
-            invoiceData.godown_name,
-            invoiceData
-          ]
-        );
+const companyId = companyResult.rows[0]?.id;
 
-        const salesId = insertResult.rows[0].id;
+if (!companyId) {
+  throw new Error(`Company not found: ${company}`);
+}
+
+   const insertResult = await pool.query(
+  `
+  INSERT INTO app_test.sales_invoice_extractions
+  (
+      company_id, company_name, customer_name, gstin,
+      invoice_no, invoice_date, godown_name, raw_json,
+      sync_status, error_count, last_error, created_at, updated_at
+  )
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,NOW(),NOW())
+  ON CONFLICT (company_id, invoice_no) DO NOTHING
+  RETURNING id;
+  `,
+  [companyId, company, invoiceData.customer_name, invoiceData.customer_gstin,
+   invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
+);
+
+// If duplicate, RETURNING id gives nothing - skip queuing
+if (!insertResult.rows.length) {
+  console.log(`⚠️ Skipping duplicate invoice: ${invoiceNo}`);
+  continue;
+}
+
+const salesId = insertResult.rows[0].id;
 
         await salesQueue.add(
           "sales-invoice",

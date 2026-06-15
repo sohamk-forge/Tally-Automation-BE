@@ -104,77 +104,92 @@ const processInvoiceJobs = async () => {
         );
         const companyId = companyResult.rows[0]?.id;
 
-if (!companyId) {
-  await pool.query(
-    `
-    UPDATE app_test.invoice_extractions
-    SET
-      sync_status = 'failed',
-      error_message = 'Company not found',
-      updated_at = NOW()
-    WHERE id = $1
-    `,
-    [row.id]
-  );
-
-  console.log(`❌ Company Not Found : ${company}`);
-  continue;
-}
-
-const companyDetails = await pool.query(
-  `
-  SELECT financial_year_start, financial_year_end
-  FROM app_test.companies
-  WHERE id = $1
-  `,
-  [companyId]
-);
-
-const companyInfo = companyDetails.rows[0];
-const invoiceDate = invoiceData.invoice_date; // "24-03-2026"
-
-if (invoiceDate) {
-  const [day, month, year] = invoiceDate.split("-").map(Number);
-  const invoiceJsDate = new Date(year, month - 1, day);
-
-  // ✅ Fully dynamic — FY always starts April 1 of start year, ends March 31 of end year
-  const fyStartYear = Number(companyInfo.financial_year_start);
-  const fyEndYear   = Number(companyInfo.financial_year_end);
-
-  const fyStart = new Date(fyStartYear, 3, 1);   // April 1  of start year
-  const fyEnd   = new Date(fyEndYear,   2, 31);   // March 31 of end year
-
-  if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
-    await pool.query(
-      `UPDATE app_test.invoice_extractions
-       SET sync_status = 'failed',
-           error_message = $1,
-           updated_at = NOW()
-       WHERE id = $2`,
-      [
-        `Invoice date ${invoiceDate} is outside FY ${fyStartYear}-${fyEndYear}`,
-        row.id
-      ]
-    );
-    console.log(`❌ Invoice Date Outside Financial Year : ${invoiceDate}`);
-    continue;
-  }
-}
-
         if (!companyId) {
           await pool.query(
             `
             UPDATE app_test.invoice_extractions
             SET
-              sync_status   = 'failed',
+              sync_status = 'failed',
               error_message = 'Company not found',
-              updated_at    = NOW()
+              updated_at = NOW()
             WHERE id = $1
             `,
             [row.id]
           );
+
           console.log(`❌ Company Not Found : ${company}`);
           continue;
+        }
+
+        /*
+        ====================================
+        STEP 2.1
+        FINANCIAL YEAR CHECK
+        ====================================
+        */
+
+        const companyDetails = await pool.query(
+          `
+          SELECT financial_year_start, financial_year_end
+          FROM app_test.companies
+          WHERE id = $1
+          `,
+          [companyId]
+        );
+
+        const companyInfo = companyDetails.rows[0];
+        const invoiceDate = invoiceData.invoice_date; // "24-03-2026"
+
+        if (invoiceDate) {
+          const parts = invoiceDate.split("-").map(Number);
+          const [day, month, year] = parts;
+
+          const isValidDateParts =
+            parts.length === 3 &&
+            !Number.isNaN(day) &&
+            !Number.isNaN(month) &&
+            !Number.isNaN(year);
+
+          if (!isValidDateParts) {
+            await pool.query(
+              `UPDATE app_test.invoice_extractions
+               SET sync_status = 'failed',
+                   error_message = $1,
+                   updated_at = NOW()
+               WHERE id = $2`,
+              [
+                `Invalid invoice_date format: "${invoiceDate}" (expected DD-MM-YYYY)`,
+                row.id
+              ]
+            );
+            console.log(`❌ Invalid Invoice Date Format : ${invoiceDate}`);
+            continue;
+          }
+
+          const invoiceJsDate = new Date(year, month - 1, day);
+
+          // ✅ Fully dynamic — FY always starts April 1 of start year, ends March 31 of end year
+          const fyStartYear = Number(companyInfo.financial_year_start);
+          const fyEndYear   = Number(companyInfo.financial_year_end);
+
+          const fyStart = new Date(fyStartYear, 3, 1);   // April 1  of start year
+          const fyEnd   = new Date(fyEndYear,   2, 31);   // March 31 of end year
+
+          if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
+            await pool.query(
+              `UPDATE app_test.invoice_extractions
+               SET sync_status = 'failed',
+                   error_message = $1,
+                   updated_at = NOW()
+               WHERE id = $2`,
+              [
+                `Invoice date ${invoiceDate} is outside FY ${fyStartYear}-${fyEndYear}`,
+                row.id
+              ]
+            );
+            console.log(`❌ Invoice Date Outside Financial Year : ${invoiceDate}`);
+            continue;
+          }
         }
 
         /*
@@ -354,7 +369,10 @@ if (invoiceDate) {
 
         for (const item of items) {
 
-          const itemName = item.item_name?.trim() || "";
+         const itemName =
+  item.item_name?.trim() ||
+  item.name?.trim() ||
+  "";
 
           console.log(`🔍 Checking Stock : "${itemName}"`);
 
@@ -418,7 +436,10 @@ if (invoiceDate) {
           // ✅ Each line item ledger = dynamic purchase group
           line_items: items.map((item) => ({
             ...item,
-            item_name : item.item_name?.trim() || "",
+            item_name :
+  item.item_name?.trim() ||
+  item.name?.trim() ||
+  "",
             ledger    : mapping.invoice_parent_group,
           })),
         };
@@ -502,7 +523,8 @@ if (invoiceDate) {
             sync_status    = 'completed',
             tally_response = $1,
             error_message  = NULL,
-            updated_at     = NOW()
+            updated_at     = NOW(),
+            synced_at      = NOW()
           WHERE id = $2
           `,
           [tallyResponse, row.id]
@@ -521,11 +543,11 @@ if (invoiceDate) {
             UPDATE app_test.invoice_extractions
             SET
               sync_status   = 'pending',
-              error_message = $1,
+              error_message = NULL,
               updated_at    = NOW()
-            WHERE id = $2
+            WHERE id = $1
             `,
-            [err.message, row.id]
+            [row.id]
           );
           console.log(`🔄 Invoice Requeued (Temporary Error): ${row.id}`);
         } else {

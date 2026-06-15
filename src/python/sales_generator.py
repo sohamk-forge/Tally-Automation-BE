@@ -98,7 +98,19 @@ print(f"SGST        = {sgst_amount}",    file=sys.stderr)
 print(f"IGST        = {igst_amount}",    file=sys.stderr)
 print(f"GRAND TOTAL = {grand_total}",    file=sys.stderr)
 print(f"ROUND OFF   = {round_off}",      file=sys.stderr)
+print("================================", file=sys.stderr)
 
+for idx, item in enumerate(line_items, start=1):
+    print(
+        f"ITEM {idx}: "
+        f"{item.get('item_name')} | "
+        f"QTY={item.get('quantity')} | "
+        f"RATE={item.get('rate')} | "
+        f"AMOUNT={item.get('amount')}",
+        file=sys.stderr
+    )
+
+print("================================", file=sys.stderr)
 if not date:
     print("ERROR: invoice_date is empty or could not be parsed", file=sys.stderr)
     sys.exit(1)
@@ -174,7 +186,7 @@ for item in line_items:
 # ✅ Party ledger: always negative for Tally debit
 plel = sub(vch, "LEDGERENTRIES.LIST")
 sub(plel, "LEDGERNAME",       party_name)
-sub(plel, "ISDEEMEDPOSITIVE", "No")
+sub(plel, "ISDEEMEDPOSITIVE", "yes")
 sub(plel, "ISPARTYLEDGER",    "Yes")
 sub(plel, "AMOUNT",           f"-{grand_total:.2f}")  # ✅ always -118.00
 
@@ -214,6 +226,9 @@ if abs(round_off) >= 0.01:
     sub(lel, "LEDGERNAME",       rounded_off_ledger)
     sub(lel, "ISDEEMEDPOSITIVE", "Yes" if round_off > 0 else "No")
     sub(lel, "AMOUNT",           f"{abs(round_off):.2f}")
+
+with open("sales_debug.xml", "w", encoding="utf-8") as f:
+     f.write(tostring(envelope, encoding="unicode"))
 
 raw    = tostring(envelope, encoding="unicode")
 parsed = minidom.parseString(raw)

@@ -208,7 +208,7 @@ const worker = new Worker(
       if (mappingLedgerMissing) {
         await pool.query(
           `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'ledger_missing', error_message = $1, updated_at = NOW()
+           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
            WHERE id = $2`,
           [
             `Mapped ledger not found in Tally: "${missingMappingLedger}" (field: ${missingMappingField})`,
@@ -236,7 +236,7 @@ const worker = new Worker(
       if (!ledgerResult.rows.length) {
         await pool.query(
           `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'ledger_missing', error_message = $1, updated_at = NOW()
+           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
            WHERE id = $2`,
           [`Customer ledger not found: ${customerName}`, salesId]
         );
@@ -282,7 +282,7 @@ const worker = new Worker(
       if (stockMissing) {
         await pool.query(
           `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'stock_missing', error_message = $1, updated_at = NOW()
+           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
            WHERE id = $2`,
           [`Stock item not found: ${missingItem}`, salesId]
         );
@@ -408,15 +408,18 @@ const worker = new Worker(
       console.error(`SALES ATTEMPT FAILED: ${salesId}`, error.message);
 
       // ONLY retry for Tally connection issues
-      if (isTemporarySalesError(error)) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'pending', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [error.message, salesId]
-        );
-        throw error; // BullMQ will retry
-      }
+     if (isTemporarySalesError(error)) {
+  await pool.query(
+    `UPDATE app_test.sales_invoice_extractions
+     SET sync_status = 'pending',
+         error_message = NULL,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [salesId]
+  );
+
+  throw error;
+}
 
       // Permanent error - mark as failed
       await pool.query(
