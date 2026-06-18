@@ -58,27 +58,41 @@ if (narration) {
 }
 
 // ✅ ADD THIS BLOCK HERE
-const gstAmount = (cleanInvoiceData.grand_total || 0) - (cleanInvoiceData.taxable_amount || 0);
-const gstin = cleanInvoiceData.customer_gstin || cleanInvoiceData.gstin || "";
-const stateCode = gstin?.substring(0, 2);
+// Recalculate GST only if GST values are not already present
+if (
+  !cleanInvoiceData.cgst_amount &&
+  !cleanInvoiceData.sgst_amount &&
+  !cleanInvoiceData.igst_amount
+) {
+  const gstAmount =
+    (cleanInvoiceData.grand_total || 0) -
+    (cleanInvoiceData.taxable_amount || 0);
 
-if (stateCode === "27" || !stateCode) {
-  // Intra-state Maharashtra OR no GSTIN → CGST + SGST
-  cleanInvoiceData.cgst_amount = Number((gstAmount / 2).toFixed(2));
-  cleanInvoiceData.sgst_amount = Number((gstAmount - cleanInvoiceData.cgst_amount).toFixed(2));
-  cleanInvoiceData.igst_amount = 0;
-} else {
-  // Inter-state → IGST
-  cleanInvoiceData.cgst_amount = 0;
-  cleanInvoiceData.sgst_amount = 0;
-  cleanInvoiceData.igst_amount = Number(gstAmount.toFixed(2));
+  const gstin =
+    cleanInvoiceData.customer_gstin ||
+    cleanInvoiceData.gstin ||
+    "";
+
+  const stateCode = gstin?.substring(0, 2);
+
+  if (stateCode === "27" || !stateCode) {
+    cleanInvoiceData.cgst_amount = Number((gstAmount / 2).toFixed(2));
+    cleanInvoiceData.sgst_amount = Number(
+      (gstAmount - cleanInvoiceData.cgst_amount).toFixed(2)
+    );
+    cleanInvoiceData.igst_amount = 0;
+  } else {
+    cleanInvoiceData.cgst_amount = 0;
+    cleanInvoiceData.sgst_amount = 0;
+    cleanInvoiceData.igst_amount = Number(gstAmount.toFixed(2));
+  }
 }
 
 console.log("GST CALCULATION:", {
-  gstin, stateCode, gstAmount,
   cgst: cleanInvoiceData.cgst_amount,
   sgst: cleanInvoiceData.sgst_amount,
-  igst: cleanInvoiceData.igst_amount
+  igst: cleanInvoiceData.igst_amount,
+  grand_total: cleanInvoiceData.grand_total
 });
 
 // ✅ No flipping — store everything as-is from frontend

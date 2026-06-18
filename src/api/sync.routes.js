@@ -437,14 +437,44 @@ function logUpsertSummary() {
     HEALTH API
   =================================================== */
 
-  router.get("/health", async (req, res) => {
-    return res.status(200).json({
-      status: "success",
-      message: "Sync service healthy",
-      services: { api: "running", tally: "ready" },
-      timestamp: new Date()
-    });
-  });
+/* ===================================================
+   HEALTH API
+=================================================== */
+
+router.get("/health", async (req, res) => {
+
+    try {
+
+        const xml = getCompaniesXML();
+
+        await sendToTally(xml);
+
+        return res.status(200).json({
+            status: "success",
+            message: "Sync service healthy",
+            services: {
+                api: "running",
+                tally: "connected"
+            },
+            timestamp: new Date()
+        });
+
+    } catch (err) {
+
+        return res.status(503).json({
+            status: "error",
+            message: "Tally is not reachable",
+            services: {
+                api: "running",
+                tally: "disconnected"
+            },
+            error: err.message,
+            timestamp: new Date()
+        });
+
+    }
+
+});
 
   /* ===================================================
     COMPANY SYNC (FIXED - HANDLES DUPLICATES)

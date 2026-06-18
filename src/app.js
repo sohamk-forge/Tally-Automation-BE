@@ -132,8 +132,8 @@ from "./api/godown.routes.js";
 import bulkSalesUploadRoutes
  from "./api/bulkSalesUpload.routes.js";
 
- import connectorRoutes
-from "./api/connector.routes.js";
+//  import connectorRoutes
+// from "./api/connector.routes.js";
 
 
 /* =================================
@@ -371,14 +371,14 @@ app.use(
   bulkSalesUploadRoutes
 );
 
-/* =================================
-   CONNECTOR APIs
-================================= */
+// /* =================================
+//    CONNECTOR APIs
+// ================================= */
 
-app.use(
-  "/api/connector",
-  connectorRoutes
-);
+// app.use(
+//   "/api/connector",
+//   connectorRoutes
+// );
 /* =================================
    DEFAULT API
 ================================= */

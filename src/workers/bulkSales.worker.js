@@ -356,8 +356,19 @@ if (!companyId) {
       sync_status, error_count, last_error, created_at, updated_at
   )
   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,NOW(),NOW())
-  ON CONFLICT (company_id, invoice_no) DO NOTHING
-  RETURNING id;
+ ON CONFLICT (company_id, invoice_no)
+DO UPDATE
+SET
+    customer_name = EXCLUDED.customer_name,
+    gstin = EXCLUDED.gstin,
+    invoice_date = EXCLUDED.invoice_date,
+    godown_name = EXCLUDED.godown_name,
+    raw_json = EXCLUDED.raw_json,
+    sync_status = 'pending',
+    error_count = 0,
+    last_error = NULL,
+    updated_at = NOW()
+RETURNING id;
   `,
   [companyId, company, invoiceData.customer_name, invoiceData.customer_gstin,
    invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
@@ -371,14 +382,25 @@ if (!insertResult.rows.length) {
 
 const salesId = insertResult.rows[0].id;
 
-        await salesQueue.add(
-          "sales-invoice",
-          { salesId },
-          { jobId: getSalesJobId(salesId) }
-        );
+const jobId = getSalesJobId(salesId);
 
-        console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date})`);
-        successCount++;
+// Remove old job if it exists
+const oldJob = await salesQueue.getJob(jobId);
+
+if (oldJob) {
+  await oldJob.remove();
+  console.log(`🗑 Removed old job: ${jobId}`);
+}
+
+// Queue again
+await salesQueue.add(
+  "sales-invoice",
+  { salesId },
+  { jobId }
+);
+
+console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date})`);
+successCount++;
 
       } catch (error) {
         console.error(`❌ Sales Insert Failed for ${invoiceNo}:`, error.message);

@@ -50,7 +50,7 @@ const processInvoiceJobs = async () => {
     `);
 
     if (!result.rows.length) {
-      console.log("📭 No Pending Invoices");
+      
       return;
     }
 

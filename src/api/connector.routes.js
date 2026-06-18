@@ -1,292 +1,292 @@
-import express from "express";
-import pool from "../db/index.js";
+// import express from "express";
+// import pool from "../db/index.js";
 
-const router = express.Router();
+// const router = express.Router();
 
-/* =========================================
-   CONNECTOR HEARTBEAT
-========================================= */
+// /* =========================================
+//    CONNECTOR HEARTBEAT
+// ========================================= */
 
-router.post(
+// router.post(
 
-  "/heartbeat",
+//   "/heartbeat",
 
-  async (req, res) => {
+//   async (req, res) => {
 
-    try {
+//     try {
 
-      const {
+//       const {
 
-        machine_id,
+//         machine_id,
 
-        machine_name,
+//         machine_name,
 
-        os_name,
+//         os_name,
 
-        connector_version,
+//         connector_version,
 
-        tally_connected
+//         tally_connected
 
-      } = req.body;
+//       } = req.body;
 
-      if (!machine_id) {
+//       if (!machine_id) {
 
-        return res.status(400).json({
+//         return res.status(400).json({
 
-          status: "error",
+//           status: "error",
 
-          message: "machine_id required"
+//           message: "machine_id required"
 
-        });
+//         });
 
-      }
+//       }
 
-      const existing = await pool.query(
+//       const existing = await pool.query(
 
-        `
-        SELECT id
+//         `
+//         SELECT id
 
-        FROM app_test.connector_machines
+//         FROM app_test.connector_machines
 
-        WHERE machine_id = $1
+//         WHERE machine_id = $1
 
-        LIMIT 1
-        `,
+//         LIMIT 1
+//         `,
 
-        [
+//         [
 
-          machine_id
+//           machine_id
 
-        ]
+//         ]
 
-      );
+//       );
 
-      /* =====================================
-         UPDATE EXISTING MACHINE
-      ===================================== */
+//       /* =====================================
+//          UPDATE EXISTING MACHINE
+//       ===================================== */
 
-      if (existing.rows.length > 0) {
+//       if (existing.rows.length > 0) {
 
-        await pool.query(
+//         await pool.query(
 
-          `
-          UPDATE app_test.connector_machines
+//           `
+//           UPDATE app_test.connector_machines
 
-          SET
+//           SET
 
-            machine_name = $2,
+//             machine_name = $2,
 
-            os_name = $3,
+//             os_name = $3,
 
-            connector_version = $4,
+//             connector_version = $4,
 
-            tally_connected = $5,
+//             tally_connected = $5,
 
-            last_seen = NOW(),
+//             last_seen = NOW(),
 
-            updated_at = NOW()
+//             updated_at = NOW()
 
-          WHERE machine_id = $1
-          `,
+//           WHERE machine_id = $1
+//           `,
 
-          [
+//           [
 
-            machine_id,
+//             machine_id,
 
-            machine_name || "",
+//             machine_name || "",
 
-            os_name || "",
+//             os_name || "",
 
-            connector_version || "",
+//             connector_version || "",
 
-            tally_connected ?? false
+//             tally_connected ?? false
 
-          ]
+//           ]
 
-        );
+//         );
 
-      }
+//       }
 
-      /* =====================================
-         INSERT NEW MACHINE
-      ===================================== */
+//       /* =====================================
+//          INSERT NEW MACHINE
+//       ===================================== */
 
-      else {
+//       else {
 
-        await pool.query(
+//         await pool.query(
 
-          `
-          INSERT INTO app_test.connector_machines
-          (
+//           `
+//           INSERT INTO app_test.connector_machines
+//           (
 
-            machine_id,
+//             machine_id,
 
-            machine_name,
+//             machine_name,
 
-            os_name,
+//             os_name,
 
-            connector_version,
+//             connector_version,
 
-            tally_connected,
+//             tally_connected,
 
-            last_seen,
+//             last_seen,
 
-            created_at,
+//             created_at,
 
-            updated_at
+//             updated_at
 
-          )
+//           )
 
-          VALUES
-          (
+//           VALUES
+//           (
 
-            $1,
+//             $1,
 
-            $2,
+//             $2,
 
-            $3,
+//             $3,
 
-            $4,
+//             $4,
 
-            $5,
+//             $5,
 
-            NOW(),
+//             NOW(),
 
-            NOW(),
+//             NOW(),
 
-            NOW()
+//             NOW()
 
-          )
-          `,
+//           )
+//           `,
 
-          [
+//           [
 
-            machine_id,
+//             machine_id,
 
-            machine_name || "",
+//             machine_name || "",
 
-            os_name || "",
+//             os_name || "",
 
-            connector_version || "",
+//             connector_version || "",
 
-            tally_connected ?? false
+//             tally_connected ?? false
 
-          ]
+//           ]
 
-        );
+//         );
 
-      }
+//       }
 
-      return res.status(200).json({
+//       return res.status(200).json({
 
-        status: "success",
+//         status: "success",
 
-        message: "Connector heartbeat updated"
+//         message: "Connector heartbeat updated"
 
-      });
+//       });
 
-    }
+//     }
 
-    catch (err) {
+//     catch (err) {
 
-      console.log(
+//       console.log(
 
-        "❌ CONNECTOR HEARTBEAT ERROR:",
+//         "❌ CONNECTOR HEARTBEAT ERROR:",
 
-        err.message
+//         err.message
 
-      );
+//       );
 
-      return res.status(500).json({
+//       return res.status(500).json({
 
-        status: "error",
+//         status: "error",
 
-        message: err.message
+//         message: err.message
 
-      });
+//       });
 
-    }
+//     }
 
-  }
+//   }
 
-);
+// );
 
-/* =========================================
-   GET ALL CONNECTOR MACHINES
-========================================= */
+// /* =========================================
+//    GET ALL CONNECTOR MACHINES
+// ========================================= */
 
-router.get(
+// router.get(
 
-  "/status",
+//   "/status",
 
-  async (req, res) => {
+//   async (req, res) => {
 
-    try {
+//     try {
 
-      const result = await pool.query(
+//       const result = await pool.query(
 
-        `
-        SELECT
+//         `
+//         SELECT
 
-          id,
+//           id,
 
-          machine_id,
+//           machine_id,
 
-          machine_name,
+//           machine_name,
 
-          os_name,
+//           os_name,
 
-          connector_version,
+//           connector_version,
 
-          tally_connected,
+//           tally_connected,
 
-          last_seen,
+//           last_seen,
 
-          created_at,
+//           created_at,
 
-          updated_at
+//           updated_at
 
-        FROM app_test.connector_machines
+//         FROM app_test.connector_machines
 
-        ORDER BY updated_at DESC
-        `
+//         ORDER BY updated_at DESC
+//         `
 
-      );
+//       );
 
-      return res.status(200).json({
+//       return res.status(200).json({
 
-        status: "success",
+//         status: "success",
 
-        count: result.rows.length,
+//         count: result.rows.length,
 
-        data: result.rows
+//         data: result.rows
 
-      });
+//       });
 
-    }
+//     }
 
-    catch (err) {
+//     catch (err) {
 
-      console.log(
+//       console.log(
 
-        "❌ GET CONNECTOR STATUS ERROR:",
+//         "❌ GET CONNECTOR STATUS ERROR:",
 
-        err.message
+//         err.message
 
-      );
+//       );
 
-      return res.status(500).json({
+//       return res.status(500).json({
 
-        status: "error",
+//         status: "error",
 
-        message: err.message
+//         message: err.message
 
-      });
+//       });
 
-    }
+//     }
 
-  }
+//   }
 
-);
+// );
 
-export default router;
+// export default router;
