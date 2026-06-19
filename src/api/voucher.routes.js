@@ -1,0 +1,696 @@
+import express from "express";
+import db from "../db/index.js";
+import multer from "multer";
+import xlsx from "xlsx";
+import path from "path";
+
+import {
+  voucherQueue,
+  VOUCHER_JOB_OPTIONS,
+  getVoucherJobId
+} from "../queues/voucher.queue.js";
+
+const router = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === ".pdf") return cb(new Error("PDF_NOT_SUPPORTED"));
+    cb(null, true);
+  }
+});
+
+/* ─────────────────────────────────────────────
+   HELPERS
+───────────────────────────────────────────── */
+
+function cleanString(val) {
+  if (val === null || val === undefined) return "";
+  return String(val)
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[A-Z]$/, "")
+    .trim();
+}
+
+function findHeaderRowIndex(sheet) {
+  const range = xlsx.utils.decode_range(sheet["!ref"]);
+  for (let r = range.s.r; r <= Math.min(range.e.r, 20); r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = sheet[xlsx.utils.encode_cell({ r, c })];
+      if (cell && typeof cell.v === "string") {
+        const val = cell.v.trim().toLowerCase();
+        if (val === "date" || val === "txn date" || val === "transaction date") {
+          return r;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+function parseDate(raw) {
+  if (!raw) return null;
+  if (raw instanceof Date) return raw.toISOString().split("T")[0];
+  if (typeof raw === "number") {
+    const date = new Date(Math.round((raw - 25569) * 86400 * 1000));
+    return date.toISOString().split("T")[0];
+  }
+  const str = cleanString(String(raw));
+  const match = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (match) {
+    let [, d, m, y] = match;
+    if (y.length === 2) y = "20" + y;
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  return null;
+}
+
+function parseAmount(raw) {
+  if (raw === undefined || raw === null || raw === "" || raw === "-") return null;
+  if (typeof raw === "number") return raw;
+  const num = parseFloat(String(raw).replace(/,/g, "").trim());
+  return isNaN(num) ? null : num;
+}
+
+/* ===========================
+   CREATE VOUCHER (manual)
+=========================== */
+
+router.post("/create", async (req, res) => {
+  try {
+    const {
+      company_id, company_name, voucher_type,
+      voucher_number, voucher_date, party_ledger,
+      bank_ledger, amount, narration,
+      instrument_number, transfer_bank
+    } = req.body;
+
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const result = await db.query(
+      `INSERT INTO app_test.contra_vouchers (
+        company_id, company_name, voucher_type, voucher_number,
+        voucher_date, party_ledger, bank_ledger, amount,
+        narration, instrument_number, transfer_bank, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'WAITING_LEDGER')
+      RETURNING *`,
+      [
+        company_id, company_name, voucher_type, voucher_number,
+        voucher_date, party_ledger, bank_ledger, amount,
+        narration, instrument_number, transfer_bank
+      ]
+    );
+
+    const voucher = result.rows[0];
+
+    if (["FAILED", "failed"].includes(voucher.status)) {
+      return res.status(400).json({
+        success: false,
+        message: voucher.err_message || "Voucher creation failed in Tally",
+        data: voucher
+      });
+    }
+
+    return res.status(202).json({
+      success: true,
+      message: "Voucher queued for Tally processing",
+      data: voucher
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   UPLOAD BANK STATEMENT (EXCEL)
+=========================== */
+
+router.post(
+  "/upload-statement",
+  (req, res, next) => {
+    upload.single("file")(req, res, (err) => {
+      if (err?.message === "PDF_NOT_SUPPORTED") {
+        return res.status(415).json({
+          success: false,
+          message: "PDF files are not supported. Please upload an Excel file (.xls or .xlsx)."
+        });
+      }
+      if (err) return res.status(400).json({ success: false, message: err.message });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const { company_id, company_name, bank_ledger, password } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: "Excel file is required" });
+      }
+      if (!company_id || !company_name || !bank_ledger) {
+        return res.status(400).json({
+          success: false,
+          message: "company_id, company_name and bank_ledger are required"
+        });
+      }
+
+      const fileName = req.file.originalname;
+
+      // ✅ CHANGE 1: Check if this exact file has already been uploaded for this company
+      const existingFile = await db.query(
+        `SELECT
+          file_name,
+          bank_ledger,
+          TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
+          TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
+          COUNT(*) AS total_rows
+         FROM app_test.contra_vouchers
+         WHERE company_id = $1
+           AND file_name = $2
+           AND file_name IS NOT NULL
+         GROUP BY file_name, bank_ledger`,
+        [company_id, fileName]
+      );
+
+      if (existingFile.rows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          already_exists: true,
+          message: `This file "${fileName}" has already been uploaded.`,
+          data: existingFile.rows[0]   // returns existing file_name, bank_ledger, start_date, end_date, total_rows
+        });
+      }
+
+      let workbook;
+      try {
+        workbook = xlsx.read(req.file.buffer, {
+          type: "buffer",
+          cellDates: true,
+          password: password || undefined
+        });
+      } catch (xlsxErr) {
+        return res.status(400).json({
+          success: false,
+          message: "Failed to read Excel file. If it is password protected, provide the correct password."
+        });
+      }
+
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const headerRowIndex = findHeaderRowIndex(sheet);
+
+      const rawRows = xlsx.utils.sheet_to_json(sheet, {
+        defval: null,
+        raw: false,
+        range: headerRowIndex
+      });
+
+      if (!rawRows.length) {
+        return res.status(400).json({ success: false, message: "No data rows found in Excel" });
+      }
+
+      const inserted = [];
+
+      for (const row of rawRows) {
+        const withdrawalAmt = parseAmount(
+          row["Withdrawal Amt."] ?? row["Withdrawal Amt"] ?? row["Debit"] ?? row["DR"]
+        );
+        const depositAmt = parseAmount(
+          row["Deposit Amt."] ?? row["Deposit Amt"] ?? row["Credit"] ?? row["CR"]
+        );
+
+        if (withdrawalAmt === null && depositAmt === null) continue;
+
+        const txnDate = parseDate(
+          row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"]
+        );
+        if (!txnDate) continue;
+
+        const narration = String(
+          row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
+        ).trim() || null;
+
+        const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
+        const chequeRef = cleanString(rawRef) || null;
+
+        // Withdrawal → DEBIT row
+        if (withdrawalAmt !== null && withdrawalAmt > 0) {
+          const existingDebit = await db.query(
+            `SELECT id, status FROM app_test.contra_vouchers
+             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
+               AND amount = $4 AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $5`,
+            [company_id, bank_ledger, txnDate, withdrawalAmt, narration]
+          );
+
+          if (existingDebit.rows.length > 0) {
+            const ex = existingDebit.rows[0];
+            if (ex.status === 'FAILED') {
+              const r = await db.query(
+                `UPDATE app_test.contra_vouchers
+                 SET status = 'WAITING_LEDGER', err_message = NULL,
+                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+                 WHERE id = $2 RETURNING *`,
+                [chequeRef, ex.id]
+              );
+              inserted.push({ ...r.rows[0], _action: 'reset' });
+            } else {
+              inserted.push({ ...ex, _action: 'skipped' });
+            }
+          } else {
+            const r = await db.query(
+              `INSERT INTO app_test.contra_vouchers
+               (company_id, company_name, voucher_date, bank_ledger,
+                amount, narration, instrument_number,
+                debit_credit, voucher_type, party_ledger, status,
+                statement_password, file_name)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9)
+               RETURNING *`,
+              [company_id, company_name, txnDate, bank_ledger,
+               withdrawalAmt, narration, chequeRef, password || null, fileName]
+            );
+            inserted.push({ ...r.rows[0], _action: 'inserted' });
+          }
+        }
+
+        // Deposit → CREDIT row
+        if (depositAmt !== null && depositAmt > 0) {
+          const existingCredit = await db.query(
+            `SELECT id, status FROM app_test.contra_vouchers
+             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
+               AND amount = $4 AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $5`,
+            [company_id, bank_ledger, txnDate, depositAmt, narration]
+          );
+
+          if (existingCredit.rows.length > 0) {
+            const ex = existingCredit.rows[0];
+            if (ex.status === 'FAILED') {
+              const r = await db.query(
+                `UPDATE app_test.contra_vouchers
+                 SET status = 'WAITING_LEDGER', err_message = NULL,
+                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+                 WHERE id = $2 RETURNING *`,
+                [chequeRef, ex.id]
+              );
+              inserted.push({ ...r.rows[0], _action: 'reset' });
+            } else {
+              inserted.push({ ...ex, _action: 'skipped' });
+            }
+          } else {
+            const r = await db.query(
+              `INSERT INTO app_test.contra_vouchers
+               (company_id, company_name, voucher_date, bank_ledger,
+                amount, narration, instrument_number,
+                debit_credit, voucher_type, party_ledger, status,
+                statement_password, file_name)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9)
+               RETURNING *`,
+              [company_id, company_name, txnDate, bank_ledger,
+               depositAmt, narration, chequeRef, password || null, fileName]
+            );
+            inserted.push({ ...r.rows[0], _action: 'inserted' });
+          }
+        }
+      }
+
+      if (!inserted.length) {
+        return res.status(400).json({
+          success: false,
+          message: "No valid transaction rows found in the file"
+        });
+      }
+
+      const newRows     = inserted.filter(v => v._action === 'inserted');
+      const skippedRows = inserted.filter(v => v._action === 'skipped');
+      const resetRows   = inserted.filter(v => v._action === 'reset');
+
+      // Start and end date from processed rows
+      const allDates = inserted.map(v => v.voucher_date).filter(Boolean).sort();
+      const startDate = allDates[0] || null;
+      const endDate   = allDates[allDates.length - 1] || null;
+
+      return res.status(201).json({
+        success: true,
+        message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
+        // Review card fields
+        file_name:      fileName,
+        bank_ledger:    bank_ledger,
+        start_date:     startDate,
+        end_date:       endDate,
+        // Counts
+        total:          inserted.length,
+        inserted_count: newRows.length,
+        skipped_count:  skippedRows.length,
+        reset_count:    resetRows.length,
+        debit_count:    inserted.filter(v => v.debit_credit === "DEBIT").length,
+        credit_count:   inserted.filter(v => v.debit_credit === "CREDIT").length,
+        data: inserted
+      });
+
+    } catch (err) {
+      console.error("upload-statement error:", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+);
+
+/* ===========================
+   GET STATEMENT DETAILS
+   GET /api/v1/voucher/statement-details?company_id=1
+   Returns file name, bank ledger, start and end date of ALL uploaded statements
+   ✅ CHANGE 2: Returns ALL uploaded files (removed LIMIT 1), not just the latest
+=========================== */
+
+router.get("/statement-details", async (req, res) => {
+  try {
+    const { company_id } = req.query;
+
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const result = await db.query(
+      `SELECT
+        file_name,
+        bank_ledger,
+        TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
+        TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date
+       FROM app_test.contra_vouchers
+       WHERE company_id = $1
+         AND file_name IS NOT NULL
+       GROUP BY file_name, bank_ledger
+       ORDER BY MAX(created_at) DESC`,
+      [company_id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "No statement found for this company"
+      });
+    }
+
+    const row = result.rows[0];
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        file_name:   row.file_name,
+        bank_ledger: row.bank_ledger,
+        start_date:  row.start_date,
+        end_date:    row.end_date
+      }
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   GET WAITING LEDGER VOUCHERS
+   GET /api/v1/voucher/waiting-ledger?company_id=1
+=========================== */
+
+router.get("/waiting-ledger", async (req, res) => {
+  try {
+    const { company_id } = req.query;
+
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const result = await db.query(
+      `SELECT
+        id, company_id, company_name, voucher_type, voucher_number,
+        voucher_date, bank_ledger, amount, narration,
+        instrument_number, debit_credit, status, created_at
+       FROM app_test.contra_vouchers
+       WHERE status = 'WAITING_LEDGER'
+         AND company_id = $1
+       ORDER BY voucher_date ASC, id ASC`,
+      [company_id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: result.rowCount,
+      data: result.rows
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   GET ALL VOUCHERS
+   GET /api/v1/voucher/all?company_id=1
+=========================== */
+
+router.get("/all", async (req, res) => {
+  try {
+    const { company_id } = req.query;
+    const result = await db.query(
+      `SELECT * FROM app_test.contra_vouchers
+       ${company_id ? "WHERE company_id = $1" : ""}
+       ORDER BY id DESC`,
+      company_id ? [company_id] : []
+    );
+    return res.status(200).json({ success: true, data: result.rows });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   GET VOUCHERS BY PARTY LEDGER + VOUCHER TYPE
+   GET /api/v1/voucher/filter?company_id=1&party_ledger=Ram&voucher_type=payment
+=========================== */
+
+router.get("/filter", async (req, res) => {
+  try {
+    const { company_id, party_ledger, voucher_type } = req.query;
+
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const conditions = ["company_id = $1"];
+    const values = [company_id];
+    let idx = 2;
+
+    if (party_ledger) {
+      conditions.push(`party_ledger ILIKE $${idx++}`);
+      values.push(`%${party_ledger}%`);
+    }
+
+    if (voucher_type) {
+      const allowed = ["payment", "receipt", "contra"];
+      if (!allowed.includes(voucher_type.toLowerCase())) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid voucher_type. Allowed: payment, receipt, contra"
+        });
+      }
+      conditions.push(`voucher_type = $${idx++}`);
+      values.push(voucher_type.toLowerCase());
+    }
+
+    const result = await db.query(
+      `SELECT
+        id, company_id, company_name,
+        voucher_type, voucher_number, voucher_date,
+        bank_ledger, party_ledger, amount,
+        narration, instrument_number, debit_credit,
+        status, created_at
+       FROM app_test.contra_vouchers
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY voucher_date DESC, id DESC`,
+      values
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: result.rowCount,
+      data: result.rows
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   BULK ASSIGN party_ledger + voucher_type → triggers BullMQ
+   PUT /api/v1/voucher/bulk-party-ledger
+=========================== */
+
+router.put("/bulk-party-ledger", async (req, res) => {
+  try {
+    const { vouchers } = req.body;
+
+    if (!Array.isArray(vouchers) || vouchers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "vouchers[] array is required. Each item needs: id, party_ledger, voucher_type"
+      });
+    }
+
+    const allowed = ["payment", "receipt", "contra"];
+
+    for (const v of vouchers) {
+      if (!v.id || !v.party_ledger || !v.voucher_type) {
+        return res.status(400).json({
+          success: false,
+          message: `Missing fields on: ${JSON.stringify(v)}. Need id, party_ledger, voucher_type`
+        });
+      }
+      if (!allowed.includes(v.voucher_type.toLowerCase())) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid voucher_type "${v.voucher_type}" for id ${v.id}. Allowed: payment, receipt, contra`
+        });
+      }
+    }
+
+    const updatedIds = [];
+
+    for (const v of vouchers) {
+      const isContra = v.voucher_type.toLowerCase() === "contra";
+
+      const result = await db.query(
+        `UPDATE app_test.contra_vouchers
+         SET
+           party_ledger  = $1,
+           voucher_type  = $2,
+           transfer_bank = $3,
+           status        = 'PENDING'
+         WHERE id = $4
+           AND status IN ('WAITING_LEDGER', 'FAILED')
+         RETURNING id`,
+        [v.party_ledger, v.voucher_type.toLowerCase(),
+         isContra ? v.party_ledger : null, v.id]
+      );
+
+      if (result.rows.length > 0) updatedIds.push(result.rows[0].id);
+    }
+
+    if (updatedIds.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No matching WAITING_LEDGER or FAILED vouchers found"
+      });
+    }
+
+    for (const voucherId of updatedIds) {
+      await voucherQueue.add(
+        "pushVoucher",
+        { voucherId },
+        { ...VOUCHER_JOB_OPTIONS, jobId: getVoucherJobId(voucherId) }
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `${updatedIds.length} vouchers assigned and queued for Tally`,
+      queued: updatedIds
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   SINGLE ASSIGN party_ledger + voucher_type
+   PUT /api/v1/voucher/:id/party-ledger
+=========================== */
+
+router.put("/:id/party-ledger", async (req, res) => {
+  try {
+    const { party_ledger, voucher_type } = req.body;
+    const voucherId = Number(req.params.id);
+
+    if (!party_ledger || !voucher_type) {
+      return res.status(400).json({
+        success: false,
+        message: "party_ledger and voucher_type are required"
+      });
+    }
+
+    const allowed = ["payment", "receipt", "contra"];
+    if (!allowed.includes(voucher_type.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid voucher_type. Allowed: payment, receipt, contra"
+      });
+    }
+
+    const isContra = voucher_type.toLowerCase() === "contra";
+
+    const result = await db.query(
+      `UPDATE app_test.contra_vouchers
+       SET
+         party_ledger  = $1,
+         voucher_type  = $2,
+         transfer_bank = $3,
+         status        = 'PENDING'
+       WHERE id = $4
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+       RETURNING *`,
+      [party_ledger, voucher_type.toLowerCase(),
+       isContra ? party_ledger : null, voucherId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Voucher not found or already processed"
+      });
+    }
+
+    await voucherQueue.add(
+      "pushVoucher",
+      { voucherId },
+      { ...VOUCHER_JOB_OPTIONS, jobId: getVoucherJobId(voucherId) }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Assigned and queued for Tally",
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   GET SINGLE VOUCHER
+   GET /api/v1/voucher/:id
+=========================== */
+
+router.get("/:id", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT * FROM app_test.contra_vouchers WHERE id = $1`,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Voucher not found" });
+    }
+
+    return res.status(200).json({ success: true, data: result.rows[0] });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+export default router;

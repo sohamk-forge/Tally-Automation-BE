@@ -39,7 +39,7 @@ import "./workers/bulkStockItem.worker.js";
 
 import "./workers/bulkSales.worker.js";
 
-
+import "./workers/pushVoucher.worker.js";
 
 /* =================================
 
@@ -134,6 +134,9 @@ import bulkSalesUploadRoutes
 
  import connectorRoutes
 from "./api/connector.routes.js";
+
+import voucherRoutes
+ from "./api/voucher.routes.js";
 
 
 /* =================================
@@ -378,6 +381,14 @@ app.use(
 app.use(
   "/api/connector",
   connectorRoutes
+);
+
+/* =================================
+   VOUCHER APIs
+================================= */
+app.use(
+  "/api/v1/voucher",
+  voucherRoutes
 );
 /* =================================
    DEFAULT API
