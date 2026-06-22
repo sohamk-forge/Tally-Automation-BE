@@ -139,7 +139,7 @@ console.log("GST CALCULATION:", {
           invoice_data.customer_name || "",
           invoice_data.gstin || "",
           invoice_data.invoice_date || "",
-          invoice_data.godown_name || null,
+          invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData,
           existingInvoice.rows[0].id
         ]
@@ -183,7 +183,8 @@ console.log("GST CALCULATION:", {
           invoice_data.gstin || "",
           invoice_data.invoice_no || "",
           invoice_data.invoice_date || "",
-          invoice_data.godown_name || null,
+         invoice_data.godown_name ?? "Main Location",
+
           cleanInvoiceData
         ]
       );

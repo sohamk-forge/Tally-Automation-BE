@@ -201,17 +201,18 @@ if (!invoices[invoiceNo]) {
 
     narration: "",
 
-    godown_name: (() => {
-      const godown = getValue(row, [
-        "Godown Name",
-        "Godown",
-        "Location"
-      ]);
+   // CHANGE TO:
+godown_name: (() => {
+  const godown = getValue(row, [
+    "Godown Name",
+    "Godown",
+    "Location"
+  ]);
 
-      return godown && String(godown).trim()
-        ? String(godown).trim()
-        : null;
-    })(),
+  return godown && String(godown).trim()
+    ? String(godown).trim()
+    : "Main Location";  // ✅ ONLY THIS CHANGED
+})(),
 
     taxable_amount: 0,
     grand_total: 0,

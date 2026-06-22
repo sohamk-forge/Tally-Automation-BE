@@ -3565,4 +3565,57 @@ console.log({
     }
 
   });
+
+router.get("/job-status", async (req, res) => {
+  try {
+    const { companyId } = req.query;
+
+    if (!companyId) {
+      return res.status(400).json({
+        status: "error",
+        message: "companyId is required"
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+          jl.id,
+          jl.job_type,
+          jl.status,
+          jl.created_at,
+          jl.started_at,
+          jl.completed_at,
+          jl.error_message,
+          c.id as company_id,
+          c.name as company_name
+      FROM app_test.job_logs jl
+      JOIN app_test.companies c
+        ON c.name = jl.payload->>'company'
+      WHERE c.id = $1
+      ORDER BY jl.id DESC
+      LIMIT 1
+      `,
+      [companyId]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        status: "error",
+        message: "No sync job found"
+      });
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
   export default router;

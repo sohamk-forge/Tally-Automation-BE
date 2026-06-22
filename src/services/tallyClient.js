@@ -15,17 +15,16 @@ fs.writeFileSync("lastVoucher.xml", xml);
 console.log("XML SAVED");
 
     const res = await axios.post(
-      TALLY_URL,
-      xml,
-      {
-        headers: {
-          "Content-Type": "text/xml; charset=utf-8",
-          "Connection": "close"
-        },
-        timeout: 120000,
-        validateStatus: () => true
-      }
-    );
+  TALLY_URL,
+  { xml },
+  {
+    headers: {
+      "Content-Type": "application/json"
+    },
+    timeout: 120000,
+    validateStatus: () => true
+  }
+);
 
     console.log("=================================");
     console.log("📥 RAW XML RESPONSE");
