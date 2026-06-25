@@ -133,8 +133,10 @@ from "./api/godown.routes.js";
 import bulkSalesUploadRoutes
  from "./api/bulkSalesUpload.routes.js";
 
-//  import connectorRoutes
-// from "./api/connector.routes.js";
+ import connectorRoutes
+from "./api/connector.routes.js";
+
+import connectorAuthRoutes from "./api/connectorAuth.routes.js";
 
 
 /* =================================
@@ -371,6 +373,11 @@ app.use(
 app.use(
   "/api/connector",
   connectorRoutes
+);
+
+app.use(
+  "/api/connector-auth",
+  connectorAuthRoutes
 );
 /* =================================
    DEFAULT API
