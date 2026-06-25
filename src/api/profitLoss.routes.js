@@ -1,12 +1,15 @@
 import express from "express";
-
 import pool from "../db/index.js";
 
-const router =
-  express.Router();
+const router = express.Router();
 
 /* ===================================================
    PROFIT LOSS DB API
+===================================================
+
+API:
+GET /api/profit-loss?company_id=1
+
 =================================================== */
 
 router.get(
@@ -21,21 +24,21 @@ router.get(
          QUERY PARAMS
       ========================================= */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
       /* =========================================
          VALIDATION
       ========================================= */
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            "company query parameter required"
+            "company_id query parameter required"
 
         });
 
@@ -53,6 +56,8 @@ router.get(
           SELECT
 
             id,
+
+            company_id,
 
             company_name,
 
@@ -76,17 +81,16 @@ router.get(
 
             updated_at
 
-          FROM app.profit_loss
+          FROM app_test.profit_loss
 
-          WHERE LOWER(company_name)
-          = LOWER($1)
+          WHERE company_id = $1
 
           ORDER BY id DESC
 
           LIMIT 1
           `,
 
-          [company]
+          [companyId]
 
         );
 
@@ -105,7 +109,8 @@ router.get(
           message:
             "No profit loss data found",
 
-          company,
+          company_id:
+            companyId,
 
           data: []
 
@@ -130,12 +135,16 @@ router.get(
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         dashboard: {
 
           id:
             Number(row.id),
+
+          company_id:
+            row.company_id,
 
           company_name:
             row.company_name,
@@ -147,37 +156,31 @@ router.get(
             row.to_date,
 
           total_sales:
-
             Number(
               row.total_sales
             ),
 
           total_purchase:
-
             Number(
               row.total_purchase
             ),
 
           stock_value:
-
             Number(
               row.stock_value
             ),
 
           gross_profit:
-
             Number(
               row.gross_profit
             ),
 
           net_profit:
-
             Number(
               row.net_profit
             ),
 
           profit_margin:
-
             Number(
               row.profit_margin
             ),

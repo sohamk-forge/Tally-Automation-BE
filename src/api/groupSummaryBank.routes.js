@@ -1,5 +1,4 @@
 import express from "express";
-
 import pool from "../db/index.js";
 
 const router = express.Router();
@@ -9,7 +8,7 @@ const router = express.Router();
 ===================================================
 
 API:
-GET /api/group-summary-bank
+GET /api/group-summary-bank?company_id=1
 
 =================================================== */
 
@@ -22,21 +21,73 @@ router.get(
     try {
 
       /* =========================================
+         QUERY PARAM
+      ========================================= */
+
+      const companyId =
+        req.query.company_id;
+
+      /* =========================================
+         VALIDATION
+      ========================================= */
+
+      if (!companyId) {
+
+        return res.status(400).json({
+
+          status: "error",
+
+          message:
+            "company_id query parameter required"
+
+        });
+
+      }
+
+      /* =========================================
          DATABASE QUERY
       ========================================= */
 
-      const result =
+      const result = await pool.query(
 
-        await pool.query(
+        `
+        SELECT *
 
-          `
-          SELECT *
+        FROM app_test.bank_accounts
 
-          FROM app.bank_accounts
+        WHERE company_id = $1
 
-          ORDER BY ledger_name ASC
-          `
-        );
+        ORDER BY ledger_name ASC
+        `,
+
+        [companyId]
+
+      );
+
+      /* =========================================
+         NO DATA
+      ========================================= */
+
+      if (!result.rows.length) {
+
+        return res.status(404).json({
+
+          status: "error",
+
+          source: "database",
+
+          company_id: companyId,
+
+          message:
+            "No bank accounts found",
+
+          total: 0,
+
+          data: []
+
+        });
+
+      }
 
       /* =========================================
          RESPONSE
@@ -47,6 +98,8 @@ router.get(
         status: "success",
 
         source: "database",
+
+        company_id: companyId,
 
         total:
           result.rows.length,

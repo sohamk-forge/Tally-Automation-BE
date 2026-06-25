@@ -124,224 +124,190 @@
     FULL LEDGER DETAILS XML
   ================================================== */
 
-  export const getLedgerDetailsXML = (
-    company,
-    ledgerName
-  ) => {
+export const getLedgerDetailsXML = (
+  company,
+  ledgerName
+) => {
 
-    return `
-  <ENVELOPE>
+  return `
+<ENVELOPE>
 
-    <HEADER>
+  <HEADER>
 
-      <VERSION>1</VERSION>
+    <VERSION>1</VERSION>
 
-      <TALLYREQUEST>Export</TALLYREQUEST>
+    <TALLYREQUEST>Export</TALLYREQUEST>
 
-      <TYPE>Object</TYPE>
+    <TYPE>Object</TYPE>
 
-      <SUBTYPE>Ledger</SUBTYPE>
+    <SUBTYPE>Ledger</SUBTYPE>
 
-      <ID TYPE="Name">
-        ${ledgerName}
-      </ID>
+    <ID TYPE="Name">${ledgerName}</ID>
 
-    </HEADER>
+  </HEADER>
 
-    <BODY>
+  <BODY>
 
-      <DESC>
+    <DESC>
 
-        <STATICVARIABLES>
+      <STATICVARIABLES>
 
-          <SVCURRENTCOMPANY>
-            ${company}
-          </SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
 
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
 
-        </STATICVARIABLES>
+      </STATICVARIABLES>
 
-        <FETCHLIST>
+      <FETCHLIST>
 
-          <FETCH>NAME</FETCH>
+        <FETCH>NAME</FETCH>
 
-          <FETCH>PARENT</FETCH>
+     <FETCH>PARTYGSTIN</FETCH>
 
-          <FETCH>ADDRESS</FETCH>
+<FETCH>LEDGSTREGDETAILS.*</FETCH>
 
-          <FETCH>MAILINGNAME</FETCH>
+<FETCH>GUID</FETCH>
 
-          <FETCH>STATENAME</FETCH>
+<FETCH>MASTERID</FETCH>
 
-  <FETCH>STATE</FETCH>
+<FETCH>ALTERID</FETCH>
 
-  <FETCH>LEDSTATENAME</FETCH>
+      </FETCHLIST>
 
-          <FETCH>COUNTRYNAME</FETCH>
+    </DESC>
 
-          <FETCH>PINCODE</FETCH>
+  </BODY>
 
-        <FETCH>PHONE</FETCH>
+</ENVELOPE>
+`;
 
-  <FETCH>MOBILE</FETCH>
+};
 
-  <FETCH>EMAIL</FETCH>
 
-  <FETCH>LEDGERPHONE</FETCH>
+export const getGroupSummaryCRXML = (company) => {
 
-  <FETCH>LEDGERMOBILE</FETCH>
+  return `
 
-  <FETCH>LEDGEREMAIL</FETCH>
+<ENVELOPE>
 
-          <FETCH>CONTACTPERSON</FETCH>
+  <HEADER>
 
-          <FETCH>PARTYGSTIN</FETCH>
+    <VERSION>1</VERSION>
 
-          <FETCH>GSTREGISTRATIONTYPE</FETCH>
+    <TALLYREQUEST>Export</TALLYREQUEST>
 
-          <FETCH>INCOMETAXNUMBER</FETCH>
+    <TYPE>Collection</TYPE>
 
-          <FETCH>OPENINGBALANCE</FETCH>
+    <ID>GroupSummaryCR</ID>
 
-          <FETCH>CLOSINGBALANCE</FETCH>
+  </HEADER>
 
-          <FETCH>CREDITPERIOD</FETCH>
+  <BODY>
 
-          <FETCH>ISBILLWISEON</FETCH>
+    <DESC>
 
-          <FETCH>ISREVENUE</FETCH>
+      <STATICVARIABLES>
 
-          <FETCH>ISDEEMEDPOSITIVE</FETCH>
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
 
-        </FETCHLIST>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 
-      </DESC>
+      </STATICVARIABLES>
 
-    </BODY>
+      <TDL>
 
-  </ENVELOPE>
-  `;
+        <TDLMESSAGE>
 
-  };
+        <SYSTEM TYPE="Formulae" NAME="CreditorFilter">
+    $Parent = "Sundry Creditors"
+</SYSTEM>
 
+<COLLECTION NAME="GroupSummaryCR">
 
-  export const getGroupSummaryCRXML = (
-    company
-  ) => {
+    <TYPE>Ledger</TYPE>
 
-    return `
-  <ENVELOPE>
+    <FILTERS>CreditorFilter</FILTERS>
 
-    <HEADER>
+    <FETCH>
 
-      <VERSION>1</VERSION>
+              NAME,
+              ALIAS,
+              PARENT,
 
-      <TALLYREQUEST>Export</TALLYREQUEST>
+              MAILINGNAME,
+              ADDRESS,
 
-      <TYPE>Collection</TYPE>
+              COUNTRYNAME,
+              STATENAME,
+              STATE,
+              LEDSTATENAME,
+              LEDCOUNTRYNAME,
 
-      <ID>GroupSummaryCR</ID>
+              PINCODE,
 
-    </HEADER>
+              PHONE,
+              PHONENUMBER,
+              LEDGERPHONE,
 
-    <BODY>
+              MOBILE,
+              MOBILENUMBER,
+              LEDGERMOBILE,
 
-      <DESC>
+              FAX,
 
-        <STATICVARIABLES>
+              EMAIL,
+              LEDGEREMAIL,
 
-          <SVCURRENTCOMPANY>
-            ${company}
-          </SVCURRENTCOMPANY>
+              CONTACTPERSON,
+              CONTACTDETAILS.*,
 
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
+              PARTYGSTIN,
+              GSTREGISTRATIONTYPE,
+              PARTYREGISTRATIONTYPE,
 
-        </STATICVARIABLES>
+              GSTIN,
+              PLACEOFSUPPLY,
 
-        <TDL>
+              LEDGSTREGDETAILS.*,
 
-          <TDLMESSAGE>
+              INCOMETAXNUMBER,
 
-            <COLLECTION NAME="GroupSummaryCR">
+              BANKNAME,
+              BANKACCOUNTNUMBER,
+              BANKBRANCHNAME,
+              BANKIFSCODE,
 
-              <TYPE>Ledger</TYPE>
+              CREDITPERIOD,
+              CREDITLIMIT,
 
-              <CHILDOF>
-                Sundry Creditors
-              </CHILDOF>
+              OPENINGBALANCE,
+              CLOSINGBALANCE,
 
-              <FETCH>
+              GUID,
+              MASTERID,
+              ALTERID
 
-                NAME,
+            </FETCH>
 
-                ALIAS,
+          </COLLECTION>
 
-                PARENT,
+        </TDLMESSAGE>
 
-                ADDRESS,
+      </TDL>
 
-                MAILINGNAME,
+    </DESC>
 
-                STATENAME,
+  </BODY>
 
-                STATE,
+</ENVELOPE>
 
-                LEDSTATENAME,
+`;
 
-                COUNTRYNAME,
-
-                LEDCOUNTRYNAME,
-
-                PINCODE,
-
-                PHONE,
-
-                LEDGERPHONE,
-
-                MOBILE,
-
-                LEDGERMOBILE,
-
-                FAX,
-
-                EMAIL,
-
-                LEDGEREMAIL,
-
-                CONTACTPERSON,
-
-                PARTYGSTIN,
-
-                GSTREGISTRATIONTYPE,
-
-                INCOMETAXNUMBER,
-
-                OPENINGBALANCE,
-
-                CLOSINGBALANCE
-
-              </FETCH>
-
-            </COLLECTION>
-
-          </TDLMESSAGE>
-
-        </TDL>
-
-      </DESC>
-
-    </BODY>
-
-  </ENVELOPE>
-  `;
-
-  };
-
+};
 
   export const getGroupSummaryDRXML = (
     company
@@ -490,44 +456,75 @@
                         <TYPE>Ledger</TYPE>
 
                         <FILTERS>BankFilter</FILTERS>
+<FETCH>
 
-                        <FETCH>
-                            NAME,
-                            PARENT,
-                            MAILINGNAME,
-                            ADDRESS,
-                            STATENAME,
-                            LEDSTATENAME,
-                            STATE,
-                            COUNTRYNAME,
-                            PINCODE,
-                            GSTIN,
-                            PARTYGSTIN,
-                            GSTREGISTRATIONTYPE,
-                            ISGSTAPPLICABLE,
-                            LEDGERGSTREGDETAILS.LIST,
-                            ACHOLDERNAME,
-                            BANKACNO,
-                            BANKACCOUNTNO,
-                            BANKACCOUNTNUMBER,
-                            ACNO,
-                            ACCOUNTNO,
-                            ACCOUNTNUMBER,
-                            BANKACNUMBER,
-                            BANKACCOUNT,
-                            IFSCODE,
-                            IFSCCODE,
-                            BANKNAME,
-                            BANKBRANCHNAME,
-                            BRANCHNAME,
-                            SWIFTCODE,
-                            BankAccHolderName,
-                            BankDetails,
-                            BankIBAN,
-                            OpeningBalance,
-                            ClosingBalance,
-                            ODLimit
-                        </FETCH>
+    NAME,
+    PARENT,
+
+    MAILINGNAME,
+    ADDRESS,
+
+    STATENAME,
+    LEDSTATENAME,
+    STATE,
+
+    COUNTRYNAME,
+
+    PINCODE,
+
+    GSTIN,
+    PARTYGSTIN,
+    GSTREGISTRATIONTYPE,
+    ISGSTAPPLICABLE,
+    LEDGERGSTREGDETAILS.LIST,
+
+    ACHOLDERNAME,
+    BANKACNO,
+    BANKACCOUNTNO,
+    BANKACCOUNTNUMBER,
+    ACNO,
+    ACCOUNTNO,
+    ACCOUNTNUMBER,
+    BANKACNUMBER,
+    BANKACCOUNT,
+
+    IFSCODE,
+    IFSCCODE,
+
+    BANKNAME,
+    BANKBRANCHNAME,
+    BRANCHNAME,
+
+    SWIFTCODE,
+
+    BankAccHolderName,
+    BankDetails,
+    BankIBAN,
+
+    PHONE,
+    PHONENUMBER,
+    LEDGERPHONE,
+
+    MOBILE,
+    MOBILENUMBER,
+    LEDGERMOBILE,
+
+    EMAIL,
+    LEDGEREMAIL,
+
+    CONTACTPERSON,
+    CONTACTDETAILS.*,
+
+    OPENINGBALANCE,
+    CLOSINGBALANCE,
+
+    ODLIMIT,
+
+    GUID,
+    MASTERID,
+    ALTERID
+
+</FETCH>
 
                     </COLLECTION>
 
@@ -1100,6 +1097,315 @@ export const getStockGroupSummaryXML = (
 
 </ENVELOPE>
 
+`;
+
+};
+
+/* ===================================================
+   SIMPLE UNITS XML
+=================================================== */
+
+export const getUnitsXML = (company) => {
+
+  return `
+
+<ENVELOPE>
+
+    <HEADER>
+
+        <VERSION>1</VERSION>
+
+        <TALLYREQUEST>
+            Export
+        </TALLYREQUEST>
+
+        <TYPE>
+            Collection
+        </TYPE>
+
+        <ID>
+            TSPLSimpleUnits
+        </ID>
+
+    </HEADER>
+
+    <BODY>
+
+        <DESC>
+
+            <STATICVARIABLES>
+
+                <SVEXPORTFORMAT>
+                    XML
+                </SVEXPORTFORMAT>
+
+                <SVCURRENTCOMPANY>
+                    ${company}
+                </SVCURRENTCOMPANY>
+
+            </STATICVARIABLES>
+
+            <TDL>
+
+                <TDLMESSAGE>
+
+                    <COLLECTION
+                        NAME="TSPLSimpleUnits"
+                        ISMODIFY="No"
+                        ISFIXED="No"
+                        ISINITIALIZE="No"
+                        ISOPTION="No"
+                        ISINTERNAL="No"
+                    >
+
+                        <TYPE>
+                            Unit
+                        </TYPE>
+
+                        <NATIVEMETHOD>
+                            Name,
+                            OriginalName,
+                            IsSimpleUnit
+                        </NATIVEMETHOD>
+
+                        <FILTERS>
+                            TSPLSimpleUnitsOnly
+                        </FILTERS>
+
+                    </COLLECTION>
+
+                    <SYSTEM
+                        TYPE="Formulae"
+                        NAME="TSPLSimpleUnitsOnly"
+                    >
+
+                        $IsSimpleUnit
+
+                    </SYSTEM>
+
+                </TDLMESSAGE>
+
+            </TDL>
+
+        </DESC>
+
+    </BODY>
+
+</ENVELOPE>
+
+  `;
+
+};
+
+
+export const getAllLedgersXML = (company) => {
+
+  return `
+<ENVELOPE>
+
+  <HEADER>
+
+    <VERSION>1</VERSION>
+
+    <TALLYREQUEST>Export</TALLYREQUEST>
+
+    <TYPE>Collection</TYPE>
+
+    <ID>AllLedgers</ID>
+
+  </HEADER>
+
+  <BODY>
+
+    <DESC>
+
+      <STATICVARIABLES>
+
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+
+      </STATICVARIABLES>
+
+      <TDL>
+
+        <TDLMESSAGE>
+
+          <COLLECTION NAME="AllLedgers">
+
+            <TYPE>Ledger</TYPE>
+
+            <FETCH>
+
+              NAME,
+              ALIAS,
+              PARENT,
+
+              MAILINGNAME,
+              ADDRESS,
+
+              COUNTRYNAME,
+              STATENAME,
+              STATE,
+              LEDSTATENAME,
+              LEDCOUNTRYNAME,
+
+              PINCODE,
+
+              PHONE,
+              PHONENUMBER,
+              LEDGERPHONE,
+
+              MOBILE,
+              MOBILENUMBER,
+              LEDGERMOBILE,
+
+              FAX,
+
+              EMAIL,
+              LEDGEREMAIL,
+
+              CONTACTPERSON,
+              CONTACTDETAILS.*,
+
+              PARTYGSTIN,
+              GSTREGISTRATIONTYPE,
+              PARTYREGISTRATIONTYPE,
+
+              GSTIN,
+              PLACEOFSUPPLY,
+
+              LEDGSTREGDETAILS.*,
+
+              INCOMETAXNUMBER,
+
+              BANKNAME,
+              BANKACCOUNTNUMBER,
+              BANKBRANCHNAME,
+              BANKIFSCODE,
+
+              CREDITPERIOD,
+              CREDITLIMIT,
+
+              OPENINGBALANCE,
+              CLOSINGBALANCE,
+
+              GUID,
+              MASTERID,
+              ALTERID
+
+            </FETCH>
+
+          </COLLECTION>
+
+        </TDLMESSAGE>
+
+      </TDL>
+
+    </DESC>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+};
+
+
+
+export const getPurchaseSalesLedgersXML = (company) => `
+<ENVELOPE>
+    <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>PurchaseSalesLedgers</ID>
+    </HEADER>
+
+    <BODY>
+        <DESC>
+
+            <STATICVARIABLES>
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+
+            <TDL>
+                <TDLMESSAGE>
+
+                    <COLLECTION
+                        NAME="PurchaseSalesLedgers"
+                        ISMODIFY="No"
+                    >
+                        <TYPE>Ledger</TYPE>
+
+                        <FILTER>
+                            IsPurchaseOrSales
+                        </FILTER>
+
+                        <FETCH>
+                            NAME,
+                            PARENT,
+                            MASTERID,
+                            ALTERID,
+                            GUID
+                        </FETCH>
+
+                    </COLLECTION>
+
+                    <SYSTEM
+                        TYPE="Formulae"
+                        NAME="IsPurchaseOrSales"
+                    >
+                        $Parent = "Purchase Accounts"
+                        OR
+                        $Parent = "Sales Accounts"
+                    </SYSTEM>
+
+                </TDLMESSAGE>
+            </TDL>
+
+        </DESC>
+    </BODY>
+</ENVELOPE>
+`;
+
+export const getGodownsXML = (company) => {
+
+  return `
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export Data</TALLYREQUEST>
+  </HEADER>
+
+  <BODY>
+
+    <EXPORTDATA>
+
+      <REQUESTDESC>
+
+        <REPORTNAME>
+          Godown Summary
+        </REPORTNAME>
+
+        <STATICVARIABLES>
+
+          <SVEXPORTFORMAT>
+            $$SysName:XML
+          </SVEXPORTFORMAT>
+
+          <SVCURRENTCOMPANY>
+            ${company}
+          </SVCURRENTCOMPANY>
+
+        </STATICVARIABLES>
+
+      </REQUESTDESC>
+
+    </EXPORTDATA>
+
+  </BODY>
+
+</ENVELOPE>
 `;
 
 };

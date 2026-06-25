@@ -1,5 +1,4 @@
 import express from "express";
-
 import pool from "../db/index.js";
 
 const router = express.Router();
@@ -9,7 +8,7 @@ const router = express.Router();
 ===================================================
 
 API:
-GET /api/parent-groups
+GET /api/parent-groups?company_id=1
 
 =================================================== */
 
@@ -24,21 +23,21 @@ router.get(
          QUERY PARAMS
       ========================================= */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
       /* =========================================
          VALIDATION
       ========================================= */
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            "company required"
+            "company_id required"
 
         });
 
@@ -52,16 +51,17 @@ router.get(
         await pool.query(
 
           `
-          SELECT group_name
+          SELECT
+            group_name
 
-          FROM app.parent_groups
+          FROM app_test.parent_groups
 
-          WHERE company_name = $1
+          WHERE company_id = $1
 
           ORDER BY group_name ASC
           `,
 
-          [company]
+          [companyId]
 
         );
 
@@ -87,7 +87,8 @@ router.get(
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         total:
           parentGroups.length,

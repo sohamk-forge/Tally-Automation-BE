@@ -9,12 +9,13 @@ const pool = new Pool({
   user: process.env.DB_USER || "postgres",
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || "tally_dashboard",
-  max: 5, // limit connections (faster)
+  max: 20,                          // was 5 — too low for bulk workloads
+  min: 2,                           // keep warm connections ready
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 15000,   // was 2000 — too tight under load
+  allowExitOnIdle: false
 });
 
-// Test connection once
 pool.connect()
   .then(client => {
     console.log("✅ PostgreSQL Connected Successfully");
@@ -22,6 +23,7 @@ pool.connect()
   })
   .catch(err => {
     console.error("❌ DB Connection Error:", err.message);
+    process.exit(1); // fail fast on startup if DB is unreachable
   });
 
 export default pool;

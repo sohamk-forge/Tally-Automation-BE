@@ -1,13 +1,15 @@
 import express from "express";
+import pool from "../db/index.js";
 
-import pool
-from "../db/index.js";
-
-const router =
-  express.Router();
+const router = express.Router();
 
 /* ===================================================
    PAYABLE + RECEIVABLE DB API
+===================================================
+
+API:
+GET /api/payable-debtors?company_id=1
+
 =================================================== */
 
 router.get(
@@ -22,21 +24,21 @@ router.get(
          QUERY PARAMS
       ========================================= */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
       /* =========================================
          VALIDATION
       ========================================= */
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            "company query parameter required"
+            "company_id query parameter required"
 
         });
 
@@ -46,27 +48,26 @@ router.get(
          DATABASE QUERY
       ========================================= */
 
-      const result =
+      const result = await pool.query(
 
-        await pool.query(
+        `
+        SELECT
 
-          `
-          SELECT
+          company_id,
+          company_name,
+          group_name,
+          parent_group,
+          opening_balance,
+          closing_balance
 
-            company_name,
-            group_name,
-            parent_group,
-            opening_balance,
-            closing_balance
+        FROM app_test.group_balances
 
-          FROM app.group_balances
+        WHERE company_id = $1
+        `,
 
-          WHERE company_name = $1
-          `,
+        [companyId]
 
-          [company]
-
-        );
+      );
 
       /* =========================================
          DEBTORS
@@ -108,7 +109,8 @@ router.get(
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         data: {
 

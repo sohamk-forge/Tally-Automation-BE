@@ -1,17 +1,16 @@
+// =========================================
+// src/api/pushLedger.routes.js
+// =========================================
+
 import express from "express";
 
-import pool
-from "../db/index.js";
+import pool from "../db/index.js";
 
-import { sendToTally }
-from "../services/tallyClient.js";
+import { ledgerQueue }
+from "../queues/ledger.queue.js";
 
-import {
-  createLedgerXML
-}
-from "../services/pushXmlBuilder.js";
-
-const router = express.Router();
+const router =
+  express.Router();
 
 /* =====================================
    PUSH LEDGER API
@@ -23,15 +22,10 @@ router.post(
 
   async (req, res) => {
 
-    let tallyResponse = null;
-
     try {
 
-      /* ==============================
-         REQUEST BODY
-      ============================== */
-
-      const data = req.body;
+      const data =
+        req.body;
 
       /* ==============================
          VALIDATION
@@ -53,269 +47,233 @@ router.post(
         });
 
       }
-const companyResult =
-
-  await pool.query(
-
-    `
-    SELECT id
-
-    FROM app.companies
-
-    WHERE name = $1
-    `,
-
-    [
-
-      data.company
-
-    ]
-
-  );
-
-const companyId =
-
-  companyResult.rows[0]?.id || null;
-      /* ==============================
-         INSERT INTO PUSH_LEDGER
-      ============================== */
-
-      await pool.query(
-
-        `
-      INSERT INTO app.push_ledger (
-
-  company_id,
-  company_name,
-          ledger_name,
-          parent_name,
-          opening_balance,
-          bill_wise,
-          address,
-          pincode,
-          state,
-          country,
-          contact_person,
-          phone,
-          mobile,
-          email,
-          website,
-          pan,
-          gstin,
-          gst_registration_type,
-          status,
-          created_at
-
-        )
-
-     VALUES (
-
-  $1, $2, $3, $4, $5,
-  $6, $7, $8, $9, $10,
-  $11, $12, $13, $14, $15,
-  $16, $17, $18, $19, NOW()
-
-)
-        `,
-
-[
-
-  companyId,
-  data.company,
-  data.ledger_name,
-  data.parent,
-  data.opening_balance || 0,
-  data.bill_wise || "No",
-  data.address || "",
-  data.pincode || "",
-  data.state || "",
-  data.country || "India",
-  data.contact_person || "",
-  data.phone || "",
-  data.mobile || "",
-  data.email || "",
-  data.website || "",
-  data.pan || "",
-  data.gstin || "",
-  data.gst_registration_type || "",
-  "pending"
-
-]
-
-      );
 
       /* ==============================
-         XML
+         COMPANY
       ============================== */
 
-      const xml =
-        createLedgerXML(data);
-
-      /* ==============================
-         SEND TO TALLY
-      ============================== */
-
-      tallyResponse =
-        await sendToTally(xml);
-
-      /* ==============================
-         CREATED CHECK
-      ============================== */
-
-      const createdMatch =
-        tallyResponse.match(
-          /<CREATED>(\d+)<\/CREATED>/
-        );
-
-      const created =
-        createdMatch
-          ? Number(createdMatch[1])
-          : 0;
-
-      /* ==============================
-         ALTERED CHECK
-      ============================== */
-
-      const alteredMatch =
-        tallyResponse.match(
-          /<ALTERED>(\d+)<\/ALTERED>/
-        );
-
-      const altered =
-        alteredMatch
-          ? Number(alteredMatch[1])
-          : 0;
-
-      /* ==============================
-         LINE ERROR
-      ============================== */
-
-      const lineErrorMatch =
-        tallyResponse.match(
-          /<LINEERROR>(.*?)<\/LINEERROR>/
-        );
-
-      const lineError =
-        lineErrorMatch
-          ? lineErrorMatch[1]
-          : null;
-
-      /* ==============================
-         FAILURE
-      ============================== */
-
-      if (
-        created !== 1 &&
-        altered !== 1
-      ) {
-
+      const companyResult =
         await pool.query(
 
           `
-          UPDATE app.push_ledger
+          SELECT id
+          FROM app_test.companies
+          WHERE TRIM(name)=TRIM($1)
+          LIMIT 1
+          `,
 
-          SET
+          [data.company]
 
-            status = 'failed',
-            error_message = $1,
-            tally_response = $2,
-            sync_at = NOW(),
-            updated_at = NOW()
+        );
 
-          WHERE company_name = $3
-          AND ledger_name = $4
+      const companyId =
+        companyResult.rows[0]?.id || null;
+
+      /* ==============================
+         DUPLICATE CHECK
+      ============================== */
+
+      const duplicateResult =
+        await pool.query(
+
+          `
+          SELECT id
+          FROM app_test.push_ledger
+          WHERE
+            LOWER(TRIM(company_name))
+              = LOWER(TRIM($1))
+          AND
+            LOWER(TRIM(ledger_name))
+              = LOWER(TRIM($2))
+          AND
+            status IN
+            (
+              'pending',
+              'processing',
+              'success'
+            )
+          LIMIT 1
           `,
 
           [
-
-            lineError ||
-            "Ledger creation failed",
-
-            tallyResponse,
-
             data.company,
-
             data.ledger_name
-
           ]
 
         );
+
+      if (
+        duplicateResult.rows.length
+      ) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            lineError ||
-            "Ledger creation failed"
+            "Ledger already queued or synced"
 
         });
 
       }
 
       /* ==============================
-         SUCCESS UPDATE
+         INSERT
       ============================== */
 
-      await pool.query(
+      const insertResult =
+        await pool.query(
 
-        `
-        UPDATE app.push_ledger
+          `
+          INSERT INTO app_test.push_ledger
+          (
 
-        SET
+            company_id,
+            company_name,
+            ledger_name,
+            parent_name,
+            opening_balance,
+            bill_wise,
+            address,
+            pincode,
+            state,
+            country,
+            contact_person,
+            phone,
+            mobile,
+            email,
+            website,
+            pan,
+            gstin,
+            gst_registration_type,
+            status,
+            created_at,
+            updated_at
 
-         status = 'success',
-          tally_response = $1,
-          sync_at = NOW(),
-          updated_at = NOW()
+          )
 
-        WHERE company_name = $2
-        AND ledger_name = $3
-        `,
+          VALUES
+          (
 
-        [
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,
+            $16,$17,$18,
+            'pending',
+            NOW(),
+            NOW()
 
-          tallyResponse,
+          )
 
-          data.company,
+          RETURNING id
+          `,
 
-          data.ledger_name
+          [
 
-        ]
+            companyId,
+
+            data.company?.trim(),
+
+            data.ledger_name?.trim(),
+
+            data.parent?.trim(),
+
+            Number(
+              data.opening_balance || 0
+            ),
+
+            data.bill_wise || "No",
+
+            data.address || "",
+
+            data.pincode || "",
+
+            data.state || "",
+
+            data.country || "India",
+
+            data.contact_person || "",
+
+            data.phone || "",
+
+            data.mobile || "",
+
+            data.email || "",
+
+            data.website || "",
+
+            data.pan || "",
+
+            data.gstin || "",
+
+            data.gst_registration_type || ""
+
+          ]
+
+        );
+
+      const ledgerId =
+        insertResult.rows[0].id;
+
+      /* ==============================
+         ADD TO BULLMQ
+      ============================== */
+
+      const job =
+        await ledgerQueue.add(
+
+          "push-ledger",
+
+          {
+            ledgerId
+          },
+
+          {
+
+            attempts: 5,
+
+            backoff: {
+
+              type:
+                "exponential",
+
+              delay:
+                5000
+
+            },
+
+            removeOnComplete:
+              100,
+
+            removeOnFail:
+              100
+
+          }
+
+        );
+
+      console.log(
+
+        `📥 QUEUED LEDGER ${ledgerId}`
 
       );
 
       /* ==============================
-         SUCCESS RESPONSE
+         RESPONSE
       ============================== */
 
       return res.status(200).json({
 
-        status: "success",
+        status:
+          "success",
 
         message:
-          altered === 1
+          "Ledger queued successfully",
 
-            ? "Ledger already exists and altered successfully"
+        ledgerId,
 
-            : "Ledger pushed successfully",
-
-        company:
-          data.company,
-
-        ledger_name:
-          data.ledger_name,
-
-        parent:
-          data.parent,
-
-        summary: {
-
-          created,
-
-          altered
-
-        }
+        jobId:
+          job.id
 
       });
 
@@ -329,56 +287,10 @@ const companyId =
 
       );
 
-      try {
-
-        const data = req.body;
-
-        await pool.query(
-
-          `
-          UPDATE app.push_ledger
-
-          SET
-
-            status = 'failed',
-            error_message = $1,
-            tally_response = $2,
-            sync_at = NOW(),
-            updated_at = NOW()
-
-          WHERE company_name = $3
-          AND ledger_name = $4
-          `,
-
-          [
-
-            err.message,
-
-            tallyResponse,
-
-            data.company,
-
-            data.ledger_name
-
-          ]
-
-        );
-
-      } catch (dbErr) {
-
-        console.log(
-
-          "❌ DB UPDATE ERROR:",
-
-          dbErr.message
-
-        );
-
-      }
-
       return res.status(500).json({
 
-        status: "error",
+        status:
+          "error",
 
         message:
           err.message

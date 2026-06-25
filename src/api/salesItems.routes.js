@@ -65,7 +65,7 @@ router.get(
 
             created_at
 
-          FROM app.sales_items
+        FROM app_test.sales_items
 
           WHERE company_name = $1
 

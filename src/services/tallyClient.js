@@ -1,29 +1,36 @@
 import axios from "axios";
+import fs from "fs";
 import { TALLY_URL } from "../config/env.js";
 
 export async function sendToTally(xml) {
   try {
 
-    // ✅ PRINT XML SENT
-    console.log("📤 XML SENT TO TALLY:");
-    console.log(xml);
+  console.log("=================================");
+console.log("📤 FULL XML SENT TO TALLY");
+console.log("=================================");
+console.log(xml);
+console.log("=================================");
+
+fs.writeFileSync("lastVoucher.xml", xml);
+console.log("XML SAVED");
 
     const res = await axios.post(
-      TALLY_URL,
-      xml.trim(),
-      {
-        headers: {
-          "Content-Type": "text/xml",
-          "Connection": "close",
-        },
-       timeout: 600000,
-        validateStatus: () => true
-      }
-    );
+  TALLY_URL,
+  { xml },
+  {
+    headers: {
+      "Content-Type": "application/json"
+    },
+    timeout: 120000,
+    validateStatus: () => true
+  }
+);
 
-    // ✅ PRINT RAW RESPONSE
-    console.log("📥 RAW XML RESPONSE:");
+    console.log("=================================");
+    console.log("📥 RAW XML RESPONSE");
+    console.log("=================================");
     console.log(res.data);
+    console.log("=================================");
 
     if (!res.data) {
       throw new Error("Empty response from Tally");
@@ -33,14 +40,18 @@ export async function sendToTally(xml) {
 
   } catch (err) {
 
-    console.log("❌ Tally Error:", err.message);
+    console.log("=================================");
+    console.log("❌ TALLY ERROR");
+    console.log("=================================");
+    console.log(err);
+    console.log("=================================");
 
     if (err.code === "ECONNREFUSED") {
       throw new Error("Tally not running on port 9000");
     }
 
     if (err.code === "ECONNABORTED") {
-      throw new Error("Tally timeout (slow response)");
+      throw new Error("Tally timeout");
     }
 
     throw new Error(err.message || "Tally request failed");

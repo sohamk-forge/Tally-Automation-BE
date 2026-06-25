@@ -1,9 +1,7 @@
 import express from "express";
-
 import pool from "../db/index.js";
 
-const router =
-  express.Router();
+const router = express.Router();
 
 /* ===================================================
    ALL PARENT GROUPS DB API
@@ -16,12 +14,13 @@ GET /api/all-parent-groups
 Example:
 
 /api/all-parent-groups?
-company=Nutan Dairy&
+company_id=1&
 groupName=Sales Accounts
 
 =================================================== */
 
 router.get(
+
   "/",
 
   async (req, res) => {
@@ -32,8 +31,8 @@ router.get(
          QUERY PARAMS
       ========================================= */
 
-      const company =
-        req.query.company;
+      const companyId =
+        req.query.company_id;
 
       const groupName =
         req.query.groupName;
@@ -42,14 +41,14 @@ router.get(
          VALIDATION
       ========================================= */
 
-      if (!company) {
+      if (!companyId) {
 
         return res.status(400).json({
 
           status: "error",
 
           message:
-            "company query parameter required"
+            "company_id query parameter required"
 
         });
 
@@ -72,74 +71,73 @@ router.get(
          DATABASE QUERY
       ========================================= */
 
-      const result =
+      const result = await pool.query(
 
-        await pool.query(
+        `
+        SELECT
 
-          `
-          SELECT
+          id,
 
-            id,
+          company_id,
 
-            company_name,
+          company_name,
 
-            ledger_name,
+          ledger_name,
 
-            parent_group,
+          parent_group,
 
-            address,
+          address,
 
-            state,
+          state,
 
-            country,
+          country,
 
-            pincode,
+          pincode,
 
-            pan_number,
+          pan_number,
 
-            gst_number,
+          gst_number,
 
-            gst_registration_type,
+          gst_registration_type,
 
-            contact_name,
+          contact_name,
 
-            phone_number,
+          phone_number,
 
-            primary_phone_number,
+          primary_phone_number,
 
-            fax_no,
+          fax_no,
 
-            email,
+          email,
 
-            opening_balance,
+          opening_balance,
 
-            closing_balance,
+          closing_balance,
 
-            opening_balance_type,
+          opening_balance_type,
 
-            closing_balance_type,
+          closing_balance_type,
 
-            created_at,
+          created_at,
 
-            updated_at
+          updated_at
 
-          FROM app.all_parent_groups
+       FROM app_test.all_parent_groups
 
-          WHERE LOWER(company_name)
-          = LOWER($1)
+        WHERE company_id = $1
 
-          AND LOWER(parent_group)
-          = LOWER($2)
+        AND LOWER(parent_group)
+        = LOWER($2)
 
-          ORDER BY ledger_name ASC
-          `,
+        ORDER BY ledger_name ASC
+        `,
 
-          [
-            company,
-            groupName
-          ]
+        [
+          companyId,
+          groupName
+        ]
 
-        );
+      );
 
       /* =========================================
          NO DATA
@@ -156,7 +154,8 @@ router.get(
           message:
             "No records found",
 
-          company,
+          company_id:
+            companyId,
 
           parent_group:
             groupName,
@@ -179,7 +178,8 @@ router.get(
 
         source: "database",
 
-        company,
+        company_id:
+          companyId,
 
         parent_group:
           groupName,

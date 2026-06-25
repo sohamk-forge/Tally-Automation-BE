@@ -12,18 +12,24 @@
     "migrate:status": "knex migrate:status",
     "migrate:make": "knex migrate:make",
     "seed:run": "knex seed:run",
-    "db:reset": "npm run migrate:rollback && npm run migrate:latest"
+    "db:reset": "npm run migrate:rollback && npm run migrate:latest",
+    "deploy": "git pull && npm install && npm run migrate:latest && (pm2 reload tally-backend --update-env || pm2 start src/server.js --name tally-backend)"
   },
   "dependencies": {
+    "@bull-board/api": "^7.1.5",
     "axios": "^1.13.1",
-    "bullmq": "^5.76.4",
+    "bullmq": "^5.78.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.19.2",
     "fast-xml-parser": "^5.3.0",
-    "ioredis": "^5.10.1",
+    "ioredis": "^5.11.1",
     "knex": "^3.2.9",
-    "pg": "^8.20.0"
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "pg": "^8.20.0",
+    "xlsx": "^0.18.5",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "loadtest": "^8.2.1",

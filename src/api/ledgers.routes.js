@@ -12,7 +12,7 @@ GET /api/ledgers
 
 Query Params:
 
-company = Company Name (required)
+company_id = Company ID (required)
 
 search = Ledger search (optional)
 
@@ -23,7 +23,7 @@ limit = Records per page (optional)
 Example:
 
 /api/ledgers?
-company=Venkateshwara Traders
+company_id=1
 
 ================================================== */
 
@@ -37,7 +37,7 @@ router.get("/", async (req, res) => {
 
     const {
 
-      company,
+      company_id,
 
       search = "",
 
@@ -51,14 +51,14 @@ router.get("/", async (req, res) => {
        VALIDATION
     ========================================= */
 
-    if (!company) {
+    if (!company_id) {
 
       return res.status(400).json({
 
         status: "error",
 
         message:
-          "company query parameter is required"
+          "company_id query parameter is required"
 
       });
 
@@ -70,13 +70,13 @@ router.get("/", async (req, res) => {
 
     const pageNumber =
       Math.max(
-        parseInt(page) || 1,
+        Number(page) || 1,
         1
       );
 
     const limitNumber =
       Math.max(
-        parseInt(limit) || 20,
+        Number(limit) || 20,
         1
       );
 
@@ -93,60 +93,25 @@ router.get("/", async (req, res) => {
 
         id,
 
+        company_id,
+
         company_name,
 
         name,
 
-        parent_group
-          AS under_group,
-
-        address,
-
-        state,
-
-        country,
-
-        pincode,
-
         gst_number,
 
-        gst_type,
-
-        pan_number,
-
-        phone,
-
-        mobile,
-
-        email,
-
-        contact_person,
-
-        opening_balance,
-
-        opening_balance_type,
-
-        closing_balance,
-
-        credit_period,
-
-        bill_wise,
-
-        revenue_ledger,
-
-        deemed_positive,
+        guid,
 
         created_at,
 
         updated_at
 
-      FROM app.ledgers
+      FROM app_test.ledgers
 
       WHERE
 
-        LOWER(company_name)
-        =
-        LOWER($1)
+        company_id = $1
 
       AND
 
@@ -164,7 +129,7 @@ router.get("/", async (req, res) => {
 
     const ledgerValues = [
 
-      company,
+      company_id,
 
       `%${search}%`,
 
@@ -188,13 +153,11 @@ router.get("/", async (req, res) => {
 
       SELECT COUNT(*) AS total
 
-      FROM app.ledgers
+      FROM app_test.ledgers
 
       WHERE
 
-        LOWER(company_name)
-        =
-        LOWER($1)
+        company_id = $1
 
       AND
 
@@ -206,13 +169,13 @@ router.get("/", async (req, res) => {
       await pool.query(
         countQuery,
         [
-          company,
+          company_id,
           `%${search}%`
         ]
       );
 
     const total =
-      parseInt(
+      Number(
         countResult.rows[0].total
       );
 
@@ -229,7 +192,7 @@ router.get("/", async (req, res) => {
         message:
           "No ledgers found",
 
-        company,
+        company_id,
 
         search,
 
@@ -262,7 +225,7 @@ router.get("/", async (req, res) => {
       message:
         "Ledgers fetched successfully",
 
-      company,
+      company_id,
 
       search,
 
@@ -290,8 +253,11 @@ router.get("/", async (req, res) => {
   } catch (err) {
 
     console.error(
+
       "❌ Ledger API Error:",
+
       err.message
+
     );
 
     return res.status(500).json({

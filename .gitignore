@@ -137,3 +137,9 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Runtime files
+uploads/
+lastVoucher.xml
+src/python/voucher_counter.txt
+src/python/sales_voucher_counter.txt

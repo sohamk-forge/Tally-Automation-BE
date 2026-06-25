@@ -1,9 +1,48 @@
 import express from "express";
 import cors from "cors";
 
+/* =================================
+   DAILY CRON
+================================= */
+
+import "./cron/dailySync.cron.js";
+
+
+
+
 
 
 /* =================================
+   WORKERS
+================================= */
+
+import "./workers/sync.worker.js";
+
+import "./workers/pushLedger.worker.js";
+
+import "./workers/pushBank.worker.js";
+
+import "./workers/pushOdBank.worker.js";
+
+
+import "./workers/pushStockItem.worker.js";
+
+import "./workers/pushInvoice.worker.js";
+
+import "./workers/pushSalesInvoice.worker.js";
+
+import "./workers/pushAlterStockItem.worker.js";
+
+import "./workers/stockAlert.worker.js";
+
+import "./workers/bulkStockItem.worker.js";
+
+import "./workers/bulkSales.worker.js";
+
+
+
+/* =================================
+
    ROUTES
 ================================= */
 import authRoutes from "./modules/auth/auth.routes.js";
@@ -26,11 +65,6 @@ from "./api/parentGroups.routes.js";
 import allParentGroupsRoutes
 from "./api/allParentGroups.routes.js";
 
-import groupSummarySC
-from "./api/groupSummarySC.routes.js";
-
-import groupSummarySD
-from "./api/groupSummarySD.routes.js";
 
 import groupSummaryBank
 from "./api/groupSummaryBank.routes.js";
@@ -47,12 +81,61 @@ from "./api/profitLoss.routes.js";
 import stockGroupSummaryRoute
 from "./api/stockGroupSummary.js";
 
-/* =================================
-   NEW SALES ITEMS API
-================================= */
-
 import salesItemsRoutes
 from "./api/salesItems.routes.js";
+
+import pushLedgerRoutes
+from "./api/pushLedger.routes.js";
+
+import pushBankRoutes
+from "./api/pushBank.routes.js";
+
+import pushOdBankRoutes
+from "./api/pushOdBank.routes.js";
+
+import invoiceRoutes
+from "./api/invoices.routes.js";
+
+import salesInvoiceRoutes
+from "./api/salesInvoices.routes.js";
+
+import unitsRoutes
+from "./api/units.routes.js";
+
+import pushStockItemRoutes
+from "./api/pushStockItem.routes.js";
+
+import allLedgerDetailsRoutes
+from "./api/allLedgerDetails.routes.js";
+
+import pushStockItemOpeningRoutes
+from "./api/pushStockItemOpening.routes.js";
+import stockAlertRoutes
+from "./api/stockAlert.routes.js";
+import pullStockAlertRoutes
+from "./api/pullStockAlert.routes.js";
+
+import bulkStockItemRoutes
+from "./api/bulkStockItem.routes.js";
+
+import purchaseLedgerMappingRoutes
+from "./api/purchaseLedgerMapping.routes.js";
+
+import salesLedgerMappingRoutes
+from "./api/salesLedgerMapping.routes.js";
+
+import purchaseSalesLedgerRoutes
+from "./api/purchaseSalesLedger.routes.js";
+
+import godownRoutes
+from "./api/godown.routes.js";
+
+import bulkSalesUploadRoutes
+ from "./api/bulkSalesUpload.routes.js";
+
+//  import connectorRoutes
+// from "./api/connector.routes.js";
+
 
 /* =================================
    MIDDLEWARE
@@ -62,8 +145,6 @@ import {
   loggerMiddleware
 } from "./middleware/loggerMiddleware.js";
 
-import pushLedgerRoutes
-from "./api/pushLedger.routes.js";
 /* =================================
    EXPRESS APP
 ================================= */
@@ -123,18 +204,8 @@ app.use(
 );
 
 /* =================================
-   GROUP SUMMARY APIs
+   GROUP SUMMARY BANK APIs
 ================================= */
-
-app.use(
-  "/api/group-summary-cr",
-  groupSummarySC
-);
-
-app.use(
-  "/api/group-summary-dr",
-  groupSummarySD
-);
 
 app.use(
   "/api/group-summary-bank",
@@ -191,9 +262,36 @@ app.use(
   salesItemsRoutes
 );
 
+/* =================================
+   STOCK GROUP SUMMARY APIs
+================================= */
+
 app.use(
   "/api",
   stockGroupSummaryRoute
+);
+
+/* =================================
+   UNITS APIs
+================================= */
+
+app.use(
+  "/api/units",
+  unitsRoutes
+);
+
+/* =================================
+   STOCK ALERT APIs
+================================= */
+
+app.use(
+  "/api",
+  stockAlertRoutes
+);
+
+app.use(
+  "/api",
+  pullStockAlertRoutes
 );
 /* =================================
    PUSH LEDGER APIs
@@ -203,9 +301,77 @@ app.use(
   "/api",
   pushLedgerRoutes
 );
-
 app.use("/auth", authRoutes);
 
+app.use(
+  "/api",
+  pushBankRoutes
+);
+
+app.use(
+  "/api",
+  pushOdBankRoutes
+);
+
+app.use(
+  "/api",
+  invoiceRoutes
+);
+
+app.use(
+  "/api",
+  salesInvoiceRoutes
+);
+
+app.use(
+  "/api",
+  pushStockItemRoutes
+);
+
+app.use(
+  "/api",
+  pushStockItemOpeningRoutes
+);
+
+app.use(
+  "/api/all-ledger-details",
+  allLedgerDetailsRoutes
+);
+
+app.use(
+  "/api",
+  bulkStockItemRoutes
+);
+
+app.use(
+  "/api",
+  purchaseLedgerMappingRoutes
+);
+
+app.use(
+  "/api",
+  salesLedgerMappingRoutes
+);
+
+app.use(
+  "/api",
+  purchaseSalesLedgerRoutes
+);
+
+app.use(
+  "/api",
+  godownRoutes
+);
+
+app.use(
+  "/api",
+  bulkSalesUploadRoutes
+);
+
+app.use(
+  "/api/connector",
+  connectorRoutes
+);
 /* =================================
    DEFAULT API
 ================================= */
