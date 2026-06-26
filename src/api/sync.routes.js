@@ -1,6 +1,7 @@
   import express from "express";
   import pool from "../db/index.js";
   import { sendToTally } from "../services/tallyClient.js";
+  import authMiddleware from "../middleware/auth.middleware.js";
   import {
     getCompaniesXML,
       getUnitsXML,
@@ -479,8 +480,9 @@ router.get("/health", async (req, res) => {
   /* ===================================================
     COMPANY SYNC (FIXED - HANDLES DUPLICATES)
   =================================================== */
-
-  router.get("/companies", async (req, res) => {
+router.get(
+  "/companies",
+  async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -2491,68 +2493,28 @@ console.log({
 
         } = req.body;
 
-        /* =====================================
-          FETCH LIVE COMPANIES
-        ===================================== */
+       
 
-        const companyXML =
-          getCompaniesXML();
+      const {
+  company,
+  fromYear,
+  toYear
+} = req.body;
 
-        const companyResponse =
-          await sendToTally(
-            companyXML
-          );
+if (!company || !fromYear || !toYear) {
+  return res.status(400).json({
+    status: "error",
+    message: "Company, fromYear and toYear are required"
+  });
+}
 
-      const parsed =
-    await parseXML(
-      companyResponse
-    );
-        const companies =
-    parsed?.ENVELOPE?.BODY?.DATA
-      ?.COLLECTION?.COMPANY || [];
+if (!company) {
+  return res.status(400).json({
+    status: "error",
+    message: "Company is required"
+  });
+}
 
-  const companyList =
-    Array.isArray(companies)
-      ? companies
-      : [companies];
-
-        if (!companyList.length) {
-
-          return res.status(404).json({
-
-            status: "error",
-
-            message:
-              "No companies found"
-
-          });
-
-        }
-
-        /* =====================================
-          FINAL SUMMARY
-        ===================================== */
-
-        const jobs = [];
-
-        /* =====================================
-          CREATE JOBS
-        ===================================== */
-
-        for (const item of companyList) {
-
-        const rawName = item?.NAME;
-
-  const company =
-    typeof rawName === "object"
-      ? rawName?._ || null
-      : clean(rawName);
-
-          if (!company) {
-
-            continue;
-
-          }
 
           /* =================================
             STORE COMPANY
@@ -2581,10 +2543,10 @@ console.log({
           ================================= */
 
         const payload = {
-
-    company
-
-  };
+  company,
+  fromYear,
+  toYear
+};
 
           const result =
 
@@ -2616,45 +2578,35 @@ console.log({
             );
     const jobLogId = result.rows[0].id;
 
-  await syncQueue.add(
-    "manual-sync",
-    {
-      jobLogId,
-      company
-    },
-    {
-      ...SYNC_JOB_OPTIONS,
-      jobId: getSyncJobId(jobLogId)
-    }
-  );
-
-  jobs.push({
-    jobId: jobLogId,
+await syncQueue.add(
+  "manual-sync",
+  {
+    jobLogId,
     company,
-    status: "pending"
-  });
+    fromYear,
+    toYear
+  },
+  {
+    ...SYNC_JOB_OPTIONS,
+    jobId: getSyncJobId(jobLogId)
+  }
+);
 
-        }
+        
 
         /* =====================================
           RESPONSE
         ===================================== */
 
-        return res.status(200).json({
-
-          status:
-            "success",
-
-          message:
-            "Sync jobs created",
-
-          totalJobs:
-            jobs.length,
-
-          data:
-            jobs
-
-        });
+       return res.status(200).json({
+    status: "success",
+    message: "Sync job created successfully",
+    data: {
+        jobId: jobLogId,
+        company,
+        status: "pending"
+    }
+});
 
       } catch (err) {
 
@@ -3617,5 +3569,89 @@ router.get("/job-status", async (req, res) => {
       message: err.message
     });
   }
+});
+/* ===================================================
+   GET SYNC STATUS for connctor company  sync status
+=================================================== */
+
+router.get("/status/:jobId", async (req, res) => {
+
+  try {
+
+    const { jobId } = req.params;
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        status,
+        payload,
+        error_message,
+        started_at,
+        completed_at
+      FROM app_test.job_logs
+      WHERE id = $1
+      `,
+      [jobId]
+    );
+
+    if (!result.rows.length) {
+
+      return res.status(404).json({
+        status: "error",
+        message: "Job not found"
+      });
+
+    }
+
+    const job = result.rows[0];
+
+    return res.status(200).json({
+
+      status: "success",
+
+      data: {
+
+        jobId: job.id,
+
+        syncStatus: job.status,
+
+        company: job.payload?.company,
+
+        fromYear: job.payload?.fromYear,
+
+        toYear: job.payload?.toYear,
+
+        startedAt: job.started_at,
+
+        completedAt: job.completed_at,
+
+        error: job.error_message,
+
+        message:
+          job.status === "completed"
+            ? "Synchronization completed successfully."
+            : job.status === "running"
+            ? "Synchronization is in progress."
+            : job.status === "failed"
+            ? "Synchronization failed."
+            : "Synchronization is pending."
+
+      }
+
+    });
+
+  } catch (err) {
+
+    return res.status(500).json({
+
+      status: "error",
+
+      message: err.message
+
+    });
+
+  }
+
 });
   export default router;
