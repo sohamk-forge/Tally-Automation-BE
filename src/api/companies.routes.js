@@ -17,32 +17,35 @@ router.get("/", async (req, res) => {
     const offset = (page - 1) * limit;
 
     // TOTAL COUNT
-    const totalResult = await pool.query(`
-     SELECT COUNT(*) FROM app_test.companies
-    `);
+  const totalResult = await pool.query(`
+    SELECT COUNT(*)
+    FROM app_test.companies c
+    INNER JOIN app_test.connector_machines m
+        ON c.name = m.company_name
+    WHERE m.tally_connected = true
+`);
 
     const total = parseInt(totalResult.rows[0].count);
 
     // FETCH COMPANIES
     const result = await pool.query(
       `
-      SELECT
-        id,
-        name,
-        financial_year_start,
-        financial_year_end,
-
-        CONCAT(
-          financial_year_start,
-          '-',
-          financial_year_end
-        ) AS financial_year
-
-   FROM app_test.companies
-
-      ORDER BY id DESC
-
-      LIMIT $1 OFFSET $2
+     SELECT
+    c.id,
+    c.name,
+    c.financial_year_start,
+    c.financial_year_end,
+    CONCAT(
+        c.financial_year_start,
+        '-',
+        c.financial_year_end
+    ) AS financial_year
+FROM app_test.companies c
+INNER JOIN app_test.connector_machines m
+    ON c.name = m.company_name
+WHERE m.tally_connected = true
+ORDER BY c.id DESC
+LIMIT $1 OFFSET $2
       `,
       [limit, offset]
     );

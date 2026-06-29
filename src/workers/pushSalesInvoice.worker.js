@@ -4,6 +4,7 @@ import { SALES_QUEUE_NAME, getSalesJobId } from "../queues/sales.queue.js";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
 import { generateSalesXml } from "../services/salesXmlGenerator.js";
+import gstService from "../services/gst.service.js";
 
 const BASE_URL = process.env.BASE_URL || "http://localhost:5000";
 
@@ -35,7 +36,9 @@ function isTemporarySalesError(error) {
 const worker = new Worker(
   SALES_QUEUE_NAME,
   async (job) => {
-    const { salesId } = job.data;
+  const {
+  salesId
+} = job.data;
 
     const result = await pool.query(
       `SELECT * FROM app_test.sales_invoice_extractions WHERE id = $1`,
@@ -57,84 +60,25 @@ const worker = new Worker(
       const invoiceData = row.raw_json;
       const company = row.company_name;
       const customerName = invoiceData.customer_name?.trim() || "";
+/*
+====================================
+STEP 2 — GET COMPANY ID
+====================================
+*/
 
-      /*
-      // ====================================
-      // STEP 1 — SYNC LEDGERS
-      // ====================================
-      // */
+const companyResult = await pool.query(
+  `SELECT id
+   FROM app_test.companies
+   WHERE TRIM(name) = TRIM($1)
+   LIMIT 1`,
+  [company]
+);
 
-      // console.log("Syncing Ledgers...");
+const companyId = companyResult.rows[0]?.id;
 
-      // const ledgerSyncResponse = await fetch(
-      //   `${BASE_URL}/api/sync/all-ledgers-sync?company=${encodeURIComponent(company)}`
-      // );
-
-      // if (!ledgerSyncResponse.ok) {
-      //   throw new Error("Ledger Sync Failed");
-      // }
-
-      /*
-      ====================================
-      STEP 2 — GET COMPANY ID + FY CHECK
-      ====================================
-      */
-
-      const companyResult = await pool.query(
-        `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1) LIMIT 1`,
-        [company]
-      );
-      const companyId = companyResult.rows[0]?.id;
-
-      if (!companyId) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = 'Company not found', updated_at = NOW()
-           WHERE id = $1`,
-          [salesId]
-        );
-        console.log(`Company Not Found : ${company}`);
-        return { salesId, status: "failed" };
-      }
-
-      // const companyDetails = await pool.query(
-      //   `SELECT financial_year_start, financial_year_end FROM app_test.companies WHERE id = $1`,
-      //   [companyId]
-      // );
-      // const companyInfo = companyDetails.rows[0];
-
-      // // const invoiceDate = invoiceData.invoice_date;
-
-      // if (!invoiceDate) {
-      //   await pool.query(
-      //     `UPDATE app_test.sales_invoice_extractions
-      //      SET sync_status = 'failed', error_message = 'invoice_date is missing', updated_at = NOW()
-      //      WHERE id = $1`,
-      //     [salesId]
-      //   );
-      //   console.log(`Invoice Date Missing for row ${salesId}`);
-      //   return { salesId, status: "failed" };
-      // }
-
-      // // FY boundary check
-      // const [day, month, year] = invoiceDate.split("-").map(Number);
-      // const invoiceJsDate = new Date(year, month - 1, day);
-      // const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
-      // const fyEnd = new Date(companyInfo.financial_year_end, 2, 31);
-
-      // if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
-      //   await pool.query(
-      //     `UPDATE app_test.sales_invoice_extractions
-      //      SET sync_status = 'failed', error_message = $1, updated_at = NOW()
-      //      WHERE id = $2`,
-      //     [
-      //       `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
-      //       salesId
-      //     ]
-      //   );
-      //   console.log(`Invoice Date Outside Financial Year : ${invoiceDate}`);
-      //   return { salesId, status: "failed" };
-      // }
+if (!companyId) {
+  throw new Error(`Company not found: ${company}`);
+}
 
       /*
       ====================================
@@ -178,18 +122,18 @@ const worker = new Worker(
       */
 
       const ledgersToValidate = [
-        { field: "sales_parent_group", value: mapping.sales_parent_group },
-        { field: "cgst_ledger", value: mapping.cgst_ledger },
-        { field: "sgst_ledger", value: mapping.sgst_ledger },
-        { field: "rounded_off_ledger", value: mapping.rounded_off_ledger },
+        { field: "sales_parent_group",  value: mapping.sales_parent_group },
+        { field: "cgst_ledger",         value: mapping.cgst_ledger },
+        { field: "sgst_ledger",         value: mapping.sgst_ledger },
+        { field: "rounded_off_ledger",  value: mapping.rounded_off_ledger },
         ...(mapping.igst_ledger ? [{ field: "igst_ledger", value: mapping.igst_ledger }] : []),
-        ...(mapping.tds_ledger ? [{ field: "tds_ledger", value: mapping.tds_ledger }] : []),
+        ...(mapping.tds_ledger  ? [{ field: "tds_ledger",  value: mapping.tds_ledger  }] : []),
         ...(mapping.cess_ledger ? [{ field: "cess_ledger", value: mapping.cess_ledger }] : []),
       ];
 
       let mappingLedgerMissing = false;
       let missingMappingLedger = "";
-      let missingMappingField = "";
+      let missingMappingField  = "";
 
       for (const { field, value } of ledgersToValidate) {
         const checkResult = await pool.query(
@@ -200,7 +144,7 @@ const worker = new Worker(
         if (!checkResult.rows.length) {
           mappingLedgerMissing = true;
           missingMappingLedger = value;
-          missingMappingField = field;
+          missingMappingField  = field;
           break;
         }
       }
@@ -234,13 +178,38 @@ const worker = new Worker(
       );
 
       if (!ledgerResult.rows.length) {
+        console.log("Customer Ledger Not Found");
+
+        const gstin =
+          invoiceData.customer_gstin ||
+          invoiceData.gstin ||
+          "";
+
+        let gstResponse = null;
+
+        if (gstin) {
+          console.log("Calling GST API...");
+          gstResponse = await gstService.getTaxpayerDetails(gstin);
+        }
+
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [`Customer ledger not found: ${customerName}`, salesId]
+          `
+          UPDATE app_test.sales_invoice_extractions
+          SET
+            sync_status = 'failed',
+            error_message = $1,
+            gst_details = $2,
+            updated_at = NOW()
+          WHERE id = $3
+          `,
+          [
+            `Customer ledger not found: ${customerName}`,
+            gstResponse?.data || null,
+            salesId
+          ]
         );
-        console.log(`Customer Ledger Not Found : ${customerName}`);
+
+        console.log("GST Details Saved");
         return { salesId, status: "failed" };
       }
 
@@ -257,13 +226,13 @@ const worker = new Worker(
       const items = invoiceData.line_items || [];
 
       let stockMissing = false;
-      let missingItem = "";
+      let missingItem  = "";
 
       for (const item of items) {
         const itemName =
-  item.item_name?.trim() ||
-  item.name?.trim() ||
-  "";
+          item.item_name?.trim() ||
+          item.name?.trim() ||
+          "";
         console.log(`Checking Stock : "${itemName}"`);
 
         const stockResult = await pool.query(
@@ -274,19 +243,38 @@ const worker = new Worker(
 
         if (!stockResult.rows.length) {
           stockMissing = true;
-          missingItem = itemName;
+          missingItem  = itemName;
           break;
         }
       }
 
       if (stockMissing) {
+        const missingStock = items.find((item) => {
+          const itemName =
+            item.item_name?.trim() ||
+            item.name?.trim() ||
+            "";
+          return itemName.toLowerCase() === missingItem.toLowerCase();
+        });
+
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [`Stock item not found: ${missingItem}`, salesId]
+          `
+          UPDATE app_test.sales_invoice_extractions
+          SET
+            sync_status = 'failed',
+            error_message = $1,
+            stock_details = $2,
+            updated_at = NOW()
+          WHERE id = $3
+          `,
+          [
+            `Stock item not found: ${missingItem}`,
+            missingStock || null,
+            salesId
+          ]
         );
-        console.log(`Stock Item Not Found : ${missingItem}`);
+
+        console.log("Stock Details Saved");
         return { salesId, status: "failed" };
       }
 
@@ -298,8 +286,7 @@ const worker = new Worker(
       ====================================
       */
 
-     const resolvedGodownName =
-  invoiceData.godown_name?.trim() || ""; 
+      const resolvedGodownName = invoiceData.godown_name?.trim() || "";
 
       console.log(`Godown Name : ${resolvedGodownName}`);
 
@@ -311,22 +298,19 @@ const worker = new Worker(
 
       const sanitizedInvoiceData = {
         ...invoiceData,
-        sales_ledger: mapping.sales_parent_group,
-        cgst_ledger: mapping.cgst_ledger,
-        sgst_ledger: mapping.sgst_ledger,
-        igst_ledger: mapping.igst_ledger || "",
-        tds_ledger: mapping.tds_ledger || "",
-        cess_ledger: mapping.cess_ledger || "",
-        rounded_off_ledger: mapping.rounded_off_ledger,
-        godown_name: resolvedGodownName,
+        sales_ledger:        mapping.sales_parent_group,
+        cgst_ledger:         mapping.cgst_ledger,
+        sgst_ledger:         mapping.sgst_ledger,
+        igst_ledger:         mapping.igst_ledger || "",
+        tds_ledger:          mapping.tds_ledger || "",
+        cess_ledger:         mapping.cess_ledger || "",
+        rounded_off_ledger:  mapping.rounded_off_ledger,
+        godown_name:         resolvedGodownName,
         line_items: items.map((item) => ({
           ...item,
-         item_name :
-  item.item_name?.trim() ||
-  item.name?.trim() ||
-  "",
-          ledger: mapping.sales_parent_group,
-          godown_name: resolvedGodownName
+          item_name:   item.item_name?.trim() || item.name?.trim() || "",
+          ledger:      mapping.sales_parent_group,
+          godown_name: resolvedGodownName,
         })),
       };
 
@@ -408,18 +392,17 @@ const worker = new Worker(
       console.error(`SALES ATTEMPT FAILED: ${salesId}`, error.message);
 
       // ONLY retry for Tally connection issues
-     if (isTemporarySalesError(error)) {
-  await pool.query(
-    `UPDATE app_test.sales_invoice_extractions
-     SET sync_status = 'pending',
-         error_message = NULL,
-         updated_at = NOW()
-     WHERE id = $1`,
-    [salesId]
-  );
-
-  throw error;
-}
+      if (isTemporarySalesError(error)) {
+        await pool.query(
+          `UPDATE app_test.sales_invoice_extractions
+           SET sync_status = 'pending',
+               error_message = NULL,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [salesId]
+        );
+        throw error;
+      }
 
       // Permanent error - mark as failed
       await pool.query(
@@ -434,7 +417,7 @@ const worker = new Worker(
   },
   {
     connection: redisConnection,
-    concurrency: 5
+    concurrency: 5,
   }
 );
 

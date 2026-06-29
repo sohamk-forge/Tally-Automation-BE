@@ -19,10 +19,10 @@ router.post("/sales-invoices", async (req, res) => {
   try {
 
     const {
-      company,
-      invoice_data,
-      narration
-    } = req.body;
+  company,
+  invoice_data,
+  narration
+} = req.body;
 
     if (!company || !invoice_data) {
       return res.status(400).json({
@@ -121,18 +121,20 @@ console.log("GST CALCULATION:", {
 
       const updateResult = await pool.query(
         `
-        UPDATE app_test.sales_invoice_extractions
-        SET
-          customer_name = $1,
-          gstin = $2,
-          invoice_date = $3,
-          godown_name = $4,
-          raw_json = $5,
-          sync_status = 'pending',
-          error_count = 0,
-          last_error = NULL,
-          updated_at = NOW()
-        WHERE id = $6
+      UPDATE app_test.sales_invoice_extractions
+SET
+  customer_name = $1,
+  gstin = $2,
+  invoice_date = $3,
+  godown_name = $4,
+  raw_json = $5,
+  sync_status = 'pending',
+  error_count = 0,
+  last_error = NULL,
+  error_message = NULL,
+  gst_details = NULL,
+  updated_at = NOW()
+WHERE id = $6
         RETURNING id
         `,
         [
@@ -203,7 +205,10 @@ if (existingJob) {
 
 const job = await salesQueue.add(
   "sales-invoice",
-  { salesId: invoiceId },
+  {
+  salesId: invoiceId
+  
+},
   { jobId: jobId }
 );
 

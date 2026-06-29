@@ -45,9 +45,12 @@ const api = axios.create({
 =================================================== */
 
 async function processJob(job) {
+  // CHANGED: Added fromYear and toYear to the destructuring
   const {
     jobLogId,
-    company
+    company,
+    fromYear,
+    toYear
   } = job.data;
 
   const id = jobLogId;
@@ -73,34 +76,22 @@ async function processJob(job) {
     console.log(`PROCESSING JOB ID: ${id}`);
     console.log("=====================================");
 
-    /* =====================================
-       FETCH FINANCIAL YEAR
-    ===================================== */
-    const companyResult = await pool.query(
-      `
-      SELECT
-        financial_year_start,
-        financial_year_end
-      FROM app_test.companies
-      WHERE name = $1
-      `,
-      [company]
-    );
+    // CHANGED: Use fromYear and toYear from job.data instead of database
+    const fromDate = fromYear;
+    const toDate = toYear;
 
-    if (!companyResult.rows.length) {
-      throw new Error(`Company not found: ${company}`);
-    }
-
-    const fromDate = companyResult.rows[0].financial_year_start;
-    const toDate   = companyResult.rows[0].financial_year_end;
     const finalFromDate = `${fromDate}0401`;
     const finalToDate   = `${toDate}0331`;
 
     if (!fromDate || !toDate) {
-      throw new Error(`Financial year not found for ${company}`);
+      throw new Error("Financial year not provided.");
     }
 
     console.log(`Company: ${company}`);
+    console.log("fromDate =", fromDate);
+    console.log("toDate =", toDate);
+    console.log("finalFromDate =", finalFromDate);
+    console.log("finalToDate =", finalToDate);
 
     /* =====================================
        1. LEDGER SYNC
@@ -115,11 +106,6 @@ async function processJob(job) {
     /* =====================================
        2. VOUCHER SYNC
     ===================================== */
-    console.log("fromDate =", fromDate);
-    console.log("toDate =", toDate);
-    console.log("finalFromDate =", finalFromDate);
-    console.log("finalToDate =", finalToDate);
-
     console.log("Syncing Vouchers...");
     await api.get("/api/sync/voucher-sync", {
       params: {
