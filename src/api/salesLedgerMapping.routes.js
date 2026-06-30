@@ -13,16 +13,17 @@ router.post("/sales-ledger-mapping", async (req, res) => {
 
   try {
 
-    const {
-      company_id,
-      sales_parent_group,
-      cgst_ledger,
-      sgst_ledger,
-      igst_ledger,
-      tds_ledger,
-      cess_ledger,
-      rounded_off_ledger
-    } = req.body;
+  const {
+  company_id,
+  sales_parent_group,
+  sales_ledger,
+  cgst_ledger,
+  sgst_ledger,
+  igst_ledger,
+  tds_ledger,
+  cess_ledger,
+  rounded_off_ledger
+} = req.body;
 
     if (!company_id) {
       return res.status(400).json({
@@ -45,28 +46,30 @@ router.post("/sales-ledger-mapping", async (req, res) => {
 
       await pool.query(
         `
-        UPDATE app_test.company_sales_ledger_mappings
-        SET
-          sales_parent_group = $1,
-          cgst_ledger = $2,
-          sgst_ledger = $3,
-          igst_ledger = $4,
-          tds_ledger = $5,
-          cess_ledger = $6,
-          rounded_off_ledger = $7,
-          updated_at = NOW()
-        WHERE company_id = $8
+    UPDATE app_test.company_sales_ledger_mappings
+SET
+  sales_parent_group = $1,
+  sales_ledger = $2,
+  cgst_ledger = $3,
+  sgst_ledger = $4,
+  igst_ledger = $5,
+  tds_ledger = $6,
+  cess_ledger = $7,
+  rounded_off_ledger = $8,
+  updated_at = NOW()
+WHERE company_id = $9
         `,
-        [
-          sales_parent_group,
-          cgst_ledger,
-          sgst_ledger,
-          igst_ledger,
-          tds_ledger,
-          cess_ledger,
-          rounded_off_ledger,
-          company_id
-        ]
+      [
+  sales_parent_group,
+  sales_ledger,
+  cgst_ledger,
+  sgst_ledger,
+  igst_ledger,
+  tds_ledger,
+  cess_ledger,
+  rounded_off_ledger,
+  company_id
+]
       );
 
       return res.status(200).json({
@@ -78,32 +81,34 @@ router.post("/sales-ledger-mapping", async (req, res) => {
 
     await pool.query(
       `
-      INSERT INTO app_test.company_sales_ledger_mappings
-      (
-        company_id,
-        sales_parent_group,
-        cgst_ledger,
-        sgst_ledger,
-        igst_ledger,
-        tds_ledger,
-        cess_ledger,
-        rounded_off_ledger
-      )
-      VALUES
-      (
-        $1,$2,$3,$4,$5,$6,$7,$8
-      )
+     INSERT INTO app_test.company_sales_ledger_mappings
+(
+  company_id,
+  sales_parent_group,
+  sales_ledger,
+  cgst_ledger,
+  sgst_ledger,
+  igst_ledger,
+  tds_ledger,
+  cess_ledger,
+  rounded_off_ledger
+)
+VALUES
+(
+  $1,$2,$3,$4,$5,$6,$7,$8,$9
+)
       `,
       [
-        company_id,
-        sales_parent_group,
-        cgst_ledger,
-        sgst_ledger,
-        igst_ledger,
-        tds_ledger,
-        cess_ledger,
-        rounded_off_ledger
-      ]
+  company_id,
+  sales_parent_group,
+  sales_ledger,
+  cgst_ledger,
+  sgst_ledger,
+  igst_ledger,
+  tds_ledger,
+  cess_ledger,
+  rounded_off_ledger
+]
     );
 
     return res.status(200).json({
