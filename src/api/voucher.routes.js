@@ -3,6 +3,7 @@ import db from "../db/index.js";
 import multer from "multer";
 import xlsx from "xlsx";
 import path from "path";
+import { spawn } from "child_process";
 
 import {
   voucherQueue,
@@ -73,6 +74,59 @@ function parseAmount(raw) {
   return isNaN(num) ? null : num;
 }
 
+// Skip bank separator rows (rows full of *** or ---)
+function isSeparatorRow(row) {
+  const values = Object.values(row).map((v) =>
+    String(v ?? "").trim().replace(/[*\-\s]/g, "")
+  );
+  return values.every((v) => v === "");
+}
+
+/* ===========================
+   SEMANTIC ENRICHMENT (replaces the old :8000 FastAPI service)
+=========================== */
+
+function runSemanticEnrichment(transactions) {
+  return new Promise((resolve) => {
+    if (!transactions.length) return resolve(transactions);
+
+    const pyFile = path.join(process.cwd(), "src", "python", "semantic_cli.py");
+    const python = spawn("python", [pyFile]);
+
+    let output = "";
+    let errorOutput = "";
+
+    python.stdout.on("data", (d) => (output += d.toString()));
+    python.stderr.on("data", (d) => (errorOutput += d.toString()));
+
+    python.on("close", (code) => {
+      if (code !== 0) {
+        console.error("semantic_cli failed:", errorOutput);
+        return resolve(transactions.map(() => ({}))); // fail-open
+      }
+      try {
+        const parsed = JSON.parse(output);
+        if (parsed?.error) {
+          console.error("semantic_cli error:", parsed.error);
+          return resolve(transactions.map(() => ({})));
+        }
+        resolve(parsed);
+      } catch (e) {
+        console.error("semantic_cli parse error:", e.message, output);
+        resolve(transactions.map(() => ({})));
+      }
+    });
+
+    python.on("error", (err) => {
+      console.error("semantic_cli spawn error:", err.message);
+      resolve(transactions.map(() => ({})));
+    });
+
+    python.stdin.write(JSON.stringify(transactions));
+    python.stdin.end();
+  });
+}
+
 /* ===========================
    CREATE VOUCHER (manual)
 =========================== */
@@ -128,6 +182,8 @@ router.post("/create", async (req, res) => {
 
 /* ===========================
    UPLOAD BANK STATEMENT (EXCEL)
+   Now includes semantic enrichment (merchant_name, group_key)
+   that used to live on the separate :8000 FastAPI service.
 =========================== */
 
 router.post(
@@ -160,7 +216,7 @@ router.post(
 
       const fileName = req.file.originalname;
 
-      // ✅ CHANGE 1: Check if this exact file has already been uploaded for this company
+      // Check if this exact file has already been uploaded for this company
       const existingFile = await db.query(
         `SELECT
           file_name,
@@ -181,7 +237,7 @@ router.post(
           success: false,
           already_exists: true,
           message: `This file "${fileName}" has already been uploaded.`,
-          data: existingFile.rows[0]   // returns existing file_name, bank_ledger, start_date, end_date, total_rows
+          data: existingFile.rows[0]
         });
       }
 
@@ -202,19 +258,31 @@ router.post(
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const headerRowIndex = findHeaderRowIndex(sheet);
 
-      const rawRows = xlsx.utils.sheet_to_json(sheet, {
+      let rawRows = xlsx.utils.sheet_to_json(sheet, {
         defval: null,
         raw: false,
         range: headerRowIndex
       });
 
+      // Drop bank separator rows (e.g. rows full of ***)
+      rawRows = rawRows.filter((row) => !isSeparatorRow(row));
+
       if (!rawRows.length) {
         return res.status(400).json({ success: false, message: "No data rows found in Excel" });
       }
 
+      // ── Build narration list and run semantic enrichment ONCE for the whole file ──
+      const narrationInputs = rawRows.map((row) => ({
+        narration: String(
+          row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
+        ).trim()
+      }));
+
+      const enriched = await runSemanticEnrichment(narrationInputs);
+
       const inserted = [];
 
-      for (const row of rawRows) {
+      for (const [i, row] of rawRows.entries()) {
         const withdrawalAmt = parseAmount(
           row["Withdrawal Amt."] ?? row["Withdrawal Amt"] ?? row["Debit"] ?? row["DR"]
         );
@@ -232,6 +300,9 @@ router.post(
         const narration = String(
           row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
         ).trim() || null;
+
+        const merchantName = enriched[i]?.merchant_name || null;
+        const groupKey = enriched[i]?.group_key || null;
 
         const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
         const chequeRef = cleanString(rawRef) || null;
@@ -265,11 +336,12 @@ router.post(
                (company_id, company_name, voucher_date, bank_ledger,
                 amount, narration, instrument_number,
                 debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9)
+                statement_password, file_name, merchant_name, group_key)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
                RETURNING *`,
               [company_id, company_name, txnDate, bank_ledger,
-               withdrawalAmt, narration, chequeRef, password || null, fileName]
+               withdrawalAmt, narration, chequeRef, password || null, fileName,
+               merchantName, groupKey]
             );
             inserted.push({ ...r.rows[0], _action: 'inserted' });
           }
@@ -304,11 +376,12 @@ router.post(
                (company_id, company_name, voucher_date, bank_ledger,
                 amount, narration, instrument_number,
                 debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9)
+                statement_password, file_name, merchant_name, group_key)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
                RETURNING *`,
               [company_id, company_name, txnDate, bank_ledger,
-               depositAmt, narration, chequeRef, password || null, fileName]
+               depositAmt, narration, chequeRef, password || null, fileName,
+               merchantName, groupKey]
             );
             inserted.push({ ...r.rows[0], _action: 'inserted' });
           }
@@ -326,7 +399,6 @@ router.post(
       const skippedRows = inserted.filter(v => v._action === 'skipped');
       const resetRows   = inserted.filter(v => v._action === 'reset');
 
-      // Start and end date from processed rows
       const allDates = inserted.map(v => v.voucher_date).filter(Boolean).sort();
       const startDate = allDates[0] || null;
       const endDate   = allDates[allDates.length - 1] || null;
@@ -334,12 +406,10 @@ router.post(
       return res.status(201).json({
         success: true,
         message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
-        // Review card fields
         file_name:      fileName,
         bank_ledger:    bank_ledger,
         start_date:     startDate,
         end_date:       endDate,
-        // Counts
         total:          inserted.length,
         inserted_count: newRows.length,
         skipped_count:  skippedRows.length,
@@ -358,9 +428,6 @@ router.post(
 
 /* ===========================
    GET STATEMENT DETAILS
-   GET /api/v1/voucher/statement-details?company_id=1
-   Returns file name, bank ledger, start and end date of ALL uploaded statements
-   ✅ CHANGE 2: Returns ALL uploaded files (removed LIMIT 1), not just the latest
 =========================== */
 
 router.get("/statement-details", async (req, res) => {
@@ -411,7 +478,6 @@ router.get("/statement-details", async (req, res) => {
 
 /* ===========================
    GET WAITING LEDGER VOUCHERS
-   GET /api/v1/voucher/waiting-ledger?company_id=1
 =========================== */
 
 router.get("/waiting-ledger", async (req, res) => {
@@ -426,7 +492,8 @@ router.get("/waiting-ledger", async (req, res) => {
       `SELECT
         id, company_id, company_name, voucher_type, voucher_number,
         voucher_date, bank_ledger, amount, narration,
-        instrument_number, debit_credit, status, created_at
+        instrument_number, debit_credit, status, created_at,
+        merchant_name, group_key
        FROM app_test.contra_vouchers
        WHERE status = 'WAITING_LEDGER'
          AND company_id = $1
@@ -447,7 +514,6 @@ router.get("/waiting-ledger", async (req, res) => {
 
 /* ===========================
    GET ALL VOUCHERS
-   GET /api/v1/voucher/all?company_id=1
 =========================== */
 
 router.get("/all", async (req, res) => {
@@ -467,7 +533,6 @@ router.get("/all", async (req, res) => {
 
 /* ===========================
    GET VOUCHERS BY PARTY LEDGER + VOUCHER TYPE
-   GET /api/v1/voucher/filter?company_id=1&party_ledger=Ram&voucher_type=payment
 =========================== */
 
 router.get("/filter", async (req, res) => {
@@ -505,7 +570,7 @@ router.get("/filter", async (req, res) => {
         voucher_type, voucher_number, voucher_date,
         bank_ledger, party_ledger, amount,
         narration, instrument_number, debit_credit,
-        status, created_at
+        status, created_at, merchant_name, group_key
        FROM app_test.contra_vouchers
        WHERE ${conditions.join(" AND ")}
        ORDER BY voucher_date DESC, id DESC`,
@@ -525,7 +590,6 @@ router.get("/filter", async (req, res) => {
 
 /* ===========================
    BULK ASSIGN party_ledger + voucher_type → triggers BullMQ
-   PUT /api/v1/voucher/bulk-party-ledger
 =========================== */
 
 router.put("/bulk-party-ledger", async (req, res) => {
@@ -607,7 +671,6 @@ router.put("/bulk-party-ledger", async (req, res) => {
 
 /* ===========================
    SINGLE ASSIGN party_ledger + voucher_type
-   PUT /api/v1/voucher/:id/party-ledger
 =========================== */
 
 router.put("/:id/party-ledger", async (req, res) => {
@@ -672,7 +735,6 @@ router.put("/:id/party-ledger", async (req, res) => {
 
 /* ===========================
    GET SINGLE VOUCHER
-   GET /api/v1/voucher/:id
 =========================== */
 
 router.get("/:id", async (req, res) => {
