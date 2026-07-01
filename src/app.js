@@ -138,7 +138,26 @@ from "./api/connector.routes.js";
 import voucherRoutes
  from "./api/voucher.routes.js";
 
+import salesAccountRoutes 
+ from "./api/salesAccount.routes.js";
 
+import purchaseAccountRoutes 
+ from "./api/purchaseAccount.routes.js";
+
+import stockInHandRoutes 
+ from "./api/stockInHand.routes.js";
+
+import trendsRouter 
+ from "./api/salesPurchaseTrend.routes.js";
+
+import topSalesLedgersRouter 
+ from "./api/topSalesLedgers.js";
+
+import monthlySalesTrendRouter 
+ from "./api/monthlySalesTrend.js";
+
+import challanRoutes 
+ from "./api/challan.routes.js";
 
 /* =================================
    MIDDLEWARE
@@ -391,6 +410,20 @@ app.use(
   "/api/v1/voucher",
   voucherRoutes
 );
+
+app.use("/api/v1/sales", salesAccountRoutes);
+
+app.use("/api/v1/purchase", purchaseAccountRoutes);
+
+app.use("/api/v1/stock", stockInHandRoutes);
+
+app.use("/api/v1/trends", trendsRouter);
+
+app.use("/api/v1", topSalesLedgersRouter);
+
+app.use("/api/v1", monthlySalesTrendRouter);
+
+app.use("/api/v1/challan", challanRoutes);
 
 /* =================================
    DEFAULT API

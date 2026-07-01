@@ -8,7 +8,8 @@ import { spawn } from "child_process";
 import {
   voucherQueue,
   VOUCHER_JOB_OPTIONS,
-  getVoucherJobId
+  getVoucherJobId,
+  safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
 const router = express.Router();
@@ -184,6 +185,9 @@ router.post("/create", async (req, res) => {
    UPLOAD BANK STATEMENT (EXCEL)
    Now includes semantic enrichment (merchant_name, group_key)
    that used to live on the separate :8000 FastAPI service.
+   Returns BOTH:
+     - data         → DB-backed voucher rows (for "Review")
+     - transactions → enriched raw transaction list (for "AI Suggestion")
 =========================== */
 
 router.post(
@@ -280,7 +284,8 @@ router.post(
 
       const enriched = await runSemanticEnrichment(narrationInputs);
 
-      const inserted = [];
+      const inserted = [];      // → "Review" shape (DB-backed voucher rows)
+      const transactions = [];  // → "AI Suggestion" shape (old FastAPI response shape)
 
       for (const [i, row] of rawRows.entries()) {
         const withdrawalAmt = parseAmount(
@@ -306,6 +311,19 @@ router.post(
 
         const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
         const chequeRef = cleanString(rawRef) || null;
+
+        // Build the AI-suggestion-style transaction entry (mirrors old FastAPI shape)
+        transactions.push({
+          transaction_date: String(row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"] ?? "").trim(),
+          value_date: String(row["Value Dt"] ?? row["Value Date"] ?? row["VALUE DATE"] ?? row["Date"] ?? "").trim(),
+          narration: narration || "",
+          cheque_ref: chequeRef || "",
+          withdrawal: withdrawalAmt !== null ? String(withdrawalAmt) : "",
+          deposit: depositAmt !== null ? String(depositAmt) : "",
+          balance: String(row["Closing Balance"] ?? row["Balance"] ?? "").trim(),
+          merchant_name: merchantName || "",
+          group_key: groupKey || ""
+        });
 
         // Withdrawal → DEBIT row
         if (withdrawalAmt !== null && withdrawalAmt > 0) {
@@ -406,6 +424,8 @@ router.post(
       return res.status(201).json({
         success: true,
         message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
+
+        // ── "Review" shape — DB-backed voucher rows ──
         file_name:      fileName,
         bank_ledger:    bank_ledger,
         start_date:     startDate,
@@ -416,7 +436,10 @@ router.post(
         reset_count:    resetRows.length,
         debit_count:    inserted.filter(v => v.debit_credit === "DEBIT").length,
         credit_count:   inserted.filter(v => v.debit_credit === "CREDIT").length,
-        data: inserted
+        data: inserted,
+
+        // ── "AI Suggestion" shape — mirrors old :8000 FastAPI response ──
+        transactions: transactions
       });
 
     } catch (err) {
@@ -590,6 +613,13 @@ router.get("/filter", async (req, res) => {
 
 /* ===========================
    BULK ASSIGN party_ledger + voucher_type → triggers BullMQ
+
+   FIX: previously called voucherQueue.add() directly with a
+   deterministic jobId. If a job with that ID already existed in
+   Redis (e.g. a previously FAILED job that hadn't been removed),
+   BullMQ silently ignored the new add() call — so Postgres said
+   PENDING but no job was ever actually queued. Now uses
+   safeEnqueueVoucher(), which removes any stale job first.
 =========================== */
 
 router.put("/bulk-party-ledger", async (req, res) => {
@@ -650,11 +680,7 @@ router.put("/bulk-party-ledger", async (req, res) => {
     }
 
     for (const voucherId of updatedIds) {
-      await voucherQueue.add(
-        "pushVoucher",
-        { voucherId },
-        { ...VOUCHER_JOB_OPTIONS, jobId: getVoucherJobId(voucherId) }
-      );
+      await safeEnqueueVoucher(voucherId);
     }
 
     return res.status(200).json({
@@ -671,6 +697,9 @@ router.put("/bulk-party-ledger", async (req, res) => {
 
 /* ===========================
    SINGLE ASSIGN party_ledger + voucher_type
+
+   FIX: same stale-jobId issue as bulk-party-ledger above — now
+   uses safeEnqueueVoucher() instead of voucherQueue.add() directly.
 =========================== */
 
 router.put("/:id/party-ledger", async (req, res) => {
@@ -716,11 +745,7 @@ router.put("/:id/party-ledger", async (req, res) => {
       });
     }
 
-    await voucherQueue.add(
-      "pushVoucher",
-      { voucherId },
-      { ...VOUCHER_JOB_OPTIONS, jobId: getVoucherJobId(voucherId) }
-    );
+    await safeEnqueueVoucher(voucherId);
 
     return res.status(200).json({
       success: true,

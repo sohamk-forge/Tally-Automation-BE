@@ -9,7 +9,8 @@ import {
   voucherQueue,
   VOUCHER_QUEUE_NAME,
   VOUCHER_JOB_OPTIONS,
-  getVoucherJobId
+  getVoucherJobId,
+  safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
 const connection = new IORedis({
@@ -136,6 +137,58 @@ function buildLedgers(voucher, amount) {
 
 /*
 ====================================
+SAFE DATE FORMATTING (YYYYMMDD for Tally)
+
+Never round-trip a DATE value through `new Date(...)` + local-time
+getters (.getFullYear/.getMonth/.getDate) — node-postgres returns
+DATE columns as a UTC-midnight Date object, and reading it back with
+local getters silently shifts the day depending on server timezone,
+or produces NaN for unparseable input. Either failure mode produces a
+malformed <DATE> tag that Tally reports as "missing" rather than
+flagging clearly — and only some rows are affected, making it look
+intermittent.
+
+This function extracts the date parts directly, handling the shapes
+node-postgres / your DB driver may hand back:
+  - a JS Date object        → read UTC parts (never local parts)
+  - an ISO-like string       → "2026-06-03" or "2026-06-03T00:00:00.000Z"
+  - already YYYYMMDD          → passed through after validation
+
+Throws a clear, non-retriable error if the date can't be confidently
+parsed, instead of letting "NaNNaN03" reach Tally.
+====================================
+*/
+
+function formatVoucherDate(rawDate, voucherId) {
+  if (rawDate instanceof Date) {
+    if (isNaN(rawDate.getTime())) {
+      throw new Error(`Voucher ${voucherId}: voucher_date is an invalid Date object`);
+    }
+    const yyyy = rawDate.getUTCFullYear();
+    const mm = String(rawDate.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(rawDate.getUTCDate()).padStart(2, "0");
+    return `${yyyy}${mm}${dd}`;
+  }
+
+  const str = String(rawDate || "").trim();
+
+  // Already YYYYMMDD
+  if (/^\d{8}$/.test(str)) {
+    return str;
+  }
+
+  // ISO date / ISO datetime: "2026-06-03" or "2026-06-03T00:00:00.000Z"
+  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    const [, yyyy, mm, dd] = isoMatch;
+    return `${yyyy}${mm}${dd}`;
+  }
+
+  throw new Error(`Voucher ${voucherId}: unable to parse voucher_date "${str}" into YYYYMMDD`);
+}
+
+/*
+====================================
 RUN PYTHON & SEND TO TALLY
 ====================================
 */
@@ -214,6 +267,11 @@ async function markStalePendingAsFailed() {
 /*
 ====================================
 STARTUP: ENQUEUE ALL PENDING VOUCHERS
+
+Uses the shared safeEnqueueVoucher() helper so this logic is
+identical to what the routes use when reassigning a ledger.
+This guarantees no duplicate/stale-jobId behavior, no matter
+which code path triggered the enqueue.
 ====================================
 */
 
@@ -224,28 +282,14 @@ async function enqueuePendingVoucherJobs() {
      ORDER BY id ASC`
   );
 
+  let enqueuedCount = 0;
+
   for (const row of result.rows) {
-    const jobId = getVoucherJobId(row.id);
-    const existingJob = await voucherQueue.getJob(jobId);
-
-    if (existingJob) {
-      const state = await existingJob.getState();
-      const isProcessable = [
-        "waiting", "active", "delayed", "prioritized", "paused", "waiting-children"
-      ].includes(state);
-
-      if (isProcessable) continue;
-      await existingJob.remove();
-    }
-
-    await voucherQueue.add(
-      "pushVoucher",
-      { voucherId: row.id },
-      { ...VOUCHER_JOB_OPTIONS, jobId }
-    );
+    const { action } = await safeEnqueueVoucher(row.id);
+    if (action === "enqueued") enqueuedCount++;
   }
 
-  console.log(`Enqueued ${result.rowCount} pending voucher jobs`);
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending voucher jobs (rest already queued/active)`);
 }
 
 /*
@@ -283,8 +327,21 @@ const worker = new Worker(
       const ledgers = buildLedgers(voucher, amount);
 
       // Format date → YYYYMMDD for Tally
-      const d = new Date(voucher.voucher_date);
-      const formattedDate = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+      //
+      // IMPORTANT: do NOT do `new Date(voucher.voucher_date)` then read
+      // back with .getFullYear()/.getMonth()/.getDate(). node-postgres
+      // returns DATE columns as a JS Date built at UTC midnight, but the
+      // local getters above read it back in the SERVER's local timezone.
+      // Depending on TZ config this silently shifts the date by ±1 day,
+      // or — if voucher.voucher_date isn't a clean parseable value —
+      // produces NaN, which becomes a string like "NaNNaN03". Tally then
+      // rejects it with the misleading "Voucher date is missing" error
+      // instead of a clear parsing error, and the bug only shows up
+      // intermittently depending on server timezone / row.
+      //
+      // Fix: extract the date parts directly without ever going through
+      // local-time conversion.
+      const formattedDate = formatVoucherDate(voucher.voucher_date, voucher.id);
 
       const payload = {
         company: voucher.company_name,
@@ -307,7 +364,7 @@ const worker = new Worker(
       if (success) {
         await pool.query(
           `UPDATE app_test.contra_vouchers
-           SET status = 'SUCCESS', tally_response = $1, synced_at = NOW(), updated_at = NOW()
+           SET status = 'SUCCESS', tally_response = $1, updated_at = NOW()
            WHERE id = $2`,
           [tallyResponse, voucherId]
         );

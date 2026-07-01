@@ -4,6 +4,8 @@ export async function up(knex) {
   const hasStatementPassword= await knex.schema.withSchema("app_test").hasColumn("contra_vouchers", "statement_password");
   const hasFileName         = await knex.schema.withSchema("app_test").hasColumn("contra_vouchers", "file_name");
   const hasUpdatedAt        = await knex.schema.withSchema("app_test").hasColumn("contra_vouchers", "updated_at");
+  const hasMerchantName     = await knex.schema.withSchema("app_test").hasColumn("contra_vouchers", "merchant_name");
+  const hasGroupKey         = await knex.schema.withSchema("app_test").hasColumn("contra_vouchers", "group_key");
 
   await knex.schema
     .withSchema("app_test")
@@ -13,6 +15,8 @@ export async function up(knex) {
       if (!hasStatementPassword) table.string("statement_password");
       if (!hasFileName)          table.string("file_name");
       if (!hasUpdatedAt)         table.timestamp("updated_at").defaultTo(knex.fn.now());
+      if (!hasMerchantName)      table.text("merchant_name");
+      if (!hasGroupKey)          table.text("group_key");
     });
 }
 
@@ -25,5 +29,7 @@ export async function down(knex) {
       table.dropColumn("statement_password");
       table.dropColumn("file_name");
       table.dropColumn("updated_at");
+      table.dropColumn("merchant_name");
+      table.dropColumn("group_key");
     });
 }

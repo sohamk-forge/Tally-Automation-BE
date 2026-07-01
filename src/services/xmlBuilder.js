@@ -1409,3 +1409,111 @@ export const getGodownsXML = (company) => {
 `;
 
 };
+
+export const getSalesGroupXML = (company) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>SalesGroupOnly</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="SalesGroupFilter">
+      $$IsEqual:$Name:"Sales Account" OR $$IsEqual:$Name:"Sales Accounts"
+     </SYSTEM>
+     <COLLECTION NAME="SalesGroupOnly">
+      <TYPE>Group</TYPE>
+      <FILTERS>SalesGroupFilter</FILTERS>
+      <FETCH>Name</FETCH>
+      <FETCH>Parent</FETCH>
+      <FETCH>OpeningBalance</FETCH>
+      <FETCH>ClosingBalance</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
+};
+
+export const getPurchaseGroupXML = (company) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>PurchaseGroupOnly</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="PurchaseGroupFilter">
+      $$IsEqual:$Name:"Purchase Account" OR $$IsEqual:$Name:"Purchase Accounts"
+     </SYSTEM>
+     <COLLECTION NAME="PurchaseGroupOnly">
+      <TYPE>Group</TYPE>
+      <FILTERS>PurchaseGroupFilter</FILTERS>
+      <FETCH>Name</FETCH>
+      <FETCH>Parent</FETCH>
+      <FETCH>OpeningBalance</FETCH>
+      <FETCH>ClosingBalance</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
+};
+
+export const getStockInHandXML = (company) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>StockInHandOnly</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="StockInHandFilter">
+      $$IsEqual:$Name:"Stock-in-Hand" OR $$IsEqual:$Name:"Stock in Hand"
+     </SYSTEM>
+     <COLLECTION NAME="StockInHandOnly">
+      <TYPE>Group</TYPE>
+      <FILTERS>StockInHandFilter</FILTERS>
+      <FETCH>Name</FETCH>
+      <FETCH>Parent</FETCH>
+      <FETCH>OpeningBalance</FETCH>
+      <FETCH>ClosingBalance</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
+};
