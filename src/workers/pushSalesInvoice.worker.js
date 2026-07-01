@@ -104,12 +104,14 @@
           console.log(`Sales Ledger Mapping Not Configured : ${company}`);
           return { salesId, status: "failed" };
         }
-
         const mapping = mappingResult.rows[0];
 
-        console.log("Sales Ledger Mapping Found");
+const salesLedger =
+  invoiceData.sales_ledger || mapping.sales_ledger;
+
+        console.log(`   Sales Ledger       : ${salesLedger}`);
         console.log(`   Sales Parent Group : ${mapping.sales_parent_group}`);
-  console.log(`   Sales Ledger       : ${invoiceData.sales_ledger}`);
+  console.log(`   Sales Ledger       : ${salesLedger}`);
         console.log(`   CGST        : ${mapping.cgst_ledger}`);
         console.log(`   SGST        : ${mapping.sgst_ledger}`);
         console.log(`   IGST        : ${mapping.igst_ledger || "N/A"}`);
@@ -124,7 +126,7 @@
         */
 
       const ledgersToValidate = [
-          { field: "sales_ledger", value: invoiceData.sales_ledger },
+  { field: "sales_ledger", value: salesLedger },
           { field: "cgst_ledger",         value: mapping.cgst_ledger },
           { field: "sgst_ledger",         value: mapping.sgst_ledger },
           { field: "rounded_off_ledger",  value: mapping.rounded_off_ledger },
@@ -301,7 +303,7 @@
         const sanitizedInvoiceData = {
           ...invoiceData,
         sales_parent_group: mapping.sales_parent_group,
-          sales_ledger: invoiceData.sales_ledger,
+          sales_ledger: salesLedger,
           cgst_ledger:         mapping.cgst_ledger,
           sgst_ledger:         mapping.sgst_ledger,
           igst_ledger:         mapping.igst_ledger || "",
@@ -312,12 +314,12 @@
         line_items: items.map((item) => ({
     ...item,
     item_name: item.item_name?.trim() || item.name?.trim() || "",
-  ledger: invoiceData.sales_ledger,
+  ledger: salesLedger,
     godown_name: resolvedGodownName,
   })),
         };
 
-        console.log("Sales Ledger Mapping Injected :");
+       console.log(`   Sales Ledger       : ${salesLedger}`);
         console.log(`   Sales Parent Group : ${mapping.sales_parent_group}`);
   console.log(`   Sales Ledger       : ${invoiceData.sales_ledger}`);
         console.log(`   CGST Ledger      : ${mapping.cgst_ledger}`);

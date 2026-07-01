@@ -226,4 +226,40 @@ router.get("/sales-ledgers/:companyId", async (req, res) => {
   }
 });
 
+router.patch("/sales-ledger/:companyId", async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { sales_ledger } = req.body;
+
+    if (!sales_ledger) {
+      return res.status(400).json({
+        status: "error",
+        message: "sales_ledger required"
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE app_test.company_sales_ledger_mappings
+      SET
+        sales_ledger = $1,
+        updated_at = NOW()
+      WHERE company_id = $2
+      `,
+      [sales_ledger, companyId]
+    );
+
+    return res.json({
+      status: "success",
+      message: "Sales ledger updated successfully"
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
 export default router;

@@ -187,7 +187,7 @@ const processInvoiceJobs = async () => {
                 row.id
               ]
             );
-            console.log(`❌ Invoice Date Outside Financial Year : ${invoiceDate}`);
+            console.log(`❌ PURCHASE Worker - Invoice Date Outside Financial Year : ${invoiceDate}`);
             continue;
           }
         }
