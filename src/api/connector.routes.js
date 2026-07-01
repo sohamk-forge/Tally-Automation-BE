@@ -141,4 +141,54 @@ router.post("/pair", async (req, res) => {
   }
 });
 
+router.get("/current", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+
+    if (!user_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "user_id is required"
+      });
+    }
+console.log("Incoming user_id:", user_id);
+
+  const result = await pool.query(
+`
+SELECT
+    company_name,
+    from_year,
+    to_year,
+    tally_connected
+FROM app_test.connector_machines
+WHERE user_id = $1
+  AND tally_connected = true
+ORDER BY updated_at DESC
+LIMIT 1
+`,
+[user_id]
+);
+
+    if (result.rows.length === 0) {
+      return res.json({
+        status: "success",
+        paired: false,
+        data: null
+      });
+    }
+
+    return res.json({
+      status: "success",
+      paired: true,
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
 export default router;

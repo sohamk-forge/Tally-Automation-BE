@@ -260,23 +260,34 @@ const salesLedger =
               "";
             return itemName.toLowerCase() === missingItem.toLowerCase();
           });
-
-          await pool.query(
-            `
-            UPDATE app_test.sales_invoice_extractions
-            SET
-              sync_status = 'failed',
-              error_message = $1,
-              stock_details = $2,
-              updated_at = NOW()
-            WHERE id = $3
-            `,
-            [
-              `Stock item not found: ${missingItem}`,
-              missingStock || null,
-              salesId
-            ]
-          );
+const stockMasterResult = await pool.query(
+  `
+  SELECT *
+  FROM app_test.stock_group_summary
+  WHERE company_id = $1
+    AND LOWER(TRIM(item_name)) = LOWER(TRIM($2))
+  LIMIT 1
+  `,
+  [companyId, missingItem]
+);
+const stockDetails =
+  stockMasterResult.rows[0] || missingStock;
+         await pool.query(
+  `
+  UPDATE app_test.sales_invoice_extractions
+  SET
+    sync_status = 'failed',
+    error_message = $1,
+    stock_details = $2,
+    updated_at = NOW()
+  WHERE id = $3
+  `,
+  [
+    `Stock item not found: ${missingItem}`,
+    stockDetails,
+    salesId
+  ]
+);
 
           console.log("Stock Details Saved");
           return { salesId, status: "failed" };

@@ -2,7 +2,16 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
-import { generateSalesXml } from "../services/salesXmlGenerator.js";
+import {
+  createBankLedgerXML,
+  createOdBankXML
+} from "../services/pushXmlBuilder.js";
+import {
+  BANK_QUEUE_NAME,
+  BANK_JOB_OPTIONS,
+  getBankJobId,
+  bankQueue
+} from "../queues/bank.queue.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -10,34 +19,17 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
-// Queue configuration
-export const SALES_QUEUE_NAME = "sales-invoice-queue";
-export const SALES_JOB_OPTIONS = {
-  attempts: 3,
-  backoff: {
-    type: "exponential",
-    delay: 5000
-  },
-  removeOnComplete: 100,
-  removeOnFail: 500
-};
-
-export function getSalesJobId(salesId) {
-  return `sales-${salesId}`;
-}
-
-// Initialize queue (to be exported for enqueueing)
-import { Queue } from "bullmq";
-export const salesQueue = new Queue(SALES_QUEUE_NAME, {
-  connection,
-  defaultJobOptions: SALES_JOB_OPTIONS
-});
-
-function isTemporarySalesError(error) {
+/*
+====================================
+TEMPORARY ERROR CHECK
+Only retry for connection/network issues,
+not for data/validation errors
+====================================
+*/
+function isTemporaryBankError(error) {
   const code = String(error?.code || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
 
-  // ONLY retry for Tally connection issues
   return [
     "ECONNRESET",
     "ECONNREFUSED",
@@ -57,20 +49,27 @@ function isTemporarySalesError(error) {
     message.includes("etimedout");
 }
 
-async function enqueuePendingSalesJobs() {
+/*
+====================================
+STARTUP RECOVERY
+Re-enqueue any rows stuck as 'pending'
+that don't already have an active job
+====================================
+*/
+async function enqueuePendingBankJobs() {
   const result = await pool.query(
     `
     SELECT id
-    FROM app_test.sales_invoice_extractions
+    FROM app_test.push_bank
     WHERE sync_status = 'pending'
     ORDER BY id ASC
     `
   );
 
   for (const row of result.rows) {
-    const jobId = getSalesJobId(row.id);
+    const jobId = getBankJobId(row.id);
 
-    const existingJob = await salesQueue.getJob(jobId);
+    const existingJob = await bankQueue.getJob(jobId);
 
     if (existingJob) {
       const state = await existingJob.getState();
@@ -91,70 +90,57 @@ async function enqueuePendingSalesJobs() {
       await existingJob.remove();
     }
 
-    await salesQueue.add(
-      "push-sales-invoice",
+    await bankQueue.add(
+      "push-bank",
+      { bankId: row.id },
       {
-        salesId: row.id
-      },
-      {
-        ...SALES_JOB_OPTIONS,
+        ...BANK_JOB_OPTIONS,
         jobId
       }
     );
   }
 }
 
+/*
+====================================
+WORKER
+====================================
+*/
 const worker = new Worker(
-  SALES_QUEUE_NAME,
+  BANK_QUEUE_NAME,
   async (job) => {
-    const { salesId } = job.data;
+    const { bankId } = job.data;
 
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.sales_invoice_extractions
-      WHERE id = $1
-      `,
-      [salesId]
+      `SELECT * FROM app_test.push_bank WHERE id = $1`,
+      [bankId]
     );
 
     const row = result.rows[0];
 
     if (!row) {
-      throw new Error(`Sales invoice ${salesId} not found`);
+      throw new Error(`Bank ledger ${bankId} not found`);
     }
 
     try {
       console.log("");
       console.log("================================");
-      console.log(`PROCESSING SALES INVOICE ID ${salesId}`);
+      console.log(`PROCESSING BANK LEDGER ID ${bankId}`);
       console.log("================================");
 
-      const invoiceData = row.raw_json;
       const company = row.company_name;
-      const customerName = invoiceData.customer_name?.trim() || "";
+
+      console.log(`Company       : ${company}`);
+      console.log(`Ledger Name   : ${row.ledger_name}`);
+      console.log(`Parent Group  : ${row.parent_group}`);
+      console.log(`Bank Name     : ${row.bank_name}`);
+      console.log(`Account No.   : ${row.account_number}`);
+      console.log(`IFSC          : ${row.ifsc_code}`);
 
       /*
       ====================================
-      STEP 1 — SYNC LEDGERS
-      ====================================
-      */
-
-      console.log("Syncing Ledgers...");
-
-      const BASE_URL = process.env.BASE_URL || "http://localhost:5000";
-      
-      const ledgerSyncResponse = await fetch(
-        `${BASE_URL}/api/sync/all-ledgers-sync?company=${encodeURIComponent(company)}`
-      );
-
-      if (!ledgerSyncResponse.ok) {
-        throw new Error("Ledger Sync Failed");
-      }
-
-      /*
-      ====================================
-      STEP 2 — GET COMPANY ID + FY CHECK
+      STEP 1 — CHECK IF LEDGER ALREADY EXISTS IN TALLY
+      (avoid duplicate create attempts)
       ====================================
       */
 
@@ -166,269 +152,75 @@ const worker = new Worker(
 
       if (!companyId) {
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
+          `UPDATE app_test.push_bank
            SET sync_status = 'failed', error_message = 'Company not found', updated_at = NOW()
            WHERE id = $1`,
-          [salesId]
+          [bankId]
         );
         console.log(`Company Not Found : ${company}`);
-        return { salesId, status: "failed" };
+        return { bankId, status: "failed" };
       }
 
-      const companyDetails = await pool.query(
-        `SELECT financial_year_start, financial_year_end FROM app_test.companies WHERE id = $1`,
-        [companyId]
-      );
-      const companyInfo = companyDetails.rows[0];
-
-      const invoiceDate = invoiceData.invoice_date;
-
-      if (!invoiceDate) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = 'invoice_date is missing', updated_at = NOW()
-           WHERE id = $1`,
-          [salesId]
-        );
-        console.log(`Invoice Date Missing for row ${salesId}`);
-        return { salesId, status: "failed" };
-      }
-
-      // FY boundary check
-      const [day, month, year] = invoiceDate.split("-").map(Number);
-      const invoiceJsDate = new Date(year, month - 1, day);
-      const fyStart = new Date(companyInfo.financial_year_start, 3, 1);
-      const fyEnd = new Date(companyInfo.financial_year_end, 2, 31);
-
-      if (invoiceJsDate < fyStart || invoiceJsDate > fyEnd) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [
-            `Invoice date ${invoiceDate} is outside FY ${companyInfo.financial_year_start}-${companyInfo.financial_year_end}`,
-            salesId
-          ]
-        );
-        console.log(`Invoice Date Outside Financial Year : ${invoiceDate}`);
-        return { salesId, status: "failed" };
-      }
-
-      /*
-      ====================================
-      STEP 2.5 — FETCH SALES LEDGER MAPPING
-      ====================================
-      */
-
-      const mappingResult = await pool.query(
-        `SELECT * FROM app_test.company_sales_ledger_mappings WHERE company_id = $1 LIMIT 1`,
-        [companyId]
-      );
-
-      if (!mappingResult.rows.length) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'failed',
-               error_message = 'Sales ledger mapping not configured for this company. Please save mapping first.',
-               updated_at = NOW()
-           WHERE id = $1`,
-          [salesId]
-        );
-        console.log(`Sales Ledger Mapping Not Configured : ${company}`);
-        return { salesId, status: "failed" };
-      }
-
-      const mapping = mappingResult.rows[0];
-
-      console.log("Sales Ledger Mapping Found");
-      console.log(`   Sales Group : ${mapping.sales_parent_group}`);
-      console.log(`   CGST        : ${mapping.cgst_ledger}`);
-      console.log(`   SGST        : ${mapping.sgst_ledger}`);
-      console.log(`   IGST        : ${mapping.igst_ledger || "N/A"}`);
-      console.log(`   TDS         : ${mapping.tds_ledger || "N/A"}`);
-      console.log(`   CESS        : ${mapping.cess_ledger || "N/A"}`);
-      console.log(`   Round Off   : ${mapping.rounded_off_ledger}`);
-
-      /*
-      ====================================
-      STEP 2.6 — VALIDATE MAPPED LEDGERS IN TALLY
-      ====================================
-      */
-
-      const ledgersToValidate = [
-        { field: "sales_parent_group", value: mapping.sales_parent_group },
-        { field: "cgst_ledger", value: mapping.cgst_ledger },
-        { field: "sgst_ledger", value: mapping.sgst_ledger },
-        { field: "rounded_off_ledger", value: mapping.rounded_off_ledger },
-        ...(mapping.igst_ledger ? [{ field: "igst_ledger", value: mapping.igst_ledger }] : []),
-        ...(mapping.tds_ledger ? [{ field: "tds_ledger", value: mapping.tds_ledger }] : []),
-        ...(mapping.cess_ledger ? [{ field: "cess_ledger", value: mapping.cess_ledger }] : []),
-      ];
-
-      let mappingLedgerMissing = false;
-      let missingMappingLedger = "";
-      let missingMappingField = "";
-
-      for (const { field, value } of ledgersToValidate) {
-        const checkResult = await pool.query(
-          `SELECT 1 FROM app_test.all_ledger_details
-           WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) LIMIT 1`,
-          [companyId, value]
-        );
-        if (!checkResult.rows.length) {
-          mappingLedgerMissing = true;
-          missingMappingLedger = value;
-          missingMappingField = field;
-          break;
-        }
-      }
-
-      if (mappingLedgerMissing) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'ledger_missing', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [
-            `Mapped ledger not found in Tally: "${missingMappingLedger}" (field: ${missingMappingField})`,
-            salesId
-          ]
-        );
-        console.log(`Mapped Ledger Not Found In Tally : ${missingMappingLedger} (${missingMappingField})`);
-        return { salesId, status: "failed" };
-      }
-
-      console.log("All Mapped Ledgers Validated");
-
-      /*
-      ====================================
-      STEP 3 — CHECK CUSTOMER LEDGER
-      ====================================
-      */
-
-      const ledgerResult = await pool.query(
+      const existingLedger = await pool.query(
         `SELECT 1 FROM app_test.all_ledger_details
          WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) LIMIT 1`,
-        [companyId, customerName]
+        [companyId, row.ledger_name]
       );
 
-      if (!ledgerResult.rows.length) {
+      if (existingLedger.rows.length > 0) {
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'ledger_missing', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [`Customer ledger not found: ${customerName}`, salesId]
+          `UPDATE app_test.push_bank
+           SET sync_status = 'failed', error_message = 'Ledger already exists in Tally', updated_at = NOW()
+           WHERE id = $1`,
+          [bankId]
         );
-        console.log(`Customer Ledger Not Found : ${customerName}`);
-        return { salesId, status: "failed" };
+        console.log(`Ledger Already Exists In Tally : ${row.ledger_name}`);
+        return { bankId, status: "failed" };
       }
-
-      console.log(`Customer Ledger Found : ${customerName}`);
 
       /*
       ====================================
-      STEP 4 — CHECK STOCK ITEMS (NO SYNC, JUST VALIDATE FROM DB)
+      STEP 2 — BUILD XML
+      Use OD/OCC builder if account_type indicates
+      an overdraft/cash-credit account, else standard
+      bank ledger XML
       ====================================
       */
 
-      console.log("Checking Stock Items From DB...");
+      const isOdAccount =
+        row.account_type === "OD" || row.account_type === "OCC";
 
-      const items = invoiceData.line_items || [];
-
-      let stockMissing = false;
-      let missingItem = "";
-
-      for (const item of items) {
-        const itemName = item.item_name?.trim() || "";
-        console.log(`Checking Stock : "${itemName}"`);
-
-        const stockResult = await pool.query(
-          `SELECT 1 FROM app_test.stock_group_summary
-           WHERE company_name = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2)) LIMIT 1`,
-          [company, itemName]
-        );
-
-        if (!stockResult.rows.length) {
-          stockMissing = true;
-          missingItem = itemName;
-          break;
-        }
-      }
-
-      if (stockMissing) {
-        await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
-           SET sync_status = 'stock_missing', error_message = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [`Stock item not found: ${missingItem}`, salesId]
-        );
-        console.log(`Stock Item Not Found : ${missingItem}`);
-        return { salesId, status: "failed" };
-      }
-
-      console.log("All Stock Items Found");
-
-      /*
-      ====================================
-      STEP 5.25 — RESOLVE GODOWN
-      ====================================
-      */
-
-      const resolvedGodownName =
-        invoiceData.godown_name?.trim() ||
-        "Main Location";
-
-      console.log(`Godown Name : ${resolvedGodownName}`);
-
-      /*
-      ====================================
-      STEP 5.5 — INJECT LEDGER MAPPING
-      ====================================
-      */
-
-      const sanitizedInvoiceData = {
-        ...invoiceData,
-        sales_ledger: mapping.sales_parent_group,
-        cgst_ledger: mapping.cgst_ledger,
-        sgst_ledger: mapping.sgst_ledger,
-        igst_ledger: mapping.igst_ledger || "",
-        tds_ledger: mapping.tds_ledger || "",
-        cess_ledger: mapping.cess_ledger || "",
-        rounded_off_ledger: mapping.rounded_off_ledger,
-        godown_name: resolvedGodownName,
-        line_items: items.map((item) => ({
-          ...item,
-          item_name: item.item_name?.trim() || "",
-          ledger: mapping.sales_parent_group,
-          godown_name: resolvedGodownName
-        })),
+      const xmlPayload = {
+        company,
+        ledger_name: row.ledger_name,
+        parent: row.parent_group || "Bank Accounts",
+        opening_balance: row.opening_balance,
+        bank_name: row.bank_name,
+        branch_name: row.branch_name,
+        account_holder: row.account_holder,
+        account_number: row.account_number,
+        ifsc_code: row.ifsc_code,
+        swift_code: row.swift_code,
+        address: row.address,
+        state: row.state,
+        country: row.country || "India",
+        pincode: row.pincode,
+        contact_person: row.contact_person,
+        mobile: row.mobile,
+        email: row.email,
+        account_type: row.account_type,
+        od_limit: row.od_limit
       };
 
-      console.log("Sales Ledger Mapping Injected :");
-      console.log(`   Sales Ledger     : ${mapping.sales_parent_group}`);
-      console.log(`   CGST Ledger      : ${mapping.cgst_ledger}`);
-      console.log(`   SGST Ledger      : ${mapping.sgst_ledger}`);
-      console.log(`   IGST Ledger      : ${mapping.igst_ledger || "N/A"}`);
-      console.log(`   TDS Ledger       : ${mapping.tds_ledger || "N/A"}`);
-      console.log(`   CESS Ledger      : ${mapping.cess_ledger || "N/A"}`);
-      console.log(`   Round Off Ledger : ${mapping.rounded_off_ledger}`);
-      console.log(`   Godown Name      : ${resolvedGodownName}`);
+      const xml = isOdAccount
+        ? createOdBankXML(xmlPayload)
+        : createBankLedgerXML(xmlPayload);
+
+      console.log(`XML Generated (${isOdAccount ? "OD/OCC" : "Standard Bank"} Ledger)`);
 
       /*
       ====================================
-      STEP 6 — GENERATE SALES XML
-      ====================================
-      */
-
-      const xml = await generateSalesXml({
-        company,
-        ...sanitizedInvoiceData,
-      });
-
-      console.log("Sales XML Generated");
-
-      /*
-      ====================================
-      STEP 7 — PUSH TO TALLY
+      STEP 3 — PUSH TO TALLY
       ====================================
       */
 
@@ -451,66 +243,53 @@ const worker = new Worker(
         const errorMessage = lineError || "Tally push failed";
 
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
+          `UPDATE app_test.push_bank
            SET sync_status = 'failed', tally_response = $1, error_message = $2, updated_at = NOW()
            WHERE id = $3`,
-          [tallyResponse, errorMessage, salesId]
+          [tallyResponse, errorMessage, bankId]
         );
 
-        console.log(`Sales Invoice Failed (Tally Error): ${salesId} - ${errorMessage}`);
-        return { salesId, status: "failed" };
+        console.log(`Bank Ledger Failed (Tally Error): ${bankId} - ${errorMessage}`);
+        return { bankId, status: "failed" };
       }
 
       /*
       ====================================
-      STEP 8 — SUCCESS
+      STEP 4 — SUCCESS
       ====================================
       */
 
       await pool.query(
-        `UPDATE app_test.sales_invoice_extractions
-         SET sync_status = 'completed', tally_response = $1, error_message = NULL, updated_at = NOW(), synced_at = NOW()
+        `UPDATE app_test.push_bank
+         SET sync_status = 'success', tally_response = $1, error_message = NULL, updated_at = NOW(), synced_at = NOW()
          WHERE id = $2`,
-        [tallyResponse, salesId]
+        [tallyResponse, bankId]
       );
 
-      console.log(`Sales Invoice Success : ${salesId}`);
-      return { salesId, status: "success" };
+      console.log(`Bank Ledger Success : ${bankId}`);
+      return { bankId, status: "success" };
 
     } catch (error) {
-      console.error(`SALES ATTEMPT FAILED: ${salesId}`, error.message);
+      console.error(`BANK ATTEMPT FAILED: ${bankId}`, error.message);
 
-      // Only retry for Tally connection issues
-      if (isTemporarySalesError(error)) {
+      if (isTemporaryBankError(error)) {
         await pool.query(
-          `
-          UPDATE app_test.sales_invoice_extractions
-          SET
-            sync_status = 'pending',
-            error_message = $1,
-            updated_at = NOW()
-          WHERE id = $2
-          `,
-          [error.message, salesId]
+          `UPDATE app_test.push_bank
+           SET sync_status = 'pending', error_message = NULL, updated_at = NOW()
+           WHERE id = $1`,
+          [bankId]
         );
-
         throw error; // BullMQ will retry
       }
 
-      // Permanent error - mark as failed
       await pool.query(
-        `
-        UPDATE app_test.sales_invoice_extractions
-        SET
-          sync_status = 'failed',
-          error_message = $1,
-          updated_at = NOW()
-        WHERE id = $2
-        `,
-        [error.message, salesId]
+        `UPDATE app_test.push_bank
+         SET sync_status = 'failed', error_message = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [error.message, bankId]
       );
 
-      return { salesId, status: "failed" };
+      return { bankId, status: "failed" };
     }
   },
   {
@@ -520,50 +299,44 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`Sales job completed: ${job.id}`);
+  console.log(`Bank job completed: ${job.id}`);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`Sales job failed: ${job?.id}`, error.message);
+  console.error(`Bank job failed: ${job?.id}`, error.message);
 
   if (!job) {
     return;
   }
 
-  const maximumAttempts = Number(job.opts.attempts || 1);
+  const maximumAttempts = Number(job.opts.attempts || BANK_JOB_OPTIONS.attempts || 5);
 
   if (job.attemptsMade < maximumAttempts) {
-    return;
+    return; // BullMQ will retry
   }
 
   try {
-    const { salesId } = job.data;
-
+    const { bankId } = job.data;
     await pool.query(
-      `
-      UPDATE app_test.sales_invoice_extractions
-      SET
-        sync_status = 'failed',
-        error_message = $1,
-        updated_at = NOW()
-      WHERE id = $2
-      `,
-      [error.message, salesId]
+      `UPDATE app_test.push_bank
+       SET sync_status = 'failed', error_message = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [error.message, bankId]
     );
   } catch (updateError) {
-    console.error(`Sales final failure update failed: ${job.id}`, updateError.message);
+    console.error(`Bank final failure update failed: ${job.id}`, updateError.message);
   }
 });
 
 worker.on("error", (error) => {
-  console.error("Sales worker error:", error.message);
+  console.error("Bank worker error:", error.message);
 });
 
-// Enqueue pending jobs on startup
-enqueuePendingSalesJobs().catch((error) => {
-  console.error("Sales startup recovery failed:", error.message);
+// Enqueue any pending jobs on startup
+enqueuePendingBankJobs().catch((error) => {
+  console.error("Bank startup recovery failed:", error.message);
 });
 
-console.log("Push Sales Invoice BullMQ Worker Started");
+console.log("Push Bank BullMQ Worker Started");
 
 export default worker;
