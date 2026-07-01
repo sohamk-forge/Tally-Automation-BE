@@ -174,4 +174,56 @@ router.get("/sales-ledger-mapping/:companyId", async (req, res) => {
 
 });
 
+router.get("/sales-ledgers/:companyId", async (req, res) => {
+  try {
+
+    const { companyId } = req.params;
+
+    const mapping = await pool.query(
+      `
+      SELECT sales_parent_group
+      FROM app_test.company_sales_ledger_mappings
+      WHERE company_id = $1
+      LIMIT 1
+      `,
+      [companyId]
+    );
+
+    if (!mapping.rows.length) {
+      return res.status(404).json({
+        status: "error",
+        message: "Sales ledger mapping not found"
+      });
+    }
+
+    const parentGroup = mapping.rows[0].sales_parent_group;
+
+    const result = await pool.query(
+      `
+      SELECT ledger_name
+      FROM app_test.all_ledger_details
+      WHERE company_id = $1
+        AND LOWER(TRIM(parent_group)) = LOWER(TRIM($2))
+      ORDER BY ledger_name
+      `,
+      [companyId, parentGroup]
+    );
+
+    return res.status(200).json({
+      status: "success",
+      sales_parent_group: parentGroup,
+      count: result.rows.length,
+      data: result.rows
+    });
+
+  } catch (err) {
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+
+  }
+});
+
 export default router;

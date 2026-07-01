@@ -13,23 +13,26 @@ const router = express.Router();
 
 router.post("/sales-invoices", async (req, res) => {
 
-  console.log("BODY RECEIVED:");
-  console.log(JSON.stringify(req.body, null, 2));
+console.log("BODY RECEIVED:");
+console.log(JSON.stringify(req.body, null, 2));
 
-  try {
+try {
 
-    const {
-  company,
-  invoice_data,
-  narration
-} = req.body;
+  const {
+    company,
+    invoice_data,
+    narration
+  } = req.body;
 
-    if (!company || !invoice_data) {
-      return res.status(400).json({
-        status: "error",
-        message: "company and invoice_data required"
-      });
-    }
+  // ✅ Put it HERE
+  console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
+
+  if (!company || !invoice_data) {
+    return res.status(400).json({
+      status: "error",
+      message: "company and invoice_data required"
+    });
+  }
 
     console.log("");
     console.log("====================================");

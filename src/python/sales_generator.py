@@ -1,6 +1,7 @@
 import json
 import sys
 import os
+from datetime import datetime
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
@@ -35,20 +36,40 @@ tds_ledger         = invoice.get("tds_ledger",         "")
 cess_ledger        = invoice.get("cess_ledger",        "")
 rounded_off_ledger = invoice.get("rounded_off_ledger", "Round Off")
 
+print("invoice_date =", invoice.get("invoice_date"), file=sys.stderr)
+print("type =", type(invoice.get("invoice_date")), file=sys.stderr)
+
+
 def parse_date(d):
     if not d:
         return ""
-    if "-" in d:
-        parts = d.split("-")
-        if len(parts[0]) == 4:
-            return d.replace("-", "")
-        else:
-            day, mon, yr = parts
-            return f"{yr}{mon}{day}"
-    return d
+
+    if isinstance(d, datetime):
+        return d.strftime("%Y%m%d")
+
+    d = str(d).strip()
+
+    formats = [
+        "%d-%m-%Y",
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%d/%m/%Y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(d, fmt).strftime("%Y%m%d")
+        except ValueError:
+            pass
+
+    return d.replace("-", "").replace("/", "")
 
 date     = parse_date(invoice.get("invoice_date", ""))
 ref_date = parse_date(invoice.get("reference_date", invoice.get("invoice_date", "")))
+print("PARSED DATE =", date, file=sys.stderr)
+print("PARSED REF DATE =", ref_date, file=sys.stderr)
 
 voucher_number = str(invoice.get("invoice_no") or invoice.get("voucher_number") or "")
 invoice_no     = invoice.get("invoice_no", "")

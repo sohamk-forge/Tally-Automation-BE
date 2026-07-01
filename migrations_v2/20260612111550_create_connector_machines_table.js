@@ -9,7 +9,7 @@ export async function up(knex) {
             table.bigInteger("user_id").notNullable();
 
             table.string("machine_id")
-                .notNullable()
+                .notNullable()  
                 .unique();
 
             table.string("machine_name");
