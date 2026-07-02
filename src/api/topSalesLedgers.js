@@ -33,30 +33,52 @@ function isExcludedLedger(name) {
 /* ===================================================
    GET COMPANY NAME + FINANCIAL YEAR FROM DB
 =================================================== */
-async function getCompanyInfo(companyId) {
-  const result = await pool.query(
-    `SELECT name, financial_year_start, financial_year_end
-     FROM app_test.companies
-     WHERE id = $1`,
-    [companyId]
-  );
+async function getCompanyInfo(companyId, companyName) {
+  let result;
+
+  if (companyName) {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE LOWER(name) = LOWER($1)`,
+      [companyName]
+    );
+  } else {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE id = $1`,
+      [companyId]
+    );
+  }
 
   const row = result.rows[0];
   if (!row) return null;
 
-  if (!row.financial_year_start || !row.financial_year_end) {
+  // fallback if DB year missing
+  if (!row.financial_year_start) {
     const now = new Date();
     const y = now.getFullYear();
+
     return {
       name: row.name,
-      yearStart: `${y}-01-01`,
-      yearEnd: `${y + 1}-01-01`,
+      yearStart: `${y}-04-01`,
+      yearEnd: `${y + 1}-04-01`,
       fyLabel: `${y}-${y + 1}`
     };
   }
 
-  const startYear = row.financial_year_start;
-  const endYear = row.financial_year_end;
+  const startYear = Number(row.financial_year_start);
+
+  // IMPORTANT:
+  // Ignore DB financial_year_end because DB may contain wrong values like 2028.
+  // Always force FY to 1 year only.
+  const endYear = startYear + 1;
+
+  console.log("COMPANY:", row.name);
+  console.log("DB FY START:", row.financial_year_start);
+  console.log("DB FY END:", row.financial_year_end);
+  console.log("USING FY:", `${startYear}-04-01 to ${endYear}-04-01`);
 
   return {
     name: row.name,
@@ -101,7 +123,7 @@ async function fetchVouchersFromTally(company, fromDate, toDate) {
         xml,
         {
           headers: { "Content-Type": "application/xml" },
-          timeout: 60000
+          timeout: 600000
         }
       );
 
@@ -231,35 +253,46 @@ function getTopSellingLedgers(vouchers) {
 router.get("/top-sales-ledgers", async (req, res) => {
   try {
     const companyId = req.query.company_id;
+    const companyName = req.query.company;
 
-    if (!companyId) {
+    let companyInfo;
+
+    if (companyId) {
+      companyInfo = await getCompanyInfo(companyId, null);
+    } else if (companyName) {
+      companyInfo = await getCompanyInfo(null, companyName);
+    } else {
       return res.status(400).json({
         status: "error",
-        message: "company_id query parameter is required"
+        message: "company_id or company query parameter is required"
       });
     }
-
-    const companyInfo = await getCompanyInfo(companyId);
 
     if (!companyInfo) {
       return res.status(404).json({
         status: "error",
-        message: `Company with id ${companyId} not found. Run /api/v1/companies/sync first.`
+        message: "Company not found"
       });
     }
 
-    const { name: company, yearStart, yearEnd, fyLabel } = companyInfo;
+    const { id, name: company, yearStart, yearEnd, fyLabel } = companyInfo;
+
+    console.log("COMPANY SENT TO TALLY:", JSON.stringify(company));
 
     const tallyFrom = yearStart.replace(/-/g, "");
     const tallyTo = yearEnd.replace(/-/g, "");
 
-    const vouchers = await fetchVouchersFromTally(company, tallyFrom, tallyTo);
+    const vouchers = await fetchVouchersFromTally(
+      company,
+      tallyFrom,
+      tallyTo
+    );
 
     const { topLedgers, grandTotal } = getTopSellingLedgers(vouchers);
 
     return res.status(200).json({
       status: "success",
-      company_id: companyId,
+      company_id: id,
       company,
       financial_year: fyLabel,
       financial_year_start: yearStart,
@@ -272,11 +305,11 @@ router.get("/top-sales-ledgers", async (req, res) => {
 
   } catch (err) {
     console.error("❌ TOP SALES LEDGERS ERROR:", err.message);
+
     return res.status(500).json({
       status: "error",
       message: err.message
     });
   }
 });
-
 export default router;

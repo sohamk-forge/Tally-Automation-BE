@@ -9,30 +9,44 @@ const router = express.Router();
 /* ===================================================
    GET COMPANY NAME + FINANCIAL YEAR FROM DB
 =================================================== */
-async function getCompanyInfo(companyId) {
-  const result = await pool.query(
-    `SELECT name, financial_year_start, financial_year_end
-     FROM app_test.companies
-     WHERE id = $1`,
-    [companyId]
-  );
+async function getCompanyInfo(companyId, companyName) {
+  let result;
+
+  if (companyName) {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE LOWER(name) = LOWER($1)`,
+      [companyName]
+    );
+  } else {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE id = $1`,
+      [companyId]
+    );
+  }
 
   const row = result.rows[0];
   if (!row) return null;
 
-  if (!row.financial_year_start || !row.financial_year_end) {
+  if (!row.financial_year_start) {
     const now = new Date();
     const y = now.getFullYear();
+
     return {
       name: row.name,
-      yearStart: `${y}-01-01`,
-      yearEnd: `${y + 1}-01-01`,
+      yearStart: `${y}-04-01`,
+      yearEnd: `${y + 1}-04-01`,
       fyLabel: `${y}-${y + 1}`
     };
   }
 
-  const startYear = row.financial_year_start;
-  const endYear = row.financial_year_end;
+  const startYear = Number(row.financial_year_start);
+
+  // Ignore DB end year if wrong
+  const endYear = startYear + 1;
 
   return {
     name: row.name,
@@ -230,31 +244,33 @@ function bucketVouchers(vouchers, period) {
 router.get("/sales-purchase", async (req, res) => {
   try {
     const companyId = req.query.company_id;
+    const companyName = req.query.company;
 
-    if (!companyId) {
+    if (!companyId && !companyName) {
       return res.status(400).json({
         status: "error",
-        message: "company_id query parameter is required"
+        message: "company_id or company query parameter is required"
       });
     }
 
-    const companyInfo = await getCompanyInfo(companyId);
+    const companyInfo = await getCompanyInfo(companyId, companyName);
 
     if (!companyInfo) {
       return res.status(404).json({
         status: "error",
-        message: `Company with id ${companyId} not found. Run /api/v1/companies/sync first.`
+        message: "Company not found"
       });
     }
 
     const { name: company, yearStart, yearEnd, fyLabel } = companyInfo;
+
+    console.log("COMPANY SENT TO TALLY:", JSON.stringify(company));
 
     const tallyFrom = yearStart.replace(/-/g, "");
     const tallyTo = yearEnd.replace(/-/g, "");
 
     const vouchers = await fetchVouchersFromTally(company, tallyFrom, tallyTo);
 
-    // day/week/month: keep sales_total + purchase_total only (no net)
     const stripNet = (arr) =>
       arr.map(({ period_start, sales_total, purchase_total }) => ({
         period_start,
@@ -265,14 +281,14 @@ router.get("/sales-purchase", async (req, res) => {
     const day = stripNet(bucketVouchers(vouchers, "day"));
     const week = stripNet(bucketVouchers(vouchers, "week"));
     const month = stripNet(bucketVouchers(vouchers, "month"));
-
-    // year: keep sales_total + purchase_total + net (full data)
     const year = bucketVouchers(vouchers, "year");
 
     const todayStr = new Date().toISOString().split("T")[0];
+
     const rawToday = bucketVouchers(vouchers, "day").find(
       (d) => d.period_start === todayStr
     );
+
     const today = rawToday
       ? {
           period_start: rawToday.period_start,
@@ -287,7 +303,7 @@ router.get("/sales-purchase", async (req, res) => {
 
     return res.status(200).json({
       status: "success",
-      company_id: companyId,
+      company_id: companyId || null,
       company,
       financial_year: fyLabel,
       financial_year_start: yearStart,
@@ -304,11 +320,11 @@ router.get("/sales-purchase", async (req, res) => {
 
   } catch (err) {
     console.error("❌ SALES-PURCHASE TREND ERROR:", err.message);
+
     return res.status(500).json({
       status: "error",
       message: err.message
     });
   }
 });
-
 export default router;

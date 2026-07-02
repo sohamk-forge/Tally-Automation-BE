@@ -425,6 +425,7 @@ app.use("/api/v1", monthlySalesTrendRouter);
 
 app.use("/api/v1/challan", challanRoutes);
 
+
 /* =================================
    DEFAULT API
 ================================= */

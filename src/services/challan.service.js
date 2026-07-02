@@ -1,27 +1,20 @@
 /**
  * src/services/challan.service.js
  *
- * Business logic for challan creation, numbering, and retrieval.
- *
- * Challan number format:
- *   <prefix><padded_seq>
- *   e.g. prefix = "25-26/"  →  "25-26/0001", "25-26/0002" ...
- *
- * ONE-API DESIGN:
- *   createChallan() now handles BOTH prefix setup and challan creation.
- *   - First ever call for a company: pass "prefix" in the body → it gets
- *     saved automatically, and the first challan becomes <prefix>0001.
- *   - Every call after that: "prefix" (if sent) is IGNORED — the prefix
- *     already stored for that company is always used, and the number just
- *     keeps incrementing (0002, 0003, ...).
- *   - If no prefix exists yet AND none is sent → clear error is thrown.
- *
- * The counter increment (and the first-time prefix insert) happen ATOMICALLY
- * inside a DB transaction with a row lock, so concurrent requests never
- * collide or get duplicate numbers.
+ * Challan numbers: 0001, 0002, 0003 ...
+ * - No prefix
+ * - Starts from 0001 automatically
+ * - If DB is cleared, resets to 0001
+ * - User never inputs the number
  */
 
 import pool from "../db/index.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CHALLAN_PAD_LENGTH = 4; // 0001, 0002, ...
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -36,13 +29,10 @@ function toNum(v, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
-/**
- * Compute line-level tax amounts and totals from raw item input.
- *
- * @param {object} item
- * @param {string} supplyType  "interstate" | "intrastate"  (default intrastate)
- * @returns {object}  enriched item with computed amounts
- */
+function formatChallanNo(seq) {
+  return String(seq).padStart(CHALLAN_PAD_LENGTH, "0");
+}
+
 function computeItem(item, supplyType = "intrastate") {
   const qty        = toNum(item.qty);
   const rate       = toNum(item.rate);
@@ -53,8 +43,7 @@ function computeItem(item, supplyType = "intrastate") {
   const grossAmt   = round2(qty * rate);
   const discAmt    = round2(grossAmt * discPct / 100);
   const taxableAmt = round2(grossAmt - discAmt);
-
-  const totalTax = round2(taxableAmt * gstRate / 100);
+  const totalTax   = round2(taxableAmt * gstRate / 100);
 
   let cgst = 0, sgst = 0, igst = 0;
   if (supplyType === "interstate") {
@@ -64,12 +53,10 @@ function computeItem(item, supplyType = "intrastate") {
     sgst = round2(totalTax / 2);
   }
 
-  const lineTotal = round2(taxableAmt + totalTax);
-
   return {
     item_name:        String(item.item_name || "").trim(),
     godown_name:      String(item.godown_name || "").trim() || null,
-    hsn_code:         String(item.hsn_code || "").trim()   || null,
+    hsn_code:         String(item.hsn_code   || "").trim() || null,
     qty,
     rate,
     gst_rate:         `${gstRate}%`,
@@ -78,30 +65,21 @@ function computeItem(item, supplyType = "intrastate") {
     cgst_amount:      cgst,
     sgst_amount:      sgst,
     igst_amount:      igst,
-    line_total:       lineTotal,
+    line_total:       round2(taxableAmt + totalTax),
     sort_order:       toNum(item.sort_order, 0),
   };
 }
 
-/**
- * Sum all items into header-level totals.
- */
 function computeTotals(computedItems) {
-  let subTotal  = 0;
-  let totalCgst = 0;
-  let totalSgst = 0;
-  let totalIgst = 0;
-
+  let subTotal = 0, totalCgst = 0, totalSgst = 0, totalIgst = 0;
   for (const it of computedItems) {
     subTotal  += it.taxable_amount;
     totalCgst += it.cgst_amount;
     totalSgst += it.sgst_amount;
     totalIgst += it.igst_amount;
   }
-
   const totalTax   = round2(totalCgst + totalSgst + totalIgst);
   const grandTotal = round2(subTotal + totalTax);
-
   return {
     sub_total:   round2(subTotal),
     total_cgst:  round2(totalCgst),
@@ -113,154 +91,129 @@ function computeTotals(computedItems) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: setPrefix  (kept for optional manual/admin use — NOT required
-// anymore for normal flow, since createChallan() handles it automatically)
+// INTERNAL: getOrInitSettings  (runs inside transaction, row-locked)
+// Auto-creates settings row if missing.
+// If DB was cleared (no challans), resets to 0 so next = 0001.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function setPrefix(companyId, prefix, padLength = 4, startFrom = 0) {
-  const trimmed = String(prefix).trim();
-  if (!trimmed) throw new Error("prefix cannot be empty");
-
-  const result = await pool.query(
-    `INSERT INTO app_test.challan_settings
-       (company_id, prefix, pad_length, last_number, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     ON CONFLICT (company_id) DO UPDATE
-       SET prefix      = EXCLUDED.prefix,
-           pad_length  = EXCLUDED.pad_length,
-           last_number = EXCLUDED.last_number,
-           updated_at  = NOW()
-     RETURNING *`,
-    [companyId, trimmed, padLength, startFrom]
-  );
-
-  return result.rows[0];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: getPrefix
-// ─────────────────────────────────────────────────────────────────────────────
-
-export async function getPrefix(companyId) {
-  const result = await pool.query(
-    `SELECT * FROM app_test.challan_settings WHERE company_id = $1`,
-    [companyId]
-  );
-  return result.rows[0] || null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// INTERNAL: resolveChallanNumber  (runs inside transaction)
-//
-// - Locks (or creates, if first time) the settings row for this company.
-// - Increments last_number atomically.
-// - Returns the full challan number string + whether prefix was just created.
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function resolveChallanNumber(client, companyId, prefixInput, padLengthInput) {
-  // Try to lock existing settings row
-  let settingsRes = await client.query(
+async function getOrInitSettings(client, companyId) {
+  // Try to get existing row with lock
+  const settingsRes = await client.query(
     `SELECT * FROM app_test.challan_settings
      WHERE company_id = $1
      FOR UPDATE`,
     [companyId]
   );
 
-  let prefixJustCreated = false;
-
-  if (!settingsRes.rows.length) {
-    // First time for this company — prefix MUST be supplied
-    const trimmed = String(prefixInput || "").trim();
-    if (!trimmed) {
-      throw new Error(
-        `No challan prefix configured for company ${companyId}. ` +
-        `Send "prefix" (e.g. "25-26/") in the request body once — it will be saved automatically.`
-      );
-    }
-
-    const padLength = Number(padLengthInput) > 0 ? Number(padLengthInput) : 4;
-
-    settingsRes = await client.query(
-      `INSERT INTO app_test.challan_settings
-         (company_id, prefix, pad_length, last_number, updated_at)
-       VALUES ($1, $2, $3, 0, NOW())
-       RETURNING *`,
-      [companyId, trimmed, padLength]
+  if (settingsRes.rows.length) {
+    // Settings exist — but check if challans table was cleared
+    // If last_number > 0 but no challans exist, reset counter to 0
+    const challanCount = await client.query(
+      `SELECT COUNT(*) FROM app_test.challans WHERE company_id = $1`,
+      [companyId]
     );
 
-    prefixJustCreated = true;
+    const count = parseInt(challanCount.rows[0].count, 10);
+
+    if (count === 0 && Number(settingsRes.rows[0].last_number) > 0) {
+      // DB was cleared — reset counter back to 0 so next challan = 0001
+      const resetRes = await client.query(
+        `UPDATE app_test.challan_settings
+         SET last_number = 0, updated_at = NOW()
+         WHERE company_id = $1
+         RETURNING *`,
+        [companyId]
+      );
+      return resetRes.rows[0];
+    }
+
+    return settingsRes.rows[0];
   }
 
-  // NOTE: prefix is now fixed for this company — any "prefix" sent on
-  // later requests is intentionally ignored, per requirement that the
-  // format stays static once set.
+  // No settings row yet — create fresh starting from 0
+  const insertRes = await client.query(
+    `INSERT INTO app_test.challan_settings
+       (company_id, prefix, pad_length, last_number, updated_at)
+     VALUES ($1, '', $2, 0, NOW())
+     RETURNING *`,
+    [companyId, CHALLAN_PAD_LENGTH]
+  );
 
-  const settings  = settingsRes.rows[0];
-  const nextNum   = Number(settings.last_number) + 1;
-  const padded    = String(nextNum).padStart(settings.pad_length, "0");
-  const challanNo = `${settings.prefix}${padded}`;
+  return insertRes.rows[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL: allocateNextChallanNumber  (runs inside transaction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function allocateNextChallanNumber(client, companyId) {
+  const settings = await getOrInitSettings(client, companyId);
+  const nextSeq  = Number(settings.last_number) + 1;
 
   await client.query(
     `UPDATE app_test.challan_settings
      SET last_number = $1, updated_at = NOW()
      WHERE company_id = $2`,
-    [nextNum, companyId]
+    [nextSeq, companyId]
   );
 
-  return { challanNo, seq: nextNum, prefixJustCreated, prefix: settings.prefix };
+  return { challanNo: formatChallanNo(nextSeq), seq: nextSeq };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: peekNextChallanNumber
+// Read-only — does NOT increment. Used by GET /api/v1/challan/next-number
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function peekNextChallanNumber(companyId) {
+  // Single optimized query — settings + count together
+  const result = await pool.query(
+    `SELECT
+       cs.last_number,
+       (SELECT COUNT(*) FROM app_test.challans WHERE company_id = $1) AS challan_count
+     FROM app_test.challan_settings cs
+     WHERE cs.company_id = $1`,
+    [companyId]
+  );
+
+  // No settings yet OR challans cleared → return 0001
+  if (!result.rows.length || parseInt(result.rows[0].challan_count, 10) === 0) {
+    return { next_challan_number: formatChallanNo(1), current_seq: 0 };
+  }
+
+  const nextSeq = Number(result.rows[0].last_number) + 1;
+  return {
+    next_challan_number: formatChallanNo(nextSeq),
+    current_seq:         Number(result.rows[0].last_number),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: createChallan
-//
-// ONE API — does everything:
-//   1. If this is the company's first challan ever, saves "prefix" from
-//      the request body automatically (padLength optional, default 4).
-//   2. Auto-generates the next challan number off that prefix.
-//   3. Computes item-level + header-level GST totals.
-//   4. Inserts challan header + line items in a single transaction.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * @param {object} data
- * @param {number}   data.company_id
- * @param {string}   data.company_name
- * @param {string}   [data.prefix]           only used the FIRST time for a company
- * @param {number}   [data.pad_length]        only used the FIRST time, default 4
- * @param {string}   data.challan_date       ISO date string "YYYY-MM-DD"
- * @param {string}   data.customer_name
- * @param {string}   [data.customer_gstin]
- * @param {string}   [data.customer_address]
- * @param {string}   [data.narration]
- * @param {string}   [data.supply_type]      "intrastate" | "interstate"
- * @param {object[]} data.items              array of line items
- * @returns {object}  created challan with items
- */
 export async function createChallan(data) {
   const {
     company_id,
-    company_name,
-    prefix            = null,
-    pad_length        = 4,
     challan_date,
-    customer_name,
-    customer_gstin    = null,
-    customer_address  = null,
-    narration         = null,
-    supply_type       = "intrastate",
-    items             = [],
+    customer_name    = null,
+    customer_gstin   = null,
+    customer_address = null,
+    narration        = null,
+    supply_type      = "intrastate",
+    items            = [],
   } = data;
+
+  let company_name = data.company_name || null;
 
   if (!company_id)   throw new Error("company_id is required");
   if (!challan_date) throw new Error("challan_date is required");
-  if (!items.length) throw new Error("At least one line item is required");
+  if (!items.length) throw new Error("At least one item is required");
 
-  // Validate items
   for (const [i, item] of items.entries()) {
     if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
   }
 
-  // Compute item-level amounts
   const computedItems = items.map((it) => computeItem(it, supply_type));
   const totals        = computeTotals(computedItems);
 
@@ -268,11 +221,19 @@ export async function createChallan(data) {
   try {
     await client.query("BEGIN");
 
-    // 1. Resolve (and, if needed, auto-create) prefix + get next challan number
-    const { challanNo, seq, prefixJustCreated, prefix: usedPrefix } =
-      await resolveChallanNumber(client, company_id, prefix, pad_length);
+    // If company_name not sent, fetch from companies table
+    if (!company_name) {
+      const compRes = await client.query(
+        `SELECT name FROM app_test.companies WHERE id = $1`,
+        [company_id]
+      );
+      if (compRes.rows.length) company_name = compRes.rows[0].name;
+    }
 
-    // 2. Insert challan header
+    // Atomically claim next number (0001, 0002, ...)
+    const { challanNo, seq } = await allocateNextChallanNumber(client, company_id);
+
+    // Insert challan header
     const challanRes = await client.query(
       `INSERT INTO app_test.challans (
         company_id, company_name, challan_number, challan_seq,
@@ -297,7 +258,7 @@ export async function createChallan(data) {
     const challan   = challanRes.rows[0];
     const challanId = challan.id;
 
-    // 3. Insert line items
+    // Insert line items
     const insertedItems = [];
     for (const [idx, it] of computedItems.entries()) {
       const itemRes = await client.query(
@@ -323,13 +284,7 @@ export async function createChallan(data) {
     }
 
     await client.query("COMMIT");
-
-    return {
-      ...challan,
-      items:              insertedItems,
-      prefix_used:        usedPrefix,
-      prefix_just_created: prefixJustCreated,
-    };
+    return { ...challan, items: insertedItems };
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -365,25 +320,54 @@ export async function getAllChallans(companyId, filters = {}) {
     values.push(`%${filters.customer_name}%`);
   }
 
-  const result = await pool.query(
+  // Fetch matching challans first
+  const challanRes = await pool.query(
     `SELECT
-       c.id, c.company_id, c.company_name,
-       c.challan_number, c.challan_seq, c.challan_date,
-       c.customer_name, c.customer_gstin, c.customer_address,
-       c.sub_total, c.total_cgst, c.total_sgst, c.total_igst,
-       c.total_tax, c.grand_total,
-       c.narration, c.status,
-       c.created_at, c.updated_at,
-       COUNT(ci.id) AS item_count
+       c.challan_number,
+       c.challan_date,
+       c.customer_name
      FROM app_test.challans c
-     LEFT JOIN app_test.challan_items ci ON ci.challan_id = c.id
      WHERE ${conditions.join(" AND ")}
-     GROUP BY c.id
      ORDER BY c.challan_seq DESC`,
     values
   );
 
-  return result.rows;
+  if (!challanRes.rows.length) return [];
+
+  const challanNumbers = challanRes.rows.map(r => r.challan_number);
+
+  const itemsRes = await pool.query(
+    `SELECT
+       c.challan_number,
+       ci.item_name,
+       ci.godown_name,
+       ci.hsn_code,
+       ci.qty,
+       ci.rate,
+       ci.gst_rate,
+       ci.discount_percent,
+       ci.line_total
+     FROM app_test.challan_items ci
+     JOIN app_test.challans c ON c.id = ci.challan_id
+     WHERE c.challan_number = ANY($1)
+       AND c.company_id = $2
+     ORDER BY c.challan_seq DESC, ci.sort_order ASC`,
+    [challanNumbers, companyId]
+  );
+
+  const itemsMap = {};
+  for (const item of itemsRes.rows) {
+    if (!itemsMap[item.challan_number]) itemsMap[item.challan_number] = [];
+    const { challan_number, ...rest } = item;
+    itemsMap[challan_number].push(rest);
+  }
+
+  return challanRes.rows.map(c => ({
+    challan_number: c.challan_number,
+    challan_date:   c.challan_date,
+    customer_name:  c.customer_name,
+    items:          itemsMap[c.challan_number] || [],
+  }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -392,11 +376,9 @@ export async function getAllChallans(companyId, filters = {}) {
 
 export async function getChallanById(challanId, companyId) {
   const challanRes = await pool.query(
-    `SELECT * FROM app_test.challans
-     WHERE id = $1 AND company_id = $2`,
+    `SELECT * FROM app_test.challans WHERE id = $1 AND company_id = $2`,
     [challanId, companyId]
   );
-
   if (!challanRes.rows.length) return null;
 
   const itemsRes = await pool.query(
@@ -406,10 +388,7 @@ export async function getChallanById(challanId, companyId) {
     [challanId]
   );
 
-  return {
-    ...challanRes.rows[0],
-    items: itemsRes.rows,
-  };
+  return { ...challanRes.rows[0], items: itemsRes.rows };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

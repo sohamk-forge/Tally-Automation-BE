@@ -9,30 +9,52 @@ const router = express.Router();
 /* ===================================================
    GET COMPANY NAME + FINANCIAL YEAR FROM DB
 =================================================== */
-async function getCompanyInfo(companyId) {
-  const result = await pool.query(
-    `SELECT name, financial_year_start, financial_year_end
-     FROM app_test.companies
-     WHERE id = $1`,
-    [companyId]
-  );
+async function getCompanyInfo(companyId, companyName) {
+  let result;
+
+  if (companyName) {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE LOWER(name) = LOWER($1)`,
+      [companyName]
+    );
+  } else {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM app_test.companies
+       WHERE id = $1`,
+      [companyId]
+    );
+  }
 
   const row = result.rows[0];
   if (!row) return null;
 
-  if (!row.financial_year_start || !row.financial_year_end) {
+  // fallback if DB year missing
+  if (!row.financial_year_start) {
     const now = new Date();
     const y = now.getFullYear();
+
     return {
       name: row.name,
-      yearStart: `${y}-01-01`,
-      yearEnd: `${y + 1}-01-01`,
+      yearStart: `${y}-04-01`,
+      yearEnd: `${y + 1}-04-01`,
       fyLabel: `${y}-${y + 1}`
     };
   }
 
-  const startYear = row.financial_year_start;
-  const endYear = row.financial_year_end;
+  const startYear = Number(row.financial_year_start);
+
+  // IMPORTANT:
+  // Ignore DB financial_year_end because DB may contain wrong values like 2028.
+  // Always force FY to 1 year only.
+  const endYear = startYear + 1;
+
+  console.log("COMPANY:", row.name);
+  console.log("DB FY START:", row.financial_year_start);
+  console.log("DB FY END:", row.financial_year_end);
+  console.log("USING FY:", `${startYear}-04-01 to ${endYear}-04-01`);
 
   return {
     name: row.name,
@@ -77,7 +99,7 @@ async function fetchVouchersFromTally(company, fromDate, toDate) {
         xml,
         {
           headers: { "Content-Type": "application/xml" },
-          timeout: 60000
+          timeout: 600000
         }
       );
 
@@ -250,58 +272,46 @@ function getMonthlySalesTrend(vouchers, yearStart, yearEnd) {
 router.get("/monthly-sales-trend", async (req, res) => {
   try {
     const companyId = req.query.company_id;
+    const companyName = req.query.company;
 
-    if (!companyId) {
+    if (!companyId && !companyName) {
       return res.status(400).json({
         status: "error",
-        message: "company_id query parameter is required"
+        message: "company_id or company query parameter is required"
       });
     }
 
-    const companyInfo = await getCompanyInfo(companyId);
+    const companyInfo = await getCompanyInfo(companyId, companyName);
 
     if (!companyInfo) {
       return res.status(404).json({
         status: "error",
-        message: `Company with id ${companyId} not found. Run /api/v1/companies/sync first.`
+        message: "Company not found"
       });
     }
 
     const { name: company, yearStart, yearEnd, fyLabel } = companyInfo;
 
+    console.log("COMPANY SENT TO TALLY:", JSON.stringify(company));
+
     const tallyFrom = yearStart.replace(/-/g, "");
     const tallyTo = yearEnd.replace(/-/g, "");
 
-    const vouchers = await fetchVouchersFromTally(company, tallyFrom, tallyTo);
+    const vouchers = await fetchVouchersFromTally(
+      company,
+      tallyFrom,
+      tallyTo
+    );
 
-    // 🔍 TEMP DEBUG — dump every March voucher with date + amount
-    // to help pin down the ₹0.36 mismatch. Remove this block once
-    // the issue is found and fixed.
-    const marchVouchers = vouchers.filter((v) => {
-      const dateStr = parseTallyDate(v?.DATE);
-      if (!dateStr) return false;
-      const d = new Date(dateStr);
-      return d.getFullYear() === 2026 && d.getMonth() === 2; // March = month index 2
-    });
-
-    console.log(`🔍 March voucher count: ${marchVouchers.length}`);
-    marchVouchers
-      .sort((a, b) => new Date(parseTallyDate(a.DATE)) - new Date(parseTallyDate(b.DATE)))
-      .forEach((v) => {
-        console.log(
-          `${parseTallyDate(v.DATE)} | VchNo: ${getVal(v.VOUCHERNUMBER)} | Type: ${getVal(v.VOUCHERTYPENAME)} | Amount: ${getVoucherAmount(v)} | GUID: ${getVal(v.GUID)}`
-        );
-      });
-
-    const marchTotal = marchVouchers.reduce((sum, v) => sum + getVoucherAmount(v), 0);
-    console.log(`🔍 March computed total: ${marchTotal}`);
-    // 🔍 END TEMP DEBUG
-
-    const trend = getMonthlySalesTrend(vouchers, yearStart, yearEnd);
+    const trend = getMonthlySalesTrend(
+      vouchers,
+      yearStart,
+      yearEnd
+    );
 
     return res.status(200).json({
       status: "success",
-      company_id: companyId,
+      company_id: companyId || null,
       company,
       financial_year: fyLabel,
       voucher_count: vouchers.length,
@@ -310,11 +320,11 @@ router.get("/monthly-sales-trend", async (req, res) => {
 
   } catch (err) {
     console.error("❌ MONTHLY SALES TREND ERROR:", err.message);
+
     return res.status(500).json({
       status: "error",
       message: err.message
     });
   }
 });
-
 export default router;
