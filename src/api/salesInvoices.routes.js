@@ -18,21 +18,21 @@ console.log(JSON.stringify(req.body, null, 2));
 
 try {
 
-  const {
-    company,
-    invoice_data,
-    narration
-  } = req.body;
+ const {
+  company,
+  invoice_data,
+  narration
+} = req.body;
 
-  // ✅ Put it HERE
-  console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
+if (!company || !invoice_data) {
+  return res.status(400).json({
+    status: "error",
+    message: "company and invoice_data required"
+  });
+}
 
-  if (!company || !invoice_data) {
-    return res.status(400).json({
-      status: "error",
-      message: "company and invoice_data required"
-    });
-  }
+// ✅ Log only after validation
+console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
 
     console.log("");
     console.log("====================================");

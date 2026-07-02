@@ -11,21 +11,6 @@ if len(sys.argv) >= 2 and sys.argv[1].endswith(".json"):
 else:
     invoice = json.loads(sys.stdin.read())
 
-COUNTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sales_voucher_counter.txt")
-
-def get_next_voucher_number():
-    if os.path.exists(COUNTER_FILE):
-        with open(COUNTER_FILE, "r") as f:
-            num = int(f.read().strip())
-    else:
-        num = 0
-    num += 1
-    with open(COUNTER_FILE, "w") as f:
-        f.write(str(num))
-    return str(num)
-
-if "voucher_number" not in invoice:
-    invoice["voucher_number"] = get_next_voucher_number()
 
 COMPANY_NAME       = invoice.get("company", "")
 sales_ledger       = invoice.get("sales_ledger",       "Sales")
@@ -71,7 +56,7 @@ ref_date = parse_date(invoice.get("reference_date", invoice.get("invoice_date", 
 print("PARSED DATE =", date, file=sys.stderr)
 print("PARSED REF DATE =", ref_date, file=sys.stderr)
 
-voucher_number = str(invoice.get("invoice_no") or invoice.get("voucher_number") or "")
+
 invoice_no     = invoice.get("invoice_no", "")
 reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("customer_name", "")
@@ -112,7 +97,6 @@ round_off  = round(grand_total - calculated, 2)
 
 print(f"DATE        = {date}",           file=sys.stderr)
 print(f"PARTY       = {party_name}",     file=sys.stderr)
-print(f"VOUCHER     = {voucher_number}",  file=sys.stderr)
 print(f"SALES AMT   = {sales_amount}",   file=sys.stderr)
 print(f"CGST        = {cgst_amount}",    file=sys.stderr)
 print(f"SGST        = {sgst_amount}",    file=sys.stderr)
@@ -168,7 +152,6 @@ sub(vch, "DATE",            date)
 sub(vch, "VCHSTATUSDATE",   date)
 sub(vch, "REFERENCEDATE",   ref_date)
 sub(vch, "VOUCHERTYPENAME", "Sales")
-sub(vch, "VOUCHERNUMBER",   voucher_number)
 sub(vch, "REFERENCE",       reference)
 sub(vch, "PARTYNAME",       party_name)
 sub(vch, "PARTYLEDGERNAME", party_name)

@@ -2,6 +2,7 @@
   import pool from "../db/index.js";
   import { sendToTally } from "../services/tallyClient.js";
   import authMiddleware from "../middleware/auth.middleware.js";
+  import axios from "axios";
   import {
     getCompaniesXML,
       getUnitsXML,
@@ -228,48 +229,70 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   
   const dbClient = client || pool;
   
-  const companyIdIndex = columns.indexOf("company_id");
+const companyIdIndex = columns.indexOf("company_id");
+  const hasCompanyIdColumn = companyIdIndex !== -1;
 
-const companyId =
-  companyIdIndex !== -1
-    ? data[companyIdIndex]
-    : null;
+  const companyId =
+    hasCompanyIdColumn
+      ? data[companyIdIndex]
+      : null;
 
-console.log("DEBUG companyId:", companyId);
+  console.log("DEBUG companyId:", companyId, "hasCompanyIdColumn:", hasCompanyIdColumn);
+
   // CHECK EXISTING BY MASTER ID FIRST
   let existing = { rows: [] };
-  
-if (masterId && companyId) {
-  existing = await dbClient.query(
-    `
-    SELECT id, guid, master_id, alter_id
-    FROM ${tableName}
-    WHERE master_id = $1
-      AND company_id = $2
-    `,
-    [masterId, companyId]
-  );
-}
-  
+
+  if (masterId && (hasCompanyIdColumn ? companyId : true)) {
+    existing = hasCompanyIdColumn
+      ? await dbClient.query(
+          `
+          SELECT id, guid, master_id, alter_id
+          FROM ${tableName}
+          WHERE master_id = $1
+            AND company_id = $2
+          `,
+          [masterId, companyId]
+        )
+      : await dbClient.query(
+          `
+          SELECT id, guid, master_id, alter_id
+          FROM ${tableName}
+          WHERE master_id = $1
+          `,
+          [masterId]
+        );
+  }
+
   // FALLBACK TO GUID (only if no master_id match)
-if (existing.rows.length === 0 && companyId) {
-  existing = await dbClient.query(
-    `
-    SELECT id, guid, master_id, alter_id
-    FROM ${tableName}
-    WHERE guid = $1
-      AND company_id = $2
-    `,
-    [finalGuid, companyId]
-  );
-}
-  
+  if (existing.rows.length === 0 && (hasCompanyIdColumn ? companyId : true)) {
+    existing = hasCompanyIdColumn
+      ? await dbClient.query(
+          `SELECT id, guid, master_id, alter_id FROM ${tableName} WHERE guid = $1 AND company_id = $2`,
+          [finalGuid, companyId]
+        )
+      : await dbClient.query(
+          `SELECT id, guid, master_id, alter_id FROM ${tableName} WHERE guid = $1`,
+          [finalGuid]
+        );
+  }
+
+  // FALLBACK TO NAME (only for tables with no company_id, e.g. companies — name is the real unique key)
+  if (existing.rows.length === 0 && !hasCompanyIdColumn && columns.includes("name")) {
+    const nameIndex = columns.indexOf("name");
+    const nameValue = data[nameIndex];
+    existing = await dbClient.query(
+      `SELECT id, guid, master_id, alter_id FROM ${tableName} WHERE name = $1`,
+      [nameValue]
+    );
+  }
+
+
   // INSERT NEW RECORD
   if (existing.rows.length === 0) {
     const totalColumns = 3 + columns.length;
     const placeholders = Array.from({ length: totalColumns }, (_, i) => `$${i + 1}`).join(", ");
     const values = [finalGuid, masterId || null, alterId || 0, ...data];
-    
+
     const query = `
       INSERT INTO ${tableName}
       (guid, master_id, alter_id, ${columns.join(", ")}, created_at, updated_at)
@@ -486,150 +509,76 @@ router.get(
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      
-      const xml = getCompaniesXML();
-      const responseXML = await sendToTally(xml);
-      const parsed = await parseXML(responseXML);
-      
-      const companies = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY || [];
-      const list = Array.isArray(companies) ? companies : [companies];
-      
-      let inserted = 0, updated = 0, ignored = 0;
-      
-      // Use a Map to deduplicate by name
-      const uniqueCompanies = new Map();
-      
-      for (const item of list) {
-        const rawName = item?.NAME;
 
-  const name =
-    typeof rawName === "object"
-      ? rawName?._ || null
-      : clean(rawName);
+      const { user_id } = req.query;
+
+      /* =====================================
+        RESOLVE CONNECTOR URL FOR THIS USER
+      ===================================== */
+      /* =====================================
+        CONNECTOR URL (LOCAL DEV — NO DB LOOKUP)
+      ===================================== */
+      const connectorUrl = "http://localhost:5001";
+
+      /* =====================================
+        FETCH COMPANIES FROM CONNECTOR (JSON, NOT XML)
+      ===================================== */
+      const connectorResponse = await axios.get(
+        `${connectorUrl}/api/connector/companies`,
+        { timeout: 30000 }
+      );
+
+      const companies = connectorResponse.data?.data || [];
+      const list = Array.isArray(companies) ? companies : [companies];
+
+      let inserted = 0, updated = 0, ignored = 0;
+
+      const uniqueCompanies = new Map();
+
+      for (const item of list) {
+        const name = clean(item?.name);
         if (!name) continue;
-        
-        // Keep only the first occurrence of each company name
+
         if (!uniqueCompanies.has(name)) {
           uniqueCompanies.set(name, item);
         }
       }
-      
-      for (const [name, item] of uniqueCompanies) {
-        const originalGuid = item?.GUID || null;
-        const guid = originalGuid || generateFallbackGuid(name, name, 'company');
-        const masterId = item?.MASTERID || null;
-        const alterId = item?.ALTERID || null;
-        const financial_year_start = item?.BOOKSFROM ? String(item.BOOKSFROM).slice(0, 4) : null;
-        const financial_year_end = item?.ENDINGAT ? String(item.ENDINGAT).slice(0, 4) : null;
-        
-        // Check if company already exists by name
-        const existingCompany = await client.query(
-          `SELECT id, name, guid, alter_id FROM app_test.companies WHERE name = $1`,
-          [name]
+
+for (const [name, item] of uniqueCompanies) {
+        const guid = item?.guid || generateFallbackGuid(name, name, 'company');
+        const masterId = item?.masterId || null;
+        const alterId = item?.alterId || null;
+        const financial_year_start = item?.booksFrom ? String(item.booksFrom).slice(0, 4) : null;
+        const financial_year_end = item?.endingAt ? String(item.endingAt).slice(0, 4) : null;
+
+        const result = await upsertRecord(
+          "app_test.companies", guid, masterId, alterId,
+          [name, financial_year_start, financial_year_end],
+          ["name", "financial_year_start", "financial_year_end"],
+          client
         );
-        
-        if (existingCompany.rows.length === 0) {
-          // INSERT new company
-          const result = await upsertRecord(
-            "app_test.companies", guid, masterId, alterId,
-            [name, financial_year_start, financial_year_end],
-            ["name", "financial_year_start", "financial_year_end"],
-            client
-          );
-          if (result.action === "inserted") inserted++;
-          else if (result.action === "updated") updated++;
-          else ignored++;
-        } else {
-          // Company exists - check if we should update
-          const existingAlterId = Number(existingCompany.rows[0]?.alter_id || 0);
-          const newAlterId = Number(alterId || 0);
-          
-          if (newAlterId > existingAlterId) {
-            await client.query(
-              `UPDATE app_test.companies 
-              SET financial_year_start = $1, 
-                  financial_year_end = $2, 
-                  alter_id = $3,
-                  updated_at = NOW()
-              WHERE name = $4`,
-              [financial_year_start, financial_year_end, newAlterId, name]
-            );
-            updated++;
-          } else {
-            ignored++;
-          }
-        }
+
+        if (result.action === "inserted") inserted++;
+        else if (result.action === "updated") updated++;
+        else ignored++;
       }
-      
+
       await client.query("COMMIT");
-      
-    return res.status(200).json({
 
-    status: "success",
-
-    source: "tally",
-
-    message:
-      "Companies synced successfully",
-
-    summary: {
-
-      inserted,
-
-      updated,
-
-      ignored,
-
-      total:
-        uniqueCompanies.size
-
-    },
-
-    data:
-
-      Array.from(
-
-        uniqueCompanies.values()
-
-      ).map((item) => ({
-
-      name:
-    typeof item?.NAME === "object"
-      ? item?.NAME?._ || null
-      : clean(item?.NAME),
-
-        guid:
-          item?.GUID || null,
-
-        master_id:
-          item?.MASTERID || null,
-
-        alter_id:
-          item?.ALTERID || null,
-
-        financial_year_start:
-
-          item?.BOOKSFROM
-
-            ? String(
-                item.BOOKSFROM
-              ).slice(0, 4)
-
-            : null,
-
-        financial_year_end:
-
-          item?.ENDINGAT
-
-            ? String(
-                item.ENDINGAT
-              ).slice(0, 4)
-
-            : null
-
-      }))
-
-  });
+      return res.status(200).json({
+        status: "success",
+        source: "connector",
+        message: "Companies synced successfully",
+        summary: { inserted, updated, ignored, total: uniqueCompanies.size },
+        data: Array.from(uniqueCompanies.values()).map((item) => ({
+          name: clean(item?.name),
+          guid: item?.guid || null,
+          master_id: item?.masterId || null,
+          alter_id: item?.alterId || null,
+          financial_year_start: item?.booksFrom ? String(item.booksFrom).slice(0, 4) : null,
+          financial_year_end: item?.endingAt ? String(item.endingAt).slice(0, 4) : null
+        }))
+      });
     } catch (err) {
       await client.query("ROLLBACK");
       console.log("❌ COMPANY SYNC ERROR:", err.message);
@@ -640,7 +589,8 @@ router.get(
     } finally {
       client.release();
     }
-  });
+  }
+);
 
   router.get("/ledgers", async (req, res) => {
     const company = req.query.company;
