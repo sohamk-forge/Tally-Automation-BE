@@ -1,7 +1,7 @@
 import express from "express";
 import axios from "axios";
 import xml2js from "xml2js";
-import { getSalesGroupXML } from "../services/xmlBuilder.js"; // adjust path to your actual file
+import { getSalesGroupXML } from "../services/xmlBuilder.js";// adjust path to your actual file
 
 const router = express.Router();
 

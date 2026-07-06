@@ -1,13 +1,13 @@
 import express from "express";
 import axios from "axios";
 import xml2js from "xml2js";
-import { getSalesGroupXML } from "../services/xmlBuilder.js"; // adjust path to your actual file
+import { getPurchaseGroupXML } from "../services/xmlBuilder.js";
 
 const router = express.Router();
 
 /* ===================================================
-   SALES ACCOUNT CLOSING BALANCE — LIVE FROM TALLY
-   GET /api/v1/sales/closing-balance?company=Nutan Dairy
+   PURCHASE ACCOUNT CLOSING BALANCE — LIVE FROM TALLY
+   GET /api/v1/purchase/closing-balance?company=Nutan Dairy
 =================================================== */
 
 router.get("/closing-balance", async (req, res) => {
@@ -21,7 +21,7 @@ router.get("/closing-balance", async (req, res) => {
       });
     }
 
-    const xml = getSalesGroupXML(company);
+    const xml = getPurchaseGroupXML(company);
 
     const tallyResponse = await axios.post(
       "http://localhost:9000",
@@ -39,7 +39,7 @@ router.get("/closing-balance", async (req, res) => {
     if (!groups) {
       return res.status(404).json({
         success: false,
-        message: "Sales group not found in Tally response"
+        message: "Purchase group not found in Tally response"
       });
     }
 
@@ -47,25 +47,33 @@ router.get("/closing-balance", async (req, res) => {
 
     const parseAmount = (val) => {
       if (val === undefined || val === null) return 0;
-      const str = typeof val === "object" ? val._ : val;
-      const n = parseFloat(String(str).trim());
+
+      let str = typeof val === "object" ? val._ : val;
+      str = String(str).trim();
+
+      // Tally sometimes returns trailing-minus format: "45000.00-"
+      if (str.endsWith("-")) {
+        str = "-" + str.slice(0, -1);
+      }
+
+      const n = parseFloat(str);
       return isNaN(n) ? 0 : n;
     };
 
-    // Sum closing balances across whichever sales group(s) actually have values
     let closingBalance = 0;
     for (const g of groupList) {
-      closingBalance += parseAmount(g?.CLOSINGBALANCE);
+      // force each group's value positive before summing
+      closingBalance += Math.abs(parseAmount(g?.CLOSINGBALANCE));
     }
 
     return res.status(200).json({
       success: true,
       company,
-      closing_balance: closingBalance
+      closing_balance: Number(closingBalance.toFixed(2))
     });
 
   } catch (err) {
-    console.error("sales closing-balance fetch error:", err.message);
+    console.error("purchase closing-balance fetch error:", err.message);
     return res.status(500).json({
       success: false,
       message: err.message
