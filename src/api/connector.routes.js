@@ -71,75 +71,75 @@ router.post("/generate-key", async (req, res) => {
 });
 
 
-/* =========================================
-   CONNECTOR PAIR
-========================================= */
+// /* =========================================
+//    CONNECTOR PAIR
+// ========================================= */
 
-router.post("/pair", async (req, res) => {
-  try {
-    const { token, machine_id } = req.body;
+// router.post("/pair", async (req, res) => {
+//   try {
+//     const { token, machine_id } = req.body;
 
-    if (!token) {
-      return res.status(400).json({
-        status: "error",
-        message: "token is required"
-      });
-    }
+//     if (!token) {
+//       return res.status(400).json({
+//         status: "error",
+//         message: "token is required"
+//       });
+//     }
 
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.connector_pairing_tokens
-      WHERE token = $1
-      LIMIT 1
-      `,
-      [token]
-    );
+//     const result = await pool.query(
+//       `
+//       SELECT *
+//       FROM app_test.connector_pairing_tokens
+//       WHERE token = $1
+//       LIMIT 1
+//       `,
+//       [token]
+//     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        status: "error",
-        message: "Invalid token"
-      });
-    }
+//     if (result.rows.length === 0) {
+//       return res.status(404).json({
+//         status: "error",
+//         message: "Invalid token"
+//       });
+//     }
 
-    const pairingToken = result.rows[0];
+//     const pairingToken = result.rows[0];
 
-    // Check if token already used
-    if (pairingToken.is_used) {
-      return res.status(400).json({
-        status: "error",
-        message: "Token already used"
-      });
-    }
+//     // Check if token already used
+//     if (pairingToken.is_used) {
+//       return res.status(400).json({
+//         status: "error",
+//         message: "Token already used"
+//       });
+//     }
 
-    // Check expiry
-    if (new Date(pairingToken.expires_at) < new Date()) {
-      return res.status(400).json({
-        status: "error",
-        message: "Token expired"
-      });
-    }
+//     // Check expiry
+//     if (new Date(pairingToken.expires_at) < new Date()) {
+//       return res.status(400).json({
+//         status: "error",
+//         message: "Token expired"
+//       });
+//     }
 
-    return res.status(200).json({
-      status: "success",
-      message: "Token is valid",
-      data: {
-        user_id: pairingToken.user_id,
-        token: pairingToken.token,
-        machine_id
-      }
-    });
+//     return res.status(200).json({
+//       status: "success",
+//       message: "Token is valid",
+//       data: {
+//         user_id: pairingToken.user_id,
+//         token: pairingToken.token,
+//         machine_id
+//       }
+//     });
 
-  } catch (err) {
-    console.error("Pair Error:", err);
+//   } catch (err) {
+//     console.error("Pair Error:", err);
 
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  }
-});
+//     return res.status(500).json({
+//       status: "error",
+//       message: err.message
+//     });
+//   }
+// });
 
 router.get("/current", async (req, res) => {
   try {
