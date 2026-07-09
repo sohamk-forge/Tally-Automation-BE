@@ -65,10 +65,10 @@
       );
 
       let stockItemRecord;
+      
+     if (existingItem.rows.length > 0) {
 
-      if (existingItem.rows.length > 0) {
-
-        console.log(`Updating existing stock item: ${data.item_name}`);
+  console.log(`Updating existing stock item: ${data.item_name}`);
 
         const updateResult = await pool.query(
           `
@@ -176,12 +176,28 @@
       console.log(`Stock item ${existingItem.rows.length > 0 ? 'updated' : 'created'}: ${data.item_name}`);
 
       // Queue Job
+    const jobId = getStockItemJobId(stockItemRecord.id);
+      const existingJob = await stockItemQueue.getJob(jobId);
+
+      if (existingJob) {
+        const state = await existingJob.getState();
+        if (["completed", "failed"].includes(state)) {
+          await existingJob.remove();
+        } else if (["active", "waiting", "delayed"].includes(state)) {
+          return res.status(200).json({
+            status: "success",
+            message: "Push already in progress for this item",
+            data: stockItemRecord
+          });
+        }
+      }
+
       await stockItemQueue.add(
         "push-stock-item",
         { stockItemId: stockItemRecord.id },
         {
           ...STOCK_ITEM_JOB_OPTIONS,
-          jobId: getStockItemJobId(stockItemRecord.id)
+          jobId
         }
       );
 
@@ -204,36 +220,88 @@
 
 
   // Optional: Get status by specific item name
-  router.get("/push/stock-item/status/:companyId", async (req, res) => {
-    try {
-      console.log("STATUS API HIT");
+router.get("/push/stock-item/status/:companyId", async (req, res) => {
+  try {
+    console.log("STATUS API HIT");
 
-      const { companyId } = req.params;
+    const { companyId } = req.params;
+    const { status, item_name, error_only } = req.query;
 
-      const result = await pool.query(
-        `
-        SELECT *
-        FROM app_test.push_stock_item
-        WHERE company_id = $1
-        ORDER BY id DESC
-        `,
-        [companyId]
-      );
+    let query = `
+      SELECT
+        id,
+        company_id,
+        company_name,
+        item_name,
+        alias_name,
+        unit_name,
+        description,
+        hsn_code,
+        cgst_rate,
+        sgst_rate,
+        igst_rate,
+        gst_applicable,
+        parent_group,
+        opening_quantity,
+        opening_rate,
+        opening_value,
+        status,
+        error_count,
+        last_error,
+        tally_response,
+        created_at,
+        updated_at
+      FROM app_test.push_stock_item
+      WHERE company_id = $1
+    `;
+    const params = [companyId];
 
-      return res.status(200).json({
-        status: "success",
-        count: result.rowCount,
-        data: result.rows
-      });
-
-    } catch (err) {
-      console.log(err);
-
-      return res.status(500).json({
-        status: "error",
-        message: err.message
-      });
+    if (status) {
+      query += ` AND status = $${params.length + 1}`;
+      params.push(status);
     }
-  });
 
-  export default router;
+    if (item_name) {
+      query += ` AND LOWER(TRIM(item_name)) = LOWER(TRIM($${params.length + 1}))`;
+      params.push(item_name);
+    }
+
+    if (error_only === "true") {
+      query += ` AND error_count > 0`;
+    }
+
+    query += ` ORDER BY id DESC`;
+
+    const result = await pool.query(query, params);
+
+    // Split into groups so frontend can render/retry easily
+    const failedItems = result.rows.filter(r => r.status === "failed");
+    const pendingItems = result.rows.filter(r => r.status === "pending");
+    const successItems = result.rows.filter(r => r.status === "success");
+
+    return res.status(200).json({
+      status: "success",
+      count: result.rowCount,
+      summary: {
+        total: result.rowCount,
+        success: successItems.length,
+        pending: pendingItems.length,
+        failed: failedItems.length
+      },
+      data: result.rows,
+      failedItems,     // full row data per failed item — use to auto-fill the retry form
+      pendingItems,
+      successItems
+    });
+
+  } catch (err) {
+    console.log(err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
+export default router;

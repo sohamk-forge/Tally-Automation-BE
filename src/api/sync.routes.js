@@ -2580,6 +2580,184 @@ await syncQueue.add(
 
   );
 
+
+  /* ===================================================
+   DASHBOARD SYNC (AUTO)
+=================================================== */
+
+router.post(
+  "/manual-auto",
+  async (req, res) => {
+
+    try {
+
+      const { user_id: userId } = req.body;
+
+      if (!userId) {
+        return res.status(400).json({
+          status: "error",
+          message: "user_id is required"
+        });
+      }
+
+      /* =====================================
+         GET CURRENT CONNECTOR SETTINGS
+      ===================================== */
+
+      const connectorResult = await pool.query(
+        `
+        SELECT
+            company_name,
+            from_year,
+            to_year
+        FROM app_test.connector_machines
+        WHERE user_id = $1
+          AND tally_connected = true
+        ORDER BY updated_at DESC
+        LIMIT 1
+        `,
+        [userId]
+      );
+
+      if (connectorResult.rows.length === 0) {
+        return res.status(400).json({
+          status: "error",
+          message: "No connected Tally connector found."
+        });
+      }
+
+      const {
+        company_name,
+        from_year,
+        to_year
+      } = connectorResult.rows[0];
+
+      /* =====================================
+         VALIDATION
+      ===================================== */
+
+      if (!company_name || !from_year || !to_year) {
+        return res.status(400).json({
+          status: "error",
+          message: "Connector sync period not configured."
+        });
+      }
+
+      /* =====================================
+         STORE COMPANY
+      ===================================== */
+
+      await pool.query(
+        `
+        INSERT INTO app_test.companies
+        (
+            name
+        )
+        VALUES
+        (
+            $1
+        )
+        ON CONFLICT (name)
+        DO NOTHING
+        `,
+        [company_name]
+      );
+
+      /* =====================================
+         CREATE JOB
+      ===================================== */
+
+      const payload = {
+        company: company_name,
+        fromYear: from_year,
+        toYear: to_year
+      };
+
+      const result = await pool.query(
+        `
+        INSERT INTO app_test.job_logs
+        (
+            job_type,
+            status,
+            payload
+        )
+        VALUES
+        (
+            $1,
+            $2,
+            $3
+        )
+        RETURNING id
+        `,
+        [
+          "manual_sync",
+          "pending",
+          payload
+        ]
+      );
+
+      const jobLogId = result.rows[0].id;
+
+      /* =====================================
+         ADD TO BULLMQ
+      ===================================== */
+
+      await syncQueue.add(
+        "manual-sync",
+        {
+          jobLogId,
+          company: company_name,
+          fromYear: from_year,
+          toYear: to_year
+        },
+        {
+          ...SYNC_JOB_OPTIONS,
+          jobId: getSyncJobId(jobLogId)
+        }
+      );
+
+      /* =====================================
+         RESPONSE
+      ===================================== */
+
+      return res.status(200).json({
+
+        status: "success",
+
+        message: "Dashboard sync started successfully.",
+
+        data: {
+
+          jobId: jobLogId,
+
+          company: company_name,
+
+          fromYear: from_year,
+
+          toYear: to_year,
+
+          status: "pending"
+
+        }
+
+      });
+
+    } catch (err) {
+
+      console.log(err);
+
+      return res.status(500).json({
+
+        status: "error",
+
+        message: err.message
+
+      });
+
+    }
+
+  }
+);
   /* ===================================================
     UNITS SYNC
   =================================================== */

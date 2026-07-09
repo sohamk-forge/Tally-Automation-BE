@@ -150,6 +150,7 @@ const salesLedger =
             missingMappingLedger = value;
             missingMappingField  = field;
             break;
+            
           }
         }
 
@@ -176,10 +177,25 @@ const salesLedger =
         */
 
         const ledgerResult = await pool.query(
-          `SELECT 1 FROM app_test.all_ledger_details
-          WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) LIMIT 1`,
-          [companyId, customerName]
-        );
+  `
+  SELECT 1
+  FROM (
+      SELECT LOWER(TRIM(ledger_name)) AS ledger_name
+      FROM app_test.all_ledger_details
+      WHERE company_id = $1
+
+      UNION
+
+      SELECT LOWER(TRIM(ledger_name))
+      FROM app_test.push_ledger
+      WHERE company_id = $1
+        AND status = 'success'
+  ) t
+  WHERE ledger_name = LOWER(TRIM($2))
+  LIMIT 1
+  `,
+  [companyId, customerName]
+);
 
         if (!ledgerResult.rows.length) {
           console.log("Customer Ledger Not Found");
@@ -239,11 +255,26 @@ const salesLedger =
             "";
           console.log(`Checking Stock : "${itemName}"`);
 
-          const stockResult = await pool.query(
-            `SELECT 1 FROM app_test.stock_group_summary
-            WHERE company_name = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2)) LIMIT 1`,
-            [company, itemName]
-          );
+         const stockResult = await pool.query(
+  `
+  SELECT 1
+  FROM (
+      SELECT LOWER(TRIM(item_name)) AS item_name
+      FROM app_test.stock_group_summary
+      WHERE company_id = $1
+
+      UNION
+
+      SELECT LOWER(TRIM(item_name))
+      FROM app_test.push_stock_item
+      WHERE company_id = $1
+        AND status = 'success'
+  ) t
+  WHERE item_name = LOWER(TRIM($2))
+  LIMIT 1
+  `,
+  [companyId, itemName]
+);
 
           if (!stockResult.rows.length) {
             stockMissing = true;

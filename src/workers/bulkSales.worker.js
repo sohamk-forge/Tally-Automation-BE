@@ -26,15 +26,20 @@ function safeNumber(value) {
 
 // Helper to get value from multiple possible header names
 function getValue(row, possibleKeys) {
-  for (const key of possibleKeys) {
-    const value = row[String(key).toLowerCase()];
+  const rowKeys = Object.keys(row);
 
-    if (
-      value !== undefined &&
-      value !== null &&
-      String(value).trim() !== ""
-    ) {
-      return value;
+  for (const key of possibleKeys) {
+    const target = String(key).toLowerCase();
+
+    // Exact match first
+    if (row[target] !== undefined && String(row[target]).trim() !== "") {
+      return row[target];
+    }
+
+    // Fallback: header that starts with the target text
+    const matchedKey = rowKeys.find(k => k.startsWith(target));
+    if (matchedKey && String(row[matchedKey]).trim() !== "") {
+      return row[matchedKey];
     }
   }
 
@@ -175,12 +180,13 @@ console.log("================================");
 
 if (!invoices[invoiceNo]) {
 
-  const gstin = String(getValue(row, [
+ const gstin = String(getValue(row, [
+    "GSTIN (URC/GSTN) optional",
     "GSTIN (URC/GSTN)",
     "GSTIN",
     "GST No",
     "GST Number"
-  ])).trim();
+])).trim();
 
   invoices[invoiceNo] = {
     customer_name: String(getValue(row, [
@@ -214,12 +220,14 @@ godown_name: (() => {
     : "Main Location";  // ✅ ONLY THIS CHANGED
 })(),
 
-    taxable_amount: 0,
+ taxable_amount: 0,
     grand_total: 0,
+    gst_percent: 0,
 
     cgst_amount: 0,
     sgst_amount: 0,
     igst_amount: 0,
+    tds_amount: 0,
 
     line_items: []
   };
@@ -229,19 +237,37 @@ const taxableAmount = safeNumber(getValue(row, [
   "Taxable Amount",
   "Taxable Amount INR",
   "Taxable amount",
-  "Amount",
-  "TaxableValue"
+  "Taxable Value",
+  "Taxable value",
+  "TaxableValue",
+  "Amount"   // keep as last-resort fallback only
 ]));
 
-const totalAmount = safeNumber(getValue(row, [
-  "Total Amount",
-  "total amount",
-  "Grand Total",
-  "Total"
+const gstPercent = safeNumber(getValue(row, [
+  "GST Rate(%) 0,5,12,18, 28",
+  "GST Rate(%) 0,5,12,18,28",
+  "GST Rate (%) 0,5,12,18,28",
+  "GST %",
+  "GST Percentage",
+  "GST Rate",
+  "Gst %",
+  "GST"
 ]));
+
+const tdsAmount = Math.abs(safeNumber(getValue(row, [
+  "TDS",
+  "TDS Amount",
+  "TDS Amt",
+  "TDS Amount INR"
+])));
 
 invoices[invoiceNo].taxable_amount += taxableAmount;
-invoices[invoiceNo].grand_total += totalAmount;
+
+if (invoices[invoiceNo].gst_percent === 0) {
+    invoices[invoiceNo].gst_percent = gstPercent || 18;
+}
+
+invoices[invoiceNo].tds_amount += tdsAmount;
 
       // Get line item details
       const itemName = String(getValue(row, [
@@ -280,41 +306,52 @@ invoices[invoiceNo].grand_total += totalAmount;
     
 Object.values(invoices).forEach(invoice => {
 
-  const gstAmount =
-    invoice.grand_total - invoice.taxable_amount;
+  // Step 1 + 2: Taxable → Calculate GST yourself
+  const gstAmount = Number(
+    ((invoice.taxable_amount * invoice.gst_percent) / 100).toFixed(2)
+  );
 
-  const stateCode =
-    invoice.customer_gstin?.substring(0, 2);
+  // Step 3: State check (customer GSTIN state code)
+  const stateCode = String(invoice.customer_gstin || "").trim().substring(0, 2);
 
-  if (stateCode === "27" || !stateCode) {   // ← ONLY THIS LINE CHANGED
-
-    invoice.cgst_amount =
-      Number((gstAmount / 2).toFixed(2));
-
-    invoice.sgst_amount =
-      Number((gstAmount - invoice.cgst_amount).toFixed(2));
-
+  if (stateCode === "27") {
+    invoice.cgst_amount = Number((gstAmount / 2).toFixed(2));
+    invoice.sgst_amount = Number((gstAmount - invoice.cgst_amount).toFixed(2));
     invoice.igst_amount = 0;
-
-  } else {
-
+  } else if (stateCode) {
+    // Valid GSTIN, different state → IGST
     invoice.cgst_amount = 0;
     invoice.sgst_amount = 0;
-
-    invoice.igst_amount =
-      Number(gstAmount.toFixed(2));
+    invoice.igst_amount = gstAmount;
+  } else {
+    // No GSTIN at all (e.g. B2C/unregistered) — flagging instead of silently guessing
+    console.log(`⚠️ Invoice ${invoice.invoice_no}: no GSTIN found, defaulting to intra-state (CGST/SGST). Review if this customer is outside Maharashtra.`);
+    invoice.cgst_amount = Number((gstAmount / 2).toFixed(2));
+    invoice.sgst_amount = Number((gstAmount - invoice.cgst_amount).toFixed(2));
+    invoice.igst_amount = 0;
   }
+
+  // Step 4: Subtract TDS
+  // Step 5: Grand Total — calculated, NOT read from Excel
+  invoice.grand_total = Number((
+    invoice.taxable_amount +
+    invoice.cgst_amount +
+    invoice.sgst_amount +
+    invoice.igst_amount -
+    invoice.tds_amount
+  ).toFixed(2));
 
   console.log("FINAL GST CHECK", {
     invoice: invoice.invoice_no,
     taxable: invoice.taxable_amount,
-    grand_total: invoice.grand_total,
+    gst_percent: invoice.gst_percent,
     gst: gstAmount,
     cgst: invoice.cgst_amount,
     sgst: invoice.sgst_amount,
-    igst: invoice.igst_amount
+    igst: invoice.igst_amount,
+    tds: invoice.tds_amount,
+    grand_total: invoice.grand_total
   });
-
 });
 let successCount = 0;
 let failCount = 0;

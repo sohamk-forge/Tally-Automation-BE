@@ -71,29 +71,45 @@ sales_amount = round(
 cgst_amount = round(float(invoice.get("cgst_amount", 0)), 2)
 sgst_amount = round(float(invoice.get("sgst_amount", 0)), 2)
 igst_amount = round(float(invoice.get("igst_amount", 0)), 2)
-tds_amount  = round(float(invoice.get("tds_amount",  0)), 2)
+tds_amount  = abs(round(float(invoice.get("tds_amount",  0)), 2))
 cess_amount = round(float(invoice.get("cess_amount", 0)), 2)
 
 # ✅ Frontend sends grand_total as positive (+118)
 # abs() ensures it works whether +118 or -118 is sent
-grand_total = round(
-    abs(float(
-        invoice.get("grand_total")
-        or (
+grand_total_raw = invoice.get("grand_total")
+
+if grand_total_raw is not None:
+    grand_total = round(abs(float(grand_total_raw)), 2)
+else:
+    grand_total = round(
+        abs(
             sales_amount +
             cgst_amount +
             sgst_amount +
             igst_amount -
             tds_amount +
             cess_amount
-        )
-    )),
+        ),
+        2
+    )
+
+# ✅ Round-off: both sides positive, clean math
+calculated = round(
+    sales_amount +
+    cgst_amount +
+    sgst_amount +
+    igst_amount -
+    tds_amount +
+    cess_amount,
     2
 )
 
-# ✅ Round-off: both sides positive, clean math
-calculated = round(sales_amount + cgst_amount + sgst_amount + igst_amount, 2)
-round_off  = round(grand_total - calculated, 2)
+round_off = round(grand_total - calculated, 2)
+print("sales_amount =", sales_amount, file=sys.stderr)
+print("cgst_amount =", cgst_amount, file=sys.stderr)
+print("sgst_amount =", sgst_amount, file=sys.stderr)
+print("tds_amount =", tds_amount, file=sys.stderr)
+print("grand_total =", grand_total, file=sys.stderr)
 
 print(f"DATE        = {date}",           file=sys.stderr)
 print(f"PARTY       = {party_name}",     file=sys.stderr)
@@ -187,12 +203,14 @@ for item in line_items:
     sub(aa, "ISDEEMEDPOSITIVE", "No")
     sub(aa, "AMOUNT",           f"{amount:.2f}")    # ✅ always +100.00
 
-# ✅ Party ledger: always negative for Tally debit
+# ✅ Party ledger: grand_total minus TDS withheld, always negative for Tally debit
+party_amount = round(grand_total, 2)
+
 plel = sub(vch, "LEDGERENTRIES.LIST")
 sub(plel, "LEDGERNAME",       party_name)
 sub(plel, "ISDEEMEDPOSITIVE", "yes")
 sub(plel, "ISPARTYLEDGER",    "Yes")
-sub(plel, "AMOUNT",           f"-{grand_total:.2f}")  # ✅ always -118.00
+sub(plel, "AMOUNT",           f"-{party_amount:.2f}")
 
 # ✅ GST: positive with ISDEEMEDPOSITIVE=Yes
 if cgst_amount > 0:
@@ -215,9 +233,9 @@ if igst_amount > 0:
 
 if tds_amount > 0 and tds_ledger:
     lel = sub(vch, "LEDGERENTRIES.LIST")
-    sub(lel, "LEDGERNAME",       tds_ledger)
-    sub(lel, "ISDEEMEDPOSITIVE", "Yes")
-    sub(lel, "AMOUNT",           f"{tds_amount:.2f}")
+    sub(lel, "LEDGERNAME", tds_ledger)
+    sub(lel, "ISDEEMEDPOSITIVE", "No")
+    sub(lel, "AMOUNT", f"-{tds_amount:.2f}")
 
 if cess_amount > 0 and cess_ledger:
     lel = sub(vch, "LEDGERENTRIES.LIST")

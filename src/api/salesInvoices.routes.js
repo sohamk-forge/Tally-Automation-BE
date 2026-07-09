@@ -62,44 +62,57 @@ if (narration) {
 
 // ✅ ADD THIS BLOCK HERE
 // Recalculate GST only if GST values are not already present
-if (
-  !cleanInvoiceData.cgst_amount &&
-  !cleanInvoiceData.sgst_amount &&
-  !cleanInvoiceData.igst_amount
-) {
-  const gstAmount =
-    (cleanInvoiceData.grand_total || 0) -
-    (cleanInvoiceData.taxable_amount || 0);
+// Step 1: Taxable Amount (from frontend)
+const taxableAmount = Number(cleanInvoiceData.taxable_amount || 0);
 
-  const gstin =
-    cleanInvoiceData.customer_gstin ||
-    cleanInvoiceData.gstin ||
-    "";
+// Step 2: Calculate GST yourself — never trust frontend's grand_total
+const gstPercent = Number(cleanInvoiceData.gst_percent || 18);
+const gstAmount = Number(((taxableAmount * gstPercent) / 100).toFixed(2));
 
-  const stateCode = gstin?.substring(0, 2);
+// Step 3: State check
+const gstin =
+  cleanInvoiceData.customer_gstin ||
+  cleanInvoiceData.gstin ||
+  "";
 
-  if (stateCode === "27" || !stateCode) {
-    cleanInvoiceData.cgst_amount = Number((gstAmount / 2).toFixed(2));
-    cleanInvoiceData.sgst_amount = Number(
-      (gstAmount - cleanInvoiceData.cgst_amount).toFixed(2)
-    );
-    cleanInvoiceData.igst_amount = 0;
-  } else {
-    cleanInvoiceData.cgst_amount = 0;
-    cleanInvoiceData.sgst_amount = 0;
-    cleanInvoiceData.igst_amount = Number(gstAmount.toFixed(2));
-  }
+const stateCode = String(gstin || "").trim().substring(0, 2);
+
+if (stateCode === "27" || !stateCode) {
+  // Maharashtra OR no GSTIN → local state
+  cleanInvoiceData.cgst_amount = Number((gstAmount / 2).toFixed(2));
+  cleanInvoiceData.sgst_amount = Number(
+    (gstAmount - cleanInvoiceData.cgst_amount).toFixed(2)
+  );
+  cleanInvoiceData.igst_amount = 0;
+} else {
+  cleanInvoiceData.cgst_amount = 0;
+  cleanInvoiceData.sgst_amount = 0;
+  cleanInvoiceData.igst_amount = gstAmount;
 }
 
+// Step 4: Subtract TDS
+const tdsAmount = Math.abs(Number(cleanInvoiceData.tds_amount || 0));
+cleanInvoiceData.tds_amount = tdsAmount;
+
+// Step 5: Grand Total — calculated, not trusted from frontend
+cleanInvoiceData.grand_total = Number((
+  taxableAmount +
+  cleanInvoiceData.cgst_amount +
+  cleanInvoiceData.sgst_amount +
+  cleanInvoiceData.igst_amount -
+  tdsAmount
+).toFixed(2));
+
 console.log("GST CALCULATION:", {
+  taxable: taxableAmount,
+  gst_percent: gstPercent,
+  gst: gstAmount,
   cgst: cleanInvoiceData.cgst_amount,
   sgst: cleanInvoiceData.sgst_amount,
   igst: cleanInvoiceData.igst_amount,
+  tds: tdsAmount,
   grand_total: cleanInvoiceData.grand_total
 });
-
-// ✅ No flipping — store everything as-is from frontend
-// Python handles all sign logic internally
 
     // Check if invoice already exists for this company
     const existingInvoice = await pool.query(
