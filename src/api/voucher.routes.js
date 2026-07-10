@@ -529,7 +529,6 @@ router.get("/statement-transactions", async (req, res) => {
 
     let targetFileName = file_name;
 
-    // If no file_name given, find the most recently uploaded one for this company
     if (!targetFileName) {
       const latest = await db.query(
         `SELECT file_name
@@ -551,8 +550,6 @@ router.get("/statement-transactions", async (req, res) => {
       targetFileName = latest.rows[0].file_name;
     }
 
-    // Order by group_key first so same-group rows are adjacent in the
-    // flat list, then by date/id within a group for a stable order.
     const result = await db.query(
       `SELECT
         voucher_date,
@@ -592,10 +589,7 @@ router.get("/statement-transactions", async (req, res) => {
       group_key: r.group_key || ""
     });
 
-    // Flat list, now group_key-ordered (kept for backward compatibility)
-    const transactions = result.rows.map(toTxn);
-
-    // Grouped structure: one bucket per group_key, ungrouped rows in their own bucket
+    // Build groups first
     const groupsMap = new Map();
     for (const r of result.rows) {
       const key = r.group_key || "__ungrouped__";
@@ -617,20 +611,30 @@ router.get("/statement-transactions", async (req, res) => {
       if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
     }
 
-    // Ungrouped bucket last; real groups sorted largest-cluster-first
-    const groups = [...groupsMap.values()].sort((a, b) => {
-      if (a.group_key === null) return 1;
-      if (b.group_key === null) return -1;
-      return b.count - a.count;
-    });
+    // ── ONLY keep groups where the narration repeats (count > 1). ──
+    // This drops: (a) the "__ungrouped__" bucket (narrations that never matched anything),
+    // and (b) any real group_key bucket that only ever had a single row.
+    const groups = [...groupsMap.values()]
+      .filter(g => g.group_key !== null && g.count > 1)
+      .sort((a, b) => b.count - a.count);
+
+    // Flat list rebuilt from the filtered groups only (so it stays consistent with `groups`)
+    const transactions = groups.flatMap(g => g.transactions);
+
+    if (!transactions.length) {
+      return res.status(404).json({
+        success: false,
+        message: `No repeated narrations found for file "${targetFileName}"`
+      });
+    }
 
     return res.status(200).json({
       success: true,
       file_name: targetFileName,
       total: transactions.length,
-      group_count: groups.filter(g => g.group_key !== null).length,
-      transactions,   // flat, group_key-ordered (backward compatible)
-      groups          // bucketed by group_key
+      group_count: groups.length,
+      transactions,
+      groups
     });
 
   } catch (err) {
@@ -641,7 +645,6 @@ router.get("/statement-transactions", async (req, res) => {
     });
   }
 });
-
 /* ===========================
    GET WAITING LEDGER VOUCHERS
 =========================== */

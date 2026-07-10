@@ -28,6 +28,12 @@ function normalizeItemName(name) {
 =========================================
 SHARED VALIDATION LOGIC
 Used by both /validate and /upload
+
+Buckets:
+  - missing_items  -> item is NOT in the DB at all (not available in DB)
+  - not_available  -> item IS in the DB, but current stock quantity is 0
+  - quantity_less  -> item IS in the DB with some stock, but less than required
+  - matched_items  -> item IS in the DB with enough stock to cover what's required
 =========================================
 */
 async function validateItemsAgainstStock(company, extracted_items) {
@@ -83,6 +89,7 @@ async function validateItemsAgainstStock(company, extracted_items) {
 
   const matched_items = [];
   const quantity_less = [];
+  const not_available = [];
   const missing_items = [];
 
   for (const extractedItem of extracted_items) {
@@ -104,15 +111,18 @@ async function validateItemsAgainstStock(company, extracted_items) {
     const availableQuantity = Number(dbItem.quantity);
     const requiredQuantity = Number(extractedItem.quantity);
 
-    if (availableQuantity >= requiredQuantity) {
-      matched_items.push({
+    if (availableQuantity === 0) {
+
+      not_available.push({
         item_name: dbItem.item_name,
         required_quantity: requiredQuantity,
         available_quantity: availableQuantity,
         group_name: dbItem.group_name,
         hsn_code: dbItem.hsn_code
       });
-    } else {
+
+    } else if (availableQuantity < requiredQuantity) {
+
       quantity_less.push({
         item_name: dbItem.item_name,
         required_quantity: requiredQuantity,
@@ -121,6 +131,17 @@ async function validateItemsAgainstStock(company, extracted_items) {
         group_name: dbItem.group_name,
         hsn_code: dbItem.hsn_code
       });
+
+    } else {
+
+      matched_items.push({
+        item_name: dbItem.item_name,
+        required_quantity: requiredQuantity,
+        available_quantity: availableQuantity,
+        group_name: dbItem.group_name,
+        hsn_code: dbItem.hsn_code
+      });
+
     }
   }
 
@@ -132,11 +153,13 @@ async function validateItemsAgainstStock(company, extracted_items) {
         total_extracted_items: extracted_items.length,
         matched: matched_items.length,
         quantity_less: quantity_less.length,
+        not_available: not_available.length,
         missing_items: missing_items.length
       },
       validation: {
         matched_items,
         quantity_less,
+        not_available,
         missing_items
       }
     }
@@ -185,7 +208,7 @@ router.post(
       );
 
       const ocrResponse = await axios.post(
-        "http://192.168.0.105:8000/extract-items",
+        "http://100.75.147.11:8000/extract-items",
         form,
         { headers: form.getHeaders() }
       );
