@@ -91,8 +91,13 @@ if (stateCode === "27" || !stateCode) {
 }
 
 // Step 4: Subtract TDS
+// Step 4: Subtract TDS
 const tdsAmount = Math.abs(Number(cleanInvoiceData.tds_amount || 0));
 cleanInvoiceData.tds_amount = tdsAmount;
+
+// Step 4.5: Round Off — taken as-is from frontend/user, no flip, no recalculation
+const roundOff = Number(cleanInvoiceData.round_off || 0);
+cleanInvoiceData.round_off = roundOff;
 
 // Step 5: Grand Total — calculated, not trusted from frontend
 cleanInvoiceData.grand_total = Number((
@@ -100,7 +105,8 @@ cleanInvoiceData.grand_total = Number((
   cleanInvoiceData.cgst_amount +
   cleanInvoiceData.sgst_amount +
   cleanInvoiceData.igst_amount -
-  tdsAmount
+  tdsAmount +
+  roundOff
 ).toFixed(2));
 
 console.log("GST CALCULATION:", {
@@ -111,6 +117,7 @@ console.log("GST CALCULATION:", {
   sgst: cleanInvoiceData.sgst_amount,
   igst: cleanInvoiceData.igst_amount,
   tds: tdsAmount,
+  round_off: roundOff,
   grand_total: cleanInvoiceData.grand_total
 });
 
