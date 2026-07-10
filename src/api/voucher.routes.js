@@ -500,6 +500,149 @@ router.get("/statement-details", async (req, res) => {
 });
 
 /* ===========================
+   GET STATEMENT TRANSACTIONS (AI Suggestion shape)
+   Reshapes existing contra_vouchers rows (no schema change,
+   no extra writes on upload) into the old FastAPI-style
+   transaction list: { success, file_name, total, transactions }
+
+   UPDATED: rows are now ordered by group_key first (so narrations
+   belonging to the same merchant/group sit next to each other in
+   the flat "transactions" list), and a new "groups" array buckets
+   the same rows by group_key for easy client-side rendering.
+
+   Query params:
+     company_id  (required)
+     file_name   (optional — if omitted, uses the most recently
+                  uploaded file for that company)
+=========================== */
+
+router.get("/statement-transactions", async (req, res) => {
+  try {
+    const { company_id, file_name } = req.query;
+
+    if (!company_id) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id is required"
+      });
+    }
+
+    let targetFileName = file_name;
+
+    // If no file_name given, find the most recently uploaded one for this company
+    if (!targetFileName) {
+      const latest = await db.query(
+        `SELECT file_name
+         FROM app_test.contra_vouchers
+         WHERE company_id = $1
+           AND file_name IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [company_id]
+      );
+
+      if (!latest.rows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "No statement found for this company"
+        });
+      }
+
+      targetFileName = latest.rows[0].file_name;
+    }
+
+    // Order by group_key first so same-group rows are adjacent in the
+    // flat list, then by date/id within a group for a stable order.
+    const result = await db.query(
+      `SELECT
+        voucher_date,
+        narration,
+        instrument_number,
+        amount,
+        debit_credit,
+        merchant_name,
+        group_key,
+        file_name
+       FROM app_test.contra_vouchers
+       WHERE company_id = $1
+         AND file_name = $2
+       ORDER BY
+         COALESCE(group_key, 'zzz_ungrouped') ASC,
+         voucher_date ASC,
+         id ASC`,
+      [company_id, targetFileName]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: `No transactions found for file "${targetFileName}"`
+      });
+    }
+
+    const toTxn = (r) => ({
+      transaction_date: r.voucher_date
+        ? new Date(r.voucher_date).toISOString().split("T")[0]
+        : "",
+      narration: r.narration || "",
+      cheque_ref: r.instrument_number || "",
+      withdrawal: r.debit_credit === "DEBIT" ? String(r.amount) : "",
+      deposit: r.debit_credit === "CREDIT" ? String(r.amount) : "",
+      merchant_name: r.merchant_name || "",
+      group_key: r.group_key || ""
+    });
+
+    // Flat list, now group_key-ordered (kept for backward compatibility)
+    const transactions = result.rows.map(toTxn);
+
+    // Grouped structure: one bucket per group_key, ungrouped rows in their own bucket
+    const groupsMap = new Map();
+    for (const r of result.rows) {
+      const key = r.group_key || "__ungrouped__";
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          group_key: r.group_key || null,
+          merchant_name: r.merchant_name || null,
+          count: 0,
+          total_withdrawal: 0,
+          total_deposit: 0,
+          transactions: []
+        });
+      }
+      const bucket = groupsMap.get(key);
+      const txn = toTxn(r);
+      bucket.transactions.push(txn);
+      bucket.count += 1;
+      if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
+      if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
+    }
+
+    // Ungrouped bucket last; real groups sorted largest-cluster-first
+    const groups = [...groupsMap.values()].sort((a, b) => {
+      if (a.group_key === null) return 1;
+      if (b.group_key === null) return -1;
+      return b.count - a.count;
+    });
+
+    return res.status(200).json({
+      success: true,
+      file_name: targetFileName,
+      total: transactions.length,
+      group_count: groups.filter(g => g.group_key !== null).length,
+      transactions,   // flat, group_key-ordered (backward compatible)
+      groups          // bucketed by group_key
+    });
+
+  } catch (err) {
+    console.error("statement-transactions error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message
+    });
+  }
+});
+
+/* ===========================
    GET WAITING LEDGER VOUCHERS
 =========================== */
 
@@ -779,5 +922,8 @@ router.get("/:id", async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+
+
+
 
 export default router;

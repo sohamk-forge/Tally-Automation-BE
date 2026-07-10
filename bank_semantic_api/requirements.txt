@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-pandas
-openpyxl
-xlrd
-sentence-transformers
-scikit-learn
-python-multipart

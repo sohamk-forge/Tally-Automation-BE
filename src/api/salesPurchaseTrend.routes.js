@@ -1,14 +1,8 @@
 import express from "express";
-import axios from "axios";
-import xml2js from "xml2js";
 import pool from "../db/index.js";
-import { getLedgerVouchersXML } from "../services/xmlBuilder.js";
 
 const router = express.Router();
 
-/* ===================================================
-   GET COMPANY NAME + FINANCIAL YEAR FROM DB
-=================================================== */
 async function getCompanyInfo(companyId, companyName) {
   let result;
 
@@ -34,8 +28,8 @@ async function getCompanyInfo(companyId, companyName) {
   if (!row.financial_year_start) {
     const now = new Date();
     const y = now.getFullYear();
-
     return {
+      id: row.id,
       name: row.name,
       yearStart: `${y}-04-01`,
       yearEnd: `${y + 1}-04-01`,
@@ -44,11 +38,10 @@ async function getCompanyInfo(companyId, companyName) {
   }
 
   const startYear = Number(row.financial_year_start);
-
-  // Ignore DB end year if wrong
   const endYear = startYear + 1;
 
   return {
+    id: row.id,
     name: row.name,
     yearStart: `${startYear}-04-01`,
     yearEnd: `${endYear}-04-01`,
@@ -56,137 +49,38 @@ async function getCompanyInfo(companyId, companyName) {
   };
 }
 
-/* ===================================================
-   FETCH LIVE VOUCHERS FROM TALLY — CHUNKED BY MONTH
-=================================================== */
-async function fetchVouchersFromTally(company, fromDate, toDate) {
-  const allVouchers = [];
-
-  let current = new Date(
-    `${fromDate.slice(0, 4)}-${fromDate.slice(4, 6)}-${fromDate.slice(6, 8)}`
+async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
+  const result = await pool.query(
+    `SELECT id, voucher_date, voucher_type, voucher_number,
+            party_ledger_name, ledger_entries, debit_amount, credit_amount
+       FROM app_test.vouchers
+      WHERE company_id = $1
+        AND DATE(voucher_date) >= $2
+        AND DATE(voucher_date) < $3`,
+    [companyId, yearStart, yearEnd]
   );
-  const end = new Date(
-    `${toDate.slice(0, 4)}-${toDate.slice(4, 6)}-${toDate.slice(6, 8)}`
-  );
-
-  while (current < end) {
-    const chunkStart = new Date(current);
-    const chunkEnd = new Date(current);
-    chunkEnd.setMonth(chunkEnd.getMonth() + 1);
-    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
-
-    const fmt = (d) =>
-      `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-
-    const fromStr = fmt(chunkStart);
-    const toStr = fmt(chunkEnd);
-
-    const xml = getLedgerVouchersXML(company, fromStr, toStr);
-
-    console.log(`--- Requesting Tally chunk ${fromStr} to ${toStr} for "${company}" ---`);
-
-    try {
-      const tallyResponse = await axios.post(
-        "http://localhost:9000",
-        xml,
-        {
-          headers: { "Content-Type": "application/xml" },
-          timeout: 60000
-        }
-      );
-
-      console.log(`Tally raw response length: ${tallyResponse.data?.length || 0}`);
-
-      const parsed = await xml2js.parseStringPromise(tallyResponse.data, {
-        explicitArray: false,
-        trim: true
-      });
-
-      console.log("Parsed ENVELOPE.BODY.DATA keys:", Object.keys(parsed?.ENVELOPE?.BODY?.DATA || {}));
-
-      const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-      const vouchers = collection?.VOUCHER;
-
-      if (vouchers) {
-        const list = Array.isArray(vouchers) ? vouchers : [vouchers];
-        console.log(`✅ Found ${list.length} vouchers in this chunk`);
-        allVouchers.push(...list);
-      } else {
-        console.log("⚠️ No VOUCHER key found in this chunk's COLLECTION. Collection content:", JSON.stringify(collection, null, 2).slice(0, 1000));
-      }
-    } catch (err) {
-      console.error(
-        `❌ Tally chunk fetch failed for ${fromStr}-${toStr}:`,
-        err.message
-      );
-    }
-
-    current = chunkEnd;
-  }
-
-  console.log(`=== TOTAL VOUCHERS FETCHED: ${allVouchers.length} ===`);
-  if (allVouchers.length > 0) {
-    console.log("First voucher sample:", JSON.stringify(allVouchers[0], null, 2));
-  }
-
-  return allVouchers;
+  return result.rows;
 }
 
-const getVal = (v) => {
-  if (v === undefined || v === null) return null;
-  if (typeof v === "object") {
-    return v._ ?? v["#text"] ?? null;
-  }
-  return v;
-};
-
-const parseAmount = (val) => {
-  const str = getVal(val);
-  if (str === null) return 0;
-  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
-  return isNaN(n) ? 0 : n;
-};
-
-/* ===================================================
-   PARSE TALLY DATE (YYYYMMDD) -> "YYYY-MM-DD"
-=================================================== */
-function parseTallyDate(raw) {
-  const str = getVal(raw);
-  if (!str) return null;
-  const clean = String(str).trim();
-  if (clean.length < 8) return null;
-  return `${clean.slice(0, 4)}-${clean.slice(4, 6)}-${clean.slice(6, 8)}`;
-}
-
-/* ===================================================
-   COMPUTE VOUCHER AMOUNT
-=================================================== */
 function getVoucherAmount(v) {
-  if (v?.AMOUNT !== undefined && v?.AMOUNT !== null) {
-    const topAmount = Math.abs(parseAmount(v.AMOUNT));
-    if (topAmount > 0) return topAmount;
-  }
+  const debit = Math.abs(Number(v.debit_amount) || 0);
+  if (debit > 0) return debit;
 
-  let entries = v?.ALLLEDGERENTRIES?.LIST;
-  if (!entries) entries = v?.["ALLLEDGERENTRIES.LIST"];
+  const credit = Math.abs(Number(v.credit_amount) || 0);
+  if (credit > 0) return credit;
 
-  const entryList = Array.isArray(entries) ? entries : entries ? [entries] : [];
-
+  const entries = Array.isArray(v.ledger_entries) ? v.ledger_entries : [];
   let amount = 0;
-  for (const e of entryList) {
-    amount += Math.abs(parseAmount(e?.AMOUNT));
+  for (const e of entries) {
+    amount += Math.abs(parseFloat(e?.AMOUNT) || 0);
   }
-
   return amount / 2;
 }
 
-/* ===================================================
-   BUCKET KEY HELPERS
-=================================================== */
-function getBucketKey(dateStr, period) {
-  const d = new Date(dateStr);
+function getBucketKey(dateObj, period) {
+  const d = dateObj;
 
-  if (period === "day") return dateStr;
+  if (period === "day") return d.toISOString().split("T")[0];
 
   if (period === "month") {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
@@ -203,26 +97,23 @@ function getBucketKey(dateStr, period) {
     return monday.toISOString().split("T")[0];
   }
 
-  return dateStr;
+  return d.toISOString().split("T")[0];
 }
 
-/* ===================================================
-   GROUP VOUCHERS INTO BUCKETS -> sales/purchase/net
-=================================================== */
 function bucketVouchers(vouchers, period) {
   const buckets = {};
 
   for (const v of vouchers) {
-    const dateStr = parseTallyDate(v?.DATE);
-    if (!dateStr) continue;
+    const d = new Date(v.voucher_date);
+    if (isNaN(d.getTime())) continue;
 
-    const voucherType = (getVal(v?.VOUCHERTYPENAME) || "").toString().toLowerCase();
+    const voucherType = (v.voucher_type || "").toString().toLowerCase();
     const isSales = voucherType.includes("sales");
     const isPurchase = voucherType.includes("purchase");
     if (!isSales && !isPurchase) continue;
 
     const amount = getVoucherAmount(v);
-    const key = getBucketKey(dateStr, period);
+    const key = getBucketKey(d, period);
 
     if (!buckets[key]) {
       buckets[key] = { period_start: key, sales_total: 0, purchase_total: 0 };
@@ -237,10 +128,6 @@ function bucketVouchers(vouchers, period) {
     .sort((a, b) => new Date(a.period_start) - new Date(b.period_start));
 }
 
-/* ===================================================
-   MAIN ROUTE
-   GET /api/v1/trends/sales-purchase?company_id=1
-=================================================== */
 router.get("/sales-purchase", async (req, res) => {
   try {
     const companyId = req.query.company_id;
@@ -262,14 +149,9 @@ router.get("/sales-purchase", async (req, res) => {
       });
     }
 
-    const { name: company, yearStart, yearEnd, fyLabel } = companyInfo;
+    const { id, name: company, yearStart, yearEnd, fyLabel } = companyInfo;
 
-    console.log("COMPANY SENT TO TALLY:", JSON.stringify(company));
-
-    const tallyFrom = yearStart.replace(/-/g, "");
-    const tallyTo = yearEnd.replace(/-/g, "");
-
-    const vouchers = await fetchVouchersFromTally(company, tallyFrom, tallyTo);
+    const vouchers = await fetchVouchersFromDB(id, yearStart, yearEnd);
 
     const stripNet = (arr) =>
       arr.map(({ period_start, sales_total, purchase_total }) => ({
@@ -284,38 +166,19 @@ router.get("/sales-purchase", async (req, res) => {
     const year = bucketVouchers(vouchers, "year");
 
     const todayStr = new Date().toISOString().split("T")[0];
-
-    const rawToday = bucketVouchers(vouchers, "day").find(
-      (d) => d.period_start === todayStr
-    );
-
-    const today = rawToday
-      ? {
-          period_start: rawToday.period_start,
-          sales_total: rawToday.sales_total,
-          purchase_total: rawToday.purchase_total
-        }
-      : {
-          period_start: todayStr,
-          sales_total: 0,
-          purchase_total: 0
-        };
+    const rawToday = day.find((d) => d.period_start === todayStr);
+    const today = rawToday || { period_start: todayStr, sales_total: 0, purchase_total: 0 };
 
     return res.status(200).json({
       status: "success",
-      company_id: companyId || null,
+      source: "database",
+      company_id: id,
       company,
       financial_year: fyLabel,
       financial_year_start: yearStart,
       financial_year_end: yearEnd,
       voucher_count: vouchers.length,
-      data: {
-        today,
-        day,
-        week,
-        month,
-        year
-      }
+      data: { today, day, week, month, year }
     });
 
   } catch (err) {
@@ -327,4 +190,5 @@ router.get("/sales-purchase", async (req, res) => {
     });
   }
 });
+
 export default router;

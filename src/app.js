@@ -159,6 +159,9 @@ import monthlySalesTrendRouter
 import challanRoutes 
  from "./api/challan.routes.js";
 
+import purchaseValidationRoutes 
+ from "./api/purchaseValidation.routes.js";
+
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -425,6 +428,7 @@ app.use("/api/v1", monthlySalesTrendRouter);
 
 app.use("/api/v1/challan", challanRoutes);
 
+app.use("/api/purchase-validation", purchaseValidationRoutes);
 
 /* =================================
    DEFAULT API

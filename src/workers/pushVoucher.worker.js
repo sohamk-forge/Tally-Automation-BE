@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import { spawn } from "child_process";
 import axios from "axios";
 import path from "path";
+import net from "net";
 
 import pool from "../db/index.js";
 import {
@@ -47,19 +48,6 @@ function isTemporaryVoucherError(error) {
 /*
 ====================================
 BUILD LEDGERS BY VOUCHER TYPE
-
-PAYMENT  → money OUT of bank
-  - party_ledger : Dr (positive, gets the debit)
-  - bank_ledger  : Cr (negative, bank goes down)
-
-RECEIPT  → money IN to bank
-  - party_ledger : Cr (negative, source gives money)
-  - bank_ledger  : Dr (positive, bank goes up)
-
-CONTRA   → bank to bank transfer
-  - bank_ledger    : Cr (money leaves this bank)
-  - transfer_bank  : Dr (money arrives here)
-  Note: from Excel upload, transfer_bank = party_ledger (set in route)
 ====================================
 */
 
@@ -105,8 +93,6 @@ function buildLedgers(voucher, amount) {
   }
 
   if (voucher.voucher_type === "contra") {
-    // transfer_bank = the destination bank
-    // For Excel uploads: transfer_bank was set to party_ledger value in the route
     const destinationBank = voucher.transfer_bank || voucher.party_ledger;
 
     if (!destinationBank) {
@@ -138,24 +124,6 @@ function buildLedgers(voucher, amount) {
 /*
 ====================================
 SAFE DATE FORMATTING (YYYYMMDD for Tally)
-
-Never round-trip a DATE value through `new Date(...)` + local-time
-getters (.getFullYear/.getMonth/.getDate) — node-postgres returns
-DATE columns as a UTC-midnight Date object, and reading it back with
-local getters silently shifts the day depending on server timezone,
-or produces NaN for unparseable input. Either failure mode produces a
-malformed <DATE> tag that Tally reports as "missing" rather than
-flagging clearly — and only some rows are affected, making it look
-intermittent.
-
-This function extracts the date parts directly, handling the shapes
-node-postgres / your DB driver may hand back:
-  - a JS Date object        → read UTC parts (never local parts)
-  - an ISO-like string       → "2026-06-03" or "2026-06-03T00:00:00.000Z"
-  - already YYYYMMDD          → passed through after validation
-
-Throws a clear, non-retriable error if the date can't be confidently
-parsed, instead of letting "NaNNaN03" reach Tally.
 ====================================
 */
 
@@ -172,12 +140,10 @@ function formatVoucherDate(rawDate, voucherId) {
 
   const str = String(rawDate || "").trim();
 
-  // Already YYYYMMDD
   if (/^\d{8}$/.test(str)) {
     return str;
   }
 
-  // ISO date / ISO datetime: "2026-06-03" or "2026-06-03T00:00:00.000Z"
   const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (isoMatch) {
     const [, yyyy, mm, dd] = isoMatch;
@@ -185,6 +151,38 @@ function formatVoucherDate(rawDate, voucherId) {
   }
 
   throw new Error(`Voucher ${voucherId}: unable to parse voucher_date "${str}" into YYYYMMDD`);
+}
+
+/*
+====================================
+TALLY AVAILABILITY CHECK
+
+Cheap TCP probe against Tally's XML port. Used both:
+  1) as a fast pre-check before wasting a python spawn, and
+  2) by the background poller that detects when Tally comes
+     back online and auto re-queues pending vouchers.
+====================================
+*/
+
+function isTallyOnline(host = "127.0.0.1", port = 9000, timeout = 2000) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(timeout);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+
+    socket.connect(port, host);
+  });
 }
 
 /*
@@ -230,7 +228,7 @@ function runPythonAndSendToTally(payload) {
         const response = await axios.post(
           "http://localhost:9000",
           xmlData,
-          { headers: { "Content-Type": "application/xml" } }
+          { headers: { "Content-Type": "application/xml" }, timeout: 8000 }
         );
 
         console.log("📥 TALLY RESPONSE:", response.data);
@@ -247,6 +245,12 @@ function runPythonAndSendToTally(payload) {
 /*
 ====================================
 STARTUP: MARK STALE PENDING AS FAILED
+
+NOTE: this only catches vouchers stuck PENDING with a stale
+updated_at (e.g. a crashed worker mid-job). It does NOT touch
+vouchers that are PENDING simply because Tally is closed and
+being actively retried/polled — those get a fresh updated_at
+on every retry attempt, so they never go stale here.
 ====================================
 */
 
@@ -266,12 +270,10 @@ async function markStalePendingAsFailed() {
 
 /*
 ====================================
-STARTUP: ENQUEUE ALL PENDING VOUCHERS
+ENQUEUE ALL PENDING VOUCHERS
 
-Uses the shared safeEnqueueVoucher() helper so this logic is
-identical to what the routes use when reassigning a ledger.
-This guarantees no duplicate/stale-jobId behavior, no matter
-which code path triggered the enqueue.
+Reused both at worker startup AND by the Tally-availability
+poller whenever Tally transitions from offline → online.
 ====================================
 */
 
@@ -322,25 +324,22 @@ const worker = new Worker(
     console.log(`   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}`);
     console.log("================================");
 
+    // Fast pre-check: don't even bother spawning python if Tally is closed.
+    const online = await isTallyOnline();
+    if (!online) {
+      await pool.query(
+        `UPDATE app_test.contra_vouchers
+         SET status = 'PENDING', tally_response = 'Tally is not open', updated_at = NOW()
+         WHERE id = $1`,
+        [voucherId]
+      );
+      console.log(`⏳ Voucher ${voucherId} left PENDING — Tally is not open`);
+      throw Object.assign(new Error("Tally server unavailable"), { code: "ECONNREFUSED" });
+    }
+
     try {
       const amount = Number(voucher.amount);
       const ledgers = buildLedgers(voucher, amount);
-
-      // Format date → YYYYMMDD for Tally
-      //
-      // IMPORTANT: do NOT do `new Date(voucher.voucher_date)` then read
-      // back with .getFullYear()/.getMonth()/.getDate(). node-postgres
-      // returns DATE columns as a JS Date built at UTC midnight, but the
-      // local getters above read it back in the SERVER's local timezone.
-      // Depending on TZ config this silently shifts the date by ±1 day,
-      // or — if voucher.voucher_date isn't a clean parseable value —
-      // produces NaN, which becomes a string like "NaNNaN03". Tally then
-      // rejects it with the misleading "Voucher date is missing" error
-      // instead of a clear parsing error, and the bug only shows up
-      // intermittently depending on server timezone / row.
-      //
-      // Fix: extract the date parts directly without ever going through
-      // local-time conversion.
       const formattedDate = formatVoucherDate(voucher.voucher_date, voucher.id);
 
       const payload = {
@@ -372,7 +371,7 @@ const worker = new Worker(
         return { voucherId, status: "success" };
       }
 
-      // Tally rejected (non-retriable)
+      // Tally rejected (non-retriable business error)
       await pool.query(
         `UPDATE app_test.contra_vouchers
          SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
@@ -384,17 +383,16 @@ const worker = new Worker(
 
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
-        // Network/connection error → let BullMQ retry
         await pool.query(
           `UPDATE app_test.contra_vouchers
            SET status = 'PENDING', tally_response = $1, updated_at = NOW()
            WHERE id = $2`,
           [error.message, voucherId]
         );
-        throw error; // BullMQ retries
+        throw error; // BullMQ retries; poller will also catch it once Tally is back
       }
 
-      // Permanent error → fail
+      // Permanent (real) error → fail
       await pool.query(
         `UPDATE app_test.contra_vouchers
          SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
@@ -423,10 +421,19 @@ worker.on("failed", async (job, error) => {
 
   if (!job) return;
 
+  // Temporary/connection errors (Tally not open) must NEVER be stamped
+  // FAILED here, even after BullMQ's attempts run out. Leave it PENDING —
+  // the Tally-availability poller below will re-push it once Tally is back,
+  // regardless of how many attempts this particular job already used.
+  if (isTemporaryVoucherError(error)) {
+    console.log(`⏳ Voucher ${job.data?.voucherId} stays PENDING — will retry once Tally is reachable`);
+    return;
+  }
+
   const maximumAttempts = Number(job.opts.attempts || 1);
   if (job.attemptsMade < maximumAttempts) return;
 
-  // All retries exhausted → final FAILED
+  // All retries exhausted on a REAL (non-connection) error → final FAILED
   try {
     const { voucherId } = job.data;
     await pool.query(
@@ -446,6 +453,42 @@ worker.on("error", (error) => {
 
 /*
 ====================================
+TALLY AVAILABILITY POLLER
+
+Runs independently of BullMQ's attempt counter. Every 20s it
+checks the Tally port. The moment Tally flips from
+unreachable → reachable, it re-enqueues every PENDING voucher.
+This is what guarantees vouchers get pushed automatically once
+you open Tally, no matter how long it was closed for or how
+many BullMQ attempts a given job already burned through.
+====================================
+*/
+
+let wasTallyOnline = null; // null = unknown at boot, avoids a false "back online" log on first run
+
+async function pollTallyAndRequeue() {
+  try {
+    const online = await isTallyOnline();
+
+    if (online && wasTallyOnline === false) {
+      console.log("✅ Tally is back online — re-queuing all PENDING vouchers");
+      await enqueuePendingVoucherJobs();
+    }
+
+    if (!online && wasTallyOnline !== false) {
+      console.log("⛔ Tally is not open — vouchers will hold as PENDING until it's back");
+    }
+
+    wasTallyOnline = online;
+  } catch (err) {
+    console.error("Tally poll error:", err.message);
+  }
+}
+
+setInterval(pollTallyAndRequeue, 20000);
+
+/*
+====================================
 STARTUP RECOVERY
 ====================================
 */
@@ -454,6 +497,7 @@ STARTUP RECOVERY
   try {
     await markStalePendingAsFailed();
     await enqueuePendingVoucherJobs();
+    await pollTallyAndRequeue(); // establishes the initial wasTallyOnline baseline
   } catch (error) {
     console.error("Voucher startup recovery failed:", error.message);
   }

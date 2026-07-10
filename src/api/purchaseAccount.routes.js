@@ -1,7 +1,5 @@
 import express from "express";
-import axios from "axios";
-import xml2js from "xml2js";
-import { getPurchaseGroupXML } from "../services/xmlBuilder.js";
+import pool from "../db/index.js";
 
 const router = express.Router();
 
@@ -16,63 +14,40 @@ router.get("/closing-balance", async (req, res) => {
       });
     }
 
-    const xml = getPurchaseGroupXML(company);
-
-    const tallyResponse = await axios.post(
-      "http://localhost:9000",
-      xml,
-      {
-        headers: { "Content-Type": "application/xml" },
-        timeout: 60000   // ← ADDED — fails fast instead of hanging forever
-      }
+    const result = await pool.query(
+      `SELECT closing_balance, closing_balance_type
+         FROM app_test.all_ledger_details
+        WHERE LOWER(company_name) = LOWER($1)
+          AND LOWER(parent_group) LIKE '%purchase%'`,
+      [company]
     );
 
-    const parsed = await xml2js.parseStringPromise(tallyResponse.data, {
-      explicitArray: false,
-      trim: true
-    });
-
-    const groups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP;
-
-    if (!groups) {
+    if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: "Purchase group not found in Tally response"
+        message: `No "Purchase" group ledgers found for "${company}"`
       });
     }
 
-    const groupList = Array.isArray(groups) ? groups : [groups];
-
-    const parseAmount = (val) => {
-      if (val === undefined || val === null) return 0;
-      let str = typeof val === "object" ? val._ : val;
-      str = String(str).trim();
-      if (str.endsWith("-")) str = "-" + str.slice(0, -1);
-      const n = parseFloat(str);
-      return isNaN(n) ? 0 : n;
-    };
-
     let closingBalance = 0;
-    for (const g of groupList) {
-      closingBalance += Math.abs(parseAmount(g?.CLOSINGBALANCE));
+    for (const row of result.rows) {
+      const amount = Math.abs(Number(row.closing_balance) || 0);
+      // Purchase is a Dr-nature group; add Dr, subtract Cr (contra/returns)
+      closingBalance +=
+        (row.closing_balance_type || "").toUpperCase() === "CR"
+          ? -amount
+          : amount;
     }
 
     return res.status(200).json({
       success: true,
       company,
-      closing_balance: Number(closingBalance.toFixed(2))
+      closing_balance: Math.abs(Number(closingBalance.toFixed(2))),
+      source: "database"
     });
 
   } catch (err) {
-    console.error("purchase closing-balance fetch error:", err.message);
-
-    // ← ADDED — distinguish a genuine timeout from other errors
-    if (err.code === "ECONNABORTED") {
-      return res.status(504).json({
-        success: false,
-        message: `Tally did not respond within 30s. Check that "${req.query.company}" is currently open in Tally and the name matches exactly.`
-      });
-    }
+    console.error("purchase closing-balance error:", err.message);
 
     return res.status(500).json({
       success: false,
