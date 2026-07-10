@@ -94,17 +94,23 @@ else:
     )
 
 # ✅ Round-off: both sides positive, clean math
-calculated = round(
-    sales_amount +
-    cgst_amount +
-    sgst_amount +
-    igst_amount -
-    tds_amount +
-    cess_amount,
-    2
-)
+# ✅ Round Off: taken from Excel (via worker), NOT recalculated
+round_off_raw = invoice.get("round_off")
 
-round_off = round(grand_total - calculated, 2)
+if round_off_raw is not None:
+    round_off = round(float(round_off_raw), 2)   # no flip — pass through as-is
+else:
+    # fallback only, in case round_off wasn't sent
+    calculated = round(
+        sales_amount +
+        cgst_amount +
+        sgst_amount +
+        igst_amount -
+        tds_amount +
+        cess_amount,
+        2
+    )
+    round_off = round(grand_total - calculated, 2)
 print("sales_amount =", sales_amount, file=sys.stderr)
 print("cgst_amount =", cgst_amount, file=sys.stderr)
 print("sgst_amount =", sgst_amount, file=sys.stderr)
@@ -247,7 +253,7 @@ if abs(round_off) >= 0.01:
     lel = sub(vch, "LEDGERENTRIES.LIST")
     sub(lel, "LEDGERNAME",       rounded_off_ledger)
     sub(lel, "ISDEEMEDPOSITIVE", "Yes" if round_off > 0 else "No")
-    sub(lel, "AMOUNT",           f"{abs(round_off):.2f}")
+    sub(lel, "AMOUNT",           f"{round_off:.2f}")
 
 with open("sales_debug.xml", "w", encoding="utf-8") as f:
      f.write(tostring(envelope, encoding="unicode"))

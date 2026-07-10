@@ -1,478 +1,518 @@
-import { Worker } from "bullmq";
-import IORedis from "ioredis";
-import XLSX from "xlsx";
+  import { Worker } from "bullmq";
+  import IORedis from "ioredis";
+  import XLSX from "xlsx";
 
-import pool from "../db/index.js";
+  import pool from "../db/index.js";
 
-import {
-  BULK_SALES_QUEUE_NAME
-} from "../queues/bulkSales.queue.js";
+  import {
+    BULK_SALES_QUEUE_NAME
+  } from "../queues/bulkSales.queue.js";
 
-import {
-  salesQueue,
-  getSalesJobId
-} from "../queues/sales.queue.js";
+  import {
+    salesQueue,
+    getSalesJobId
+  } from "../queues/sales.queue.js";
 
-const connection = new IORedis({
-  host: process.env.REDIS_HOST || "127.0.0.1",
-  port: Number(process.env.REDIS_PORT || 6379),
-  maxRetriesPerRequest: null
-});
-
-function safeNumber(value) {
-  const num = Number(value);
-  return isNaN(num) ? 0 : num;
-}
-
-// Helper to get value from multiple possible header names
-function getValue(row, possibleKeys) {
-  const rowKeys = Object.keys(row);
-
-  for (const key of possibleKeys) {
-    const target = String(key).toLowerCase();
-
-    // Exact match first
-    if (row[target] !== undefined && String(row[target]).trim() !== "") {
-      return row[target];
-    }
-
-    // Fallback: header that starts with the target text
-    const matchedKey = rowKeys.find(k => k.startsWith(target));
-    if (matchedKey && String(row[matchedKey]).trim() !== "") {
-      return row[matchedKey];
-    }
-  }
-
-  return "";
-}
-
-// Format date from Excel (handles Date objects and strings)
-function formatDate(value) {
-  if (!value) return "";
-
-  // Excel serial date (45748, 45749, etc.)
-  if (typeof value === "number") {
-    const excelDate = XLSX.SSF.parse_date_code(value);
-
-    if (!excelDate) return "";
-
-    const day = String(excelDate.d).padStart(2, "0");
-    const month = String(excelDate.m).padStart(2, "0");
-    const year = excelDate.y;
-
-    return `${day}-${month}-${year}`;
-  }
-
-  // JS Date object
-  if (value instanceof Date) {
-    const day = String(value.getDate()).padStart(2, "0");
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    const year = value.getFullYear();
-
-    return `${day}-${month}-${year}`;
-  }
-
-  return String(value).trim();
-}
-
-const worker = new Worker(
-  BULK_SALES_QUEUE_NAME,
-
-  async (job) => {
-
-    const { company, filePath } = job.data;
-
-    console.log(`Reading Sales Excel : ${filePath}`);
-
-    const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-   const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-
-const rows = rawRows.map(row => {
-  const normalized = {};
-
-  Object.keys(row).forEach(key => {
-    const cleanKey = String(key)
-      .replace(/\r?\n/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
-
-    normalized[cleanKey] = row[key];
+  const connection = new IORedis({
+    host: process.env.REDIS_HOST || "127.0.0.1",
+    port: Number(process.env.REDIS_PORT || 6379),
+    maxRetriesPerRequest: null
   });
 
-  return normalized;
-});
+  function safeNumber(value) {
+    const num = Number(value);
+    return isNaN(num) ? 0 : num;
+  }
 
-    // DEBUG: Print actual headers from Excel
-    console.log("================================");
-    console.log("EXACT HEADERS FROM EXCEL:");
-    console.log("================================");
-    if (rows[0]) {
-      Object.keys(rows[0]).forEach(header => {
-        console.log(`[${header}]`);
-      });
-    }
-    console.log("================================");
-    console.log("FIRST ROW SAMPLE:");
-    console.log("================================");
-   console.log(rows[0]);
+  // Helper to get value from multiple possible header names
+  function getValue(row, possibleKeys) {
+    const rowKeys = Object.keys(row);
 
-console.log("TEST VALUES:");
-console.log({
-  invoiceNo: getValue(rows[0], ["invoice number"]),
-  invoiceDate: getValue(rows[0], ["invoice date (dd-mm-yyyy)"]),
-  quantity: getValue(rows[0], ["quantity"]),
-  rate: getValue(rows[0], ["rate"]),
-  taxable: getValue(rows[0], ["taxable amount inr"]),
-  total: getValue(rows[0], ["total amount"])
-});
+    for (const key of possibleKeys) {
+      const target = String(key).toLowerCase();
 
-console.log("================================");
-
-    console.log(`Rows Found : ${rows.length}`);
-
-    const invoices = {};
-
-    for (const row of rows) {
-
-      // Get invoice number with multiple possible header names
-     const invoiceNo = String(getValue(row, [
-  "invoice number",
-  "invoice no",
-  "invoiceno",
-  "invoice_number"
-])).trim();
-
-      if (!invoiceNo) {
-        continue;
+      // Exact match first
+      if (row[target] !== undefined && String(row[target]).trim() !== "") {
+        return row[target];
       }
-      
 
-      // Debug invoice fields
-      console.log("Invoice Debug:", {
-        invoiceNo,
-        invoiceDate: getValue(row, [
-          "Invoice Date",
-          "Invoice Date (dd-mm-yyyy)",
-          "Invoice date",
-          "Date",
-          "InvoiceDate"
-        ]),
-        quantity: getValue(row, [
-          "Quantity",
-          "Qty",
-          "quantity",
-          "qty"
-        ]),
-        rate: getValue(row, [
-          "Rate",
-          "rate",
-          "Unit Price"
-        ]),
-        taxableAmount: getValue(row, [
-          "Taxable Amount",
-          "Taxable amount",
-          "Amount"
-        ])
-      });
+      // Fallback: header that starts with the target text
+      const matchedKey = rowKeys.find(k => k.startsWith(target));
+      if (matchedKey && String(row[matchedKey]).trim() !== "") {
+        return row[matchedKey];
+      }
+    }
 
-if (!invoices[invoiceNo]) {
+    return "";
+  }
 
- const gstin = String(getValue(row, [
-    "GSTIN (URC/GSTN) optional",
-    "GSTIN (URC/GSTN)",
-    "GSTIN",
-    "GST No",
-    "GST Number"
-])).trim();
+  // Format date from Excel (handles Date objects and strings)
+  function formatDate(value) {
+    if (!value) return "";
 
-  invoices[invoiceNo] = {
-    customer_name: String(getValue(row, [
-      "Party Name",
-      "Party",
-      "Customer Name",
-      "Customer"
-    ])).trim(),
+    // Excel serial date (45748, 45749, etc.)
+    if (typeof value === "number") {
+      const excelDate = XLSX.SSF.parse_date_code(value);
 
-    customer_gstin: gstin,
-    invoice_no: invoiceNo,
+      if (!excelDate) return "";
 
-    invoice_date: formatDate(getValue(row, [
-      "invoice date",
-      "invoice date (dd-mm-yyyy)",
-      "date"
-    ])),
+      const day = String(excelDate.d).padStart(2, "0");
+      const month = String(excelDate.m).padStart(2, "0");
+      const year = excelDate.y;
 
-    narration: "",
+      return `${day}-${month}-${year}`;
+    }
 
-   // CHANGE TO:
-godown_name: (() => {
-  const godown = getValue(row, [
-    "Godown Name",
-    "Godown",
-    "Location"
-  ]);
+    // JS Date object
+    if (value instanceof Date) {
+      const day = String(value.getDate()).padStart(2, "0");
+      const month = String(value.getMonth() + 1).padStart(2, "0");
+      const year = value.getFullYear();
 
-  return godown && String(godown).trim()
-    ? String(godown).trim()
-    : "Main Location";  // ✅ ONLY THIS CHANGED
-})(),
+      return `${day}-${month}-${year}`;
+    }
 
- taxable_amount: 0,
-    grand_total: 0,
-    gst_percent: 0,
+    return String(value).trim();
+  }
 
-    cgst_amount: 0,
-    sgst_amount: 0,
-    igst_amount: 0,
-    tds_amount: 0,
+  const worker = new Worker(
+    BULK_SALES_QUEUE_NAME,
 
-    line_items: []
-  };
-}
+    async (job) => {
 
-const taxableAmount = safeNumber(getValue(row, [
-  "Taxable Amount",
-  "Taxable Amount INR",
-  "Taxable amount",
-  "Taxable Value",
-  "Taxable value",
-  "TaxableValue",
-  "Amount"   // keep as last-resort fallback only
-]));
+      const { company, filePath } = job.data;
 
-const gstPercent = safeNumber(getValue(row, [
-  "GST Rate(%) 0,5,12,18, 28",
-  "GST Rate(%) 0,5,12,18,28",
-  "GST Rate (%) 0,5,12,18,28",
-  "GST %",
-  "GST Percentage",
-  "GST Rate",
-  "Gst %",
-  "GST"
-]));
+      console.log(`Reading Sales Excel : ${filePath}`);
 
-const tdsAmount = Math.abs(safeNumber(getValue(row, [
-  "TDS",
-  "TDS Amount",
-  "TDS Amt",
-  "TDS Amount INR"
-])));
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
-invoices[invoiceNo].taxable_amount += taxableAmount;
+  const rows = rawRows.map(row => {
+    const normalized = {};
 
-if (invoices[invoiceNo].gst_percent === 0) {
-    invoices[invoiceNo].gst_percent = gstPercent || 18;
-}
+    Object.keys(row).forEach(key => {
+      const cleanKey = String(key)
+        .replace(/\r?\n/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
 
-invoices[invoiceNo].tds_amount += tdsAmount;
+      normalized[cleanKey] = row[key];
+    });
 
-      // Get line item details
-      const itemName = String(getValue(row, [
-        "Particulars",
-        "Item Name",
-        "Product",
-        "Description"
-      ])).trim();
+    return normalized;
+  });
 
-      // Only push if there's an item name
-      if (itemName) {
-        invoices[invoiceNo].line_items.push({
-          item_name: itemName,
-          quantity: safeNumber(getValue(row, [
+      // DEBUG: Print actual headers from Excel
+      console.log("================================");
+      console.log("EXACT HEADERS FROM EXCEL:");
+      console.log("================================");
+      if (rows[0]) {
+        Object.keys(rows[0]).forEach(header => {
+          console.log(`[${header}]`);
+        });
+      }
+      console.log("================================");
+      console.log("FIRST ROW SAMPLE:");
+      console.log("================================");
+    console.log(rows[0]);
+
+  console.log("TEST VALUES:");
+  console.log({
+    invoiceNo: getValue(rows[0], ["invoice number"]),
+    invoiceDate: getValue(rows[0], ["invoice date (dd-mm-yyyy)"]),
+    quantity: getValue(rows[0], ["quantity"]),
+    rate: getValue(rows[0], ["rate"]),
+    taxable: getValue(rows[0], ["taxable amount inr"]),
+    total: getValue(rows[0], ["total amount"]),
+    roundOff: getValue(rows[0], ["round off"])
+  });
+
+  console.log("================================");
+
+      console.log(`Rows Found : ${rows.length}`);
+
+      const invoices = {};
+
+      for (const row of rows) {
+
+        // Get invoice number with multiple possible header names
+      const invoiceNo = String(getValue(row, [
+    "invoice number",
+    "invoice no",
+    "invoiceno",
+    "invoice_number"
+  ])).trim();
+
+        if (!invoiceNo) {
+          continue;
+        }
+        
+
+        // Debug invoice fields
+        console.log("Invoice Debug:", {
+          invoiceNo,
+          invoiceDate: getValue(row, [
+            "Invoice Date",
+            "Invoice Date (dd-mm-yyyy)",
+            "Invoice date",
+            "Date",
+            "InvoiceDate"
+          ]),
+          quantity: getValue(row, [
             "Quantity",
             "Qty",
             "quantity",
             "qty"
-          ])),
-          rate: safeNumber(getValue(row, [
+          ]),
+          rate: getValue(row, [
             "Rate",
             "rate",
-            "Unit Price",
-            "Price"
-          ])),
-         amount: safeNumber(getValue(row, [
-  "Taxable Amount",
-  "Taxable Amount INR",
-  "Amount",
-  "taxable amount"
-]))
+            "Unit Price"
+          ]),
+          taxableAmount: getValue(row, [
+            "Taxable Amount",
+            "Taxable amount",
+            "Amount"
+          ]),
+          roundOff: getValue(row, [
+            "Round Off",
+            "RoundOff",
+            "Round off",
+            "Round Off Amount"
+          ])
         });
+
+  if (!invoices[invoiceNo]) {
+
+  const gstin = String(getValue(row, [
+      "GSTIN (URC/GSTN) optional",
+      "GSTIN (URC/GSTN)",
+      "GSTIN",
+      "GST No",
+      "GST Number"
+  ])).trim();
+
+    invoices[invoiceNo] = {
+      customer_name: String(getValue(row, [
+        "Party Name",
+        "Party",
+        "Customer Name",
+        "Customer"
+      ])).trim(),
+
+      customer_gstin: gstin,
+      invoice_no: invoiceNo,
+
+      invoice_date: formatDate(getValue(row, [
+        "invoice date",
+        "invoice date (dd-mm-yyyy)",
+        "date"
+      ])),
+
+      narration: "",
+
+    // CHANGE TO:
+  godown_name: (() => {
+    const godown = getValue(row, [
+      "Godown Name",
+      "Godown",
+      "Location"
+    ]);
+
+    return godown && String(godown).trim()
+      ? String(godown).trim()
+      : "Main Location";  // ✅ ONLY THIS CHANGED
+  })(),
+
+  taxable_amount: 0,
+      grand_total: 0,
+      gst_percent: 0,
+
+      cgst_amount: 0,
+      sgst_amount: 0,
+      igst_amount: 0,
+      tds_amount: 0,
+      round_off: 0,   // ✅ NEW — value comes from Excel, not calculated
+
+      line_items: []
+    };
+  }
+
+  const taxableAmount = safeNumber(getValue(row, [
+    "Taxable Amount",
+    "Taxable Amount INR",
+    "Taxable amount",
+    "Taxable Value",
+    "Taxable value",
+    "TaxableValue",
+    "Amount"   // keep as last-resort fallback only
+  ]));
+
+  const gstPercent = safeNumber(getValue(row, [
+    "GST Rate(%) 0,3,5,12,18, 28",
+    "GST Rate(%) 0,5,12,18,28",
+    "GST Rate (%) 0,5,12,18,28",
+    "GST %",
+    "GST Percentage",
+    "GST Rate",
+    "Gst %",
+    "GST"
+  ]));
+
+  const tdsAmount = Math.abs(safeNumber(getValue(row, [
+    "TDS",
+    "TDS Amount",
+    "TDS Amt",
+    "TDS Amount INR"
+  ])));
+
+  // ✅ NEW — Round Off, read straight from Excel (invoice-level, not summed)
+  const roundOff = safeNumber(getValue(row, [
+    "Round Off",
+    "RoundOff",
+    "Round off",
+    "Round Off Amount"
+  ]));
+
+  invoices[invoiceNo].taxable_amount += taxableAmount;
+
+  if (invoices[invoiceNo].gst_percent === 0) {
+      invoices[invoiceNo].gst_percent = gstPercent || 18;
+  }
+
+  invoices[invoiceNo].tds_amount += tdsAmount;
+
+  // ✅ NEW — overwrite (not add) since Round Off is invoice-level, same value repeats per row
+  invoices[invoiceNo].round_off = roundOff;
+
+        // Get line item details
+        const itemName = String(getValue(row, [
+          "Particulars",
+          "Item Name",
+          "Product",
+          "Description"
+        ])).trim();
+
+        // Only push if there's an item name
+        if (itemName) {
+          invoices[invoiceNo].line_items.push({
+            item_name: itemName,
+            quantity: safeNumber(getValue(row, [
+              "Quantity",
+              "Qty",
+              "quantity",
+              "qty"
+            ])),
+            rate: safeNumber(getValue(row, [
+              "Rate",
+              "rate",
+              "Unit Price",
+              "Price"
+            ])),
+          amount: safeNumber(getValue(row, [
+    "Taxable Amount",
+    "Taxable Amount INR",
+    "Amount",
+    "taxable amount"
+  ]))
+          });
+        }
       }
-    }
 
-    
-Object.values(invoices).forEach(invoice => {
+      
+  Object.values(invoices).forEach(invoice => {
 
-  // Step 1 + 2: Taxable → Calculate GST yourself
+    // Step 1 + 2: Taxable → Calculate GST yourself
   const gstAmount = Number(
     ((invoice.taxable_amount * invoice.gst_percent) / 100).toFixed(2)
   );
 
-  // Step 3: State check (customer GSTIN state code)
-  const stateCode = String(invoice.customer_gstin || "").trim().substring(0, 2);
+  const stateCode = String(invoice.customer_gstin || "")
+    .trim()
+    .substring(0, 2);
 
   if (stateCode === "27") {
-    invoice.cgst_amount = Number((gstAmount / 2).toFixed(2));
-    invoice.sgst_amount = Number((gstAmount - invoice.cgst_amount).toFixed(2));
-    invoice.igst_amount = 0;
+
+      const halfRate = invoice.gst_percent / 2;
+
+      invoice.cgst_amount = Number(
+          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
+      );
+
+      invoice.sgst_amount = Number(
+          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
+      );
+
+      invoice.igst_amount = 0;
+
   } else if (stateCode) {
-    // Valid GSTIN, different state → IGST
-    invoice.cgst_amount = 0;
-    invoice.sgst_amount = 0;
-    invoice.igst_amount = gstAmount;
+
+      invoice.cgst_amount = 0;
+      invoice.sgst_amount = 0;
+      invoice.igst_amount = gstAmount;
+
   } else {
-    // No GSTIN at all (e.g. B2C/unregistered) — flagging instead of silently guessing
-    console.log(`⚠️ Invoice ${invoice.invoice_no}: no GSTIN found, defaulting to intra-state (CGST/SGST). Review if this customer is outside Maharashtra.`);
-    invoice.cgst_amount = Number((gstAmount / 2).toFixed(2));
-    invoice.sgst_amount = Number((gstAmount - invoice.cgst_amount).toFixed(2));
-    invoice.igst_amount = 0;
+
+      const halfRate = invoice.gst_percent / 2;
+
+      invoice.cgst_amount = Number(
+          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
+      );
+
+      invoice.sgst_amount = Number(
+          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
+      );
+
+      invoice.igst_amount = 0;
   }
 
-  // Step 4: Subtract TDS
-  // Step 5: Grand Total — calculated, NOT read from Excel
-  invoice.grand_total = Number((
-    invoice.taxable_amount +
-    invoice.cgst_amount +
-    invoice.sgst_amount +
-    invoice.igst_amount -
-    invoice.tds_amount
-  ).toFixed(2));
+    // Step 4: Subtract TDS
+    // Step 5: Grand Total — GST calculated ourselves, Round Off taken from Excel (not recalculated)
+    invoice.grand_total = Number((
+      invoice.taxable_amount +
+      invoice.cgst_amount +
+      invoice.sgst_amount +
+      invoice.igst_amount -
+      invoice.tds_amount +
+      invoice.round_off   // ✅ NEW — Excel's Round Off added in, not derived
+    ).toFixed(2));
 
-  console.log("FINAL GST CHECK", {
-    invoice: invoice.invoice_no,
-    taxable: invoice.taxable_amount,
-    gst_percent: invoice.gst_percent,
-    gst: gstAmount,
-    cgst: invoice.cgst_amount,
-    sgst: invoice.sgst_amount,
-    igst: invoice.igst_amount,
-    tds: invoice.tds_amount,
-    grand_total: invoice.grand_total
+    console.log("FINAL GST CHECK", {
+      invoice: invoice.invoice_no,
+      taxable: invoice.taxable_amount,
+      gst_percent: invoice.gst_percent,
+      gst: gstAmount,
+      cgst: invoice.cgst_amount,
+      sgst: invoice.sgst_amount,
+      igst: invoice.igst_amount,
+      tds: invoice.tds_amount,
+      round_off: invoice.round_off,   // ✅ NEW
+      grand_total: invoice.grand_total
+    });
   });
-});
-let successCount = 0;
-let failCount = 0;
-    for (const invoiceNo of Object.keys(invoices)) {
-      try {
-        const invoiceData = invoices[invoiceNo];
+  let successCount = 0;
+  let failCount = 0;
+      for (const invoiceNo of Object.keys(invoices)) {
+        try {
+          const invoiceData = invoices[invoiceNo];
 
-        // Skip if no line items
-        if (invoiceData.line_items.length === 0) {
-          console.log(`Skipping invoice ${invoiceNo} - no line items`);
-          continue;
-        }
+          // Skip if no line items
+          if (invoiceData.line_items.length === 0) {
+            console.log(`Skipping invoice ${invoiceNo} - no line items`);
+            continue;
+          }
 
-        // Skip if missing required fields
-        if (!invoiceData.invoice_date) {
-          console.log(`⚠️ Warning: Invoice ${invoiceNo} has no invoice date`);
-        }
-        const companyResult = await pool.query(
-  `
-  SELECT id
-  FROM app_test.companies
-  WHERE TRIM(name) = TRIM($1)
-  LIMIT 1
-  `,
-  [company]
-);
+          // Skip if missing required fields
+          if (!invoiceData.invoice_date) {
+            console.log(`⚠️ Warning: Invoice ${invoiceNo} has no invoice date`);
+          }
+          const companyResult = await pool.query(
+    `
+    SELECT id
+    FROM app_test.companies
+    WHERE TRIM(name) = TRIM($1)
+    LIMIT 1
+    `,
+    [company]
+  );
 
-const companyId = companyResult.rows[0]?.id;
+  const companyId = companyResult.rows[0]?.id;
 
-if (!companyId) {
-  throw new Error(`Company not found: ${company}`);
-}
-
-   const insertResult = await pool.query(
-  `
-  INSERT INTO app_test.sales_invoice_extractions
-  (
-      company_id, company_name, customer_name, gstin,
-      invoice_no, invoice_date, godown_name, raw_json,
-      sync_status, error_count, last_error, created_at, updated_at
-  )
-  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,NOW(),NOW())
- ON CONFLICT (company_id, invoice_no)
-DO UPDATE
-SET
-    customer_name = EXCLUDED.customer_name,
-    gstin = EXCLUDED.gstin,
-    invoice_date = EXCLUDED.invoice_date,
-    godown_name = EXCLUDED.godown_name,
-    raw_json = EXCLUDED.raw_json,
-    sync_status = 'pending',
-    error_count = 0,
-    last_error = NULL,
-    updated_at = NOW()
-RETURNING id;
-  `,
-  [companyId, company, invoiceData.customer_name, invoiceData.customer_gstin,
-   invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
-);
-
-// If duplicate, RETURNING id gives nothing - skip queuing
-if (!insertResult.rows.length) {
-  console.log(`⚠️ Skipping duplicate invoice: ${invoiceNo}`);
-  continue;
-}
-
-const salesId = insertResult.rows[0].id;
-
-const jobId = getSalesJobId(salesId);
-
-// Remove old job if it exists
-const oldJob = await salesQueue.getJob(jobId);
-
-if (oldJob) {
-  await oldJob.remove();
-  console.log(`🗑 Removed old job: ${jobId}`);
-}
-
-// Queue again
-await salesQueue.add(
-  "sales-invoice",
-  { salesId },
-  { jobId }
-);
-
-console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date})`);
-successCount++;
-
-      } catch (error) {
-        console.error(`❌ Sales Insert Failed for ${invoiceNo}:`, error.message);
-        failCount++;
-      }
-    }
-
-    console.log(`📊 Bulk Sales Done -> Success:${successCount} Failed:${failCount}`);
-
-    return {
-      processedRows: rows.length,
-      successCount,
-      failCount
-    };
-  },
-
-  {
-    connection,
-    concurrency: 1
+  if (!companyId) {
+    throw new Error(`Company not found: ${company}`);
   }
-);
 
-worker.on("completed", (job) => {
-  console.log(`✅ Bulk Sales Job Completed : ${job.id}`);
-});
+    const insertResult = await pool.query(
+    `
+    INSERT INTO app_test.sales_invoice_extractions
+    (
+        company_id, company_name, customer_name, gstin,
+        invoice_no, invoice_date, godown_name, raw_json,
+        sync_status, error_count, last_error, created_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,NOW(),NOW())
+  ON CONFLICT (company_id, invoice_no)
+  DO UPDATE
+  SET
+      customer_name = EXCLUDED.customer_name,
+      gstin = EXCLUDED.gstin,
+      invoice_date = EXCLUDED.invoice_date,
+      godown_name = EXCLUDED.godown_name,
+      raw_json = EXCLUDED.raw_json,
+      sync_status = 'pending',
+      error_count = 0,
+      last_error = NULL,
+      updated_at = NOW()
+  RETURNING id;
+    `,
+    [companyId, company, invoiceData.customer_name, invoiceData.customer_gstin,
+    invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
+  );
 
-worker.on("failed", (job, error) => {
-  console.error(`❌ Bulk Sales Job Failed : ${job?.id}`, error.message);
-});
+  // If duplicate, RETURNING id gives nothing - skip queuing
+  if (!insertResult.rows.length) {
+    console.log(`⚠️ Skipping duplicate invoice: ${invoiceNo}`);
+    continue;
+  }
 
-worker.on("error", (error) => {
-  console.error("❌ Bulk Sales Worker Error:", error.message);
-});
+  const salesId = insertResult.rows[0].id;
 
-console.log("🚀 Bulk Sales Worker Started");
+  const jobId = getSalesJobId(salesId);
 
-export default worker;
+  // Remove old job if it exists
+  const oldJob = await salesQueue.getJob(jobId);
+
+  if (oldJob) {
+    await oldJob.remove();
+    console.log(`🗑 Removed old job: ${jobId}`);
+  }
+
+  // Queue again
+  await salesQueue.add(
+    "sales-invoice",
+    { salesId },
+    { jobId }
+  );
+
+  console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date})`);
+  successCount++;
+
+        } catch (error) {
+          console.error(`❌ Sales Insert Failed for ${invoiceNo}:`, error.message);
+          failCount++;
+        }
+      }
+
+      console.log(`📊 Bulk Sales Done -> Success:${successCount} Failed:${failCount}`);
+
+      return {
+        processedRows: rows.length,
+        successCount,
+        failCount
+      };
+    },
+
+    {
+      connection,
+      concurrency: 1
+    }
+  );
+
+  worker.on("completed", (job) => {
+    console.log(`✅ Bulk Sales Job Completed : ${job.id}`);
+  });
+
+  worker.on("failed", (job, error) => {
+    console.error(`❌ Bulk Sales Job Failed : ${job?.id}`, error.message);
+  });
+
+  worker.on("error", (error) => {
+    console.error("❌ Bulk Sales Worker Error:", error.message);
+  });
+
+  console.log("🚀 Bulk Sales Worker Started");
+
+  export default worker;
