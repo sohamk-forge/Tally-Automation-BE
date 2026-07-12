@@ -153,6 +153,23 @@ import {
 
 const app = express();
 
+
+/* Quick request-source logger: prints remote IP, User-Agent and Origin */
+app.use((req, res, next) => {
+  try {
+    console.log({
+      source_ip: req.ip,
+      user_agent: req.headers['user-agent'] || null,
+      origin: req.headers.origin || null,
+      method: req.method,
+      endpoint: req.originalUrl
+    });
+  } catch (err) {
+    // swallow logging errors
+  }
+  next();
+});
+
 /* =================================
    GLOBAL MIDDLEWARE
 ================================= */
