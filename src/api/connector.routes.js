@@ -10,10 +10,15 @@ const router = express.Router();
 
 router.post("/generate-key", async (req, res) => {
   try {
-
     const { user_id } = req.body;
 
+    console.log("[generate-key] request received", {
+      user_id,
+      body: req.body
+    });
+
     if (!user_id) {
+      console.warn("[generate-key] missing user_id", { user_id });
       return res.status(400).json({
         status: "error",
         message: "user_id is required"
@@ -27,6 +32,12 @@ router.post("/generate-key", async (req, res) => {
     const expiresAt = new Date(
       Date.now() + 10 * 60 * 1000
     );
+
+    console.log("[generate-key] token generated", {
+      user_id,
+      token,
+      expires_at: expiresAt
+    });
 
     await pool.query(
       `
@@ -52,6 +63,12 @@ router.post("/generate-key", async (req, res) => {
       ]
     );
 
+    console.log("[generate-key] token stored successfully", {
+      user_id,
+      token,
+      expires_at: expiresAt
+    });
+
     return res.status(200).json({
       status: "success",
       token,
@@ -59,8 +76,10 @@ router.post("/generate-key", async (req, res) => {
     });
 
   } catch (err) {
-
-    console.error("Generate Key Error:", err);
+    console.error("[generate-key] error", {
+      user_id: req.body?.user_id,
+      error: err
+    });
 
     return res.status(500).json({
       status: "error",
