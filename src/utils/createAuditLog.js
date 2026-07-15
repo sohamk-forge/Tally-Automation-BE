@@ -14,7 +14,7 @@ export async function createAuditLog({
     await pool.query(
 
       `
-      INSERT INTO app.audit_logs (
+     INSERT INTO app_test.audit_logs (
 
         action,
         entity,
