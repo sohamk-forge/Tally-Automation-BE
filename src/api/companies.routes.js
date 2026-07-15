@@ -5,7 +5,7 @@ import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
-   GET ALL COMPANIES
+   GET ALL COMPANIES (USER-FILTERED)
 ========================================= */
 router.get("/", async (req, res) => {
   try {
