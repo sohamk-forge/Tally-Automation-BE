@@ -5,16 +5,13 @@ import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
-   GET ALL COMPANIES
+   GET ALL COMPANIES (USER-FILTERED)
 ========================================= */
-
 router.get("/", async (req, res) => {
-
   try {
-
+    const { user_id } = req.query;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-
     const offset = (page - 1) * limit;
 
     // TOTAL COUNT
@@ -28,7 +25,7 @@ router.get("/", async (req, res) => {
 
     const total = parseInt(totalResult.rows[0].count);
 
-    // FETCH COMPANIES
+    // FETCH ONLY THIS USER'S COMPANIES
     const result = await pool.query(
       `
      SELECT
@@ -62,9 +59,7 @@ LIMIT $1 OFFSET $2
     });
 
   } catch (err) {
-
-    console.log("COMPANY ERROR:", err);
-
+    console.log("❌ COMPANY GET ERROR:", err);
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -73,89 +68,33 @@ LIMIT $1 OFFSET $2
 });
 
 /* =========================================
-   SYNC COMPANIES FROM TALLY
+   GET SINGLE COMPANY BY ID
 ========================================= */
-
-router.get("/sync", async (req, res) => {
-
+router.get("/:id", async (req, res) => {
   try {
+    const { id } = req.params;
+    const { user_id } = req.query;
 
-    // TALLY XML — Collection fetches all companies
-    const xml = `
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>CompanyCollection</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="CompanyCollection">
-            <TYPE>Company</TYPE>
-            <FETCH>NAME, BOOKSFROM, ENDINGAT</FETCH>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>
-`;
-
-    // SEND XML TO TALLY
-    const response = await fetch(
-      "http://localhost:9000",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "text/xml"
-        },
-        body: xml
-      }
-    );
-
-    // RAW XML RESPONSE
-    const responseXML = await response.text();
-
-    console.log("RAW XML =>");
-    console.log(responseXML);
-
-    // CHECK RESPONSE
-    if (!responseXML.includes("<ENVELOPE>")) {
-      throw new Error("Invalid Tally response");
+    if (!user_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "user_id query parameter required"
+      });
     }
 
-    // XML PARSER
-    const { XMLParser } = await import("fast-xml-parser");
-
-    const parser = new XMLParser({
-      ignoreAttributes: false,
-      isArray: (name) => name === "COMPANY"  // always treat as array
-    });
-
-    // PARSE XML
-    const parsed = parser.parse(responseXML);
-
-    console.log(
-      "PARSED =>",
-      JSON.stringify(parsed, null, 2)
-    );
-
-    // GET COLLECTION DATA
-    // Tally Collection response: ENVELOPE > BODY > DATA > COLLECTION > COMPANY[]
-    const companies =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY ||
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.company ||
-      [];
-
-    console.log(
-      "COMPANIES =>",
-      JSON.stringify(companies, null, 2)
+    const result = await pool.query(
+      `SELECT 
+         c.id, 
+         c.name, 
+         c.financial_year_start, 
+         c.financial_year_end,
+         m.from_year,
+         m.to_year
+       FROM app_test.companies c
+       INNER JOIN app_test.connector_machines m
+           ON c.name = m.company_name
+       WHERE c.id = $1 AND m.user_id = $2 AND m.tally_connected = true`,
+      [id, user_id]
     );
 
     if (!companies.length) {
@@ -266,15 +205,12 @@ const financial_year_end =
     // SUCCESS RESPONSE
     return res.json({
       status: "success",
-      source: "tally",
-      synced: results.length,
-      data: results
+      count: result.rows.length,
+      data: result.rows
     });
 
   } catch (err) {
-
-    console.log("SYNC ERROR:", err);
-
+    console.log("❌ COMPANY USER ERROR:", err);
     return res.status(500).json({
       status: "error",
       message: err.message
