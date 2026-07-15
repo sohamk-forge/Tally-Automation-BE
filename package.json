@@ -19,6 +19,7 @@
   "dependencies": {
     "@bull-board/api": "^7.1.5",
     "axios": "^1.18.1",
+    "bcryptjs": "^3.0.3",
     "bullmq": "^5.78.0",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
