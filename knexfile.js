@@ -26,7 +26,7 @@ export default {
 
       database:
         process.env.DB_NAME ||
-        "tally_dashboard",
+        "tally_nonprod",
 
     },
 
