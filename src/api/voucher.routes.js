@@ -12,6 +12,11 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
+// CHANGED: no longer imports/uses refreshVoucherDataForDay — the
+// duplicate check no longer syncs before checking. Only
+// formatVoucherDate and checkDuplicateFromDb are needed from voucher.js.
+import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
+
 const router = express.Router();
 
 const upload = multer({
@@ -129,6 +134,69 @@ function runSemanticEnrichment(transactions) {
 }
 
 /* ===========================
+   DUPLICATE CHECK — DIRECT DB, NO SYNC CALL
+
+   CHANGED: previously this called /voucher-sync (over HTTP) before
+   checking the DB. That step has been removed entirely — this now
+   checks app_test.vouchers directly using checkDuplicateFromDb()
+   from voucher.js, relying on whatever your existing periodic/manual
+   sync has already populated.
+
+   Two outcomes now (tallyRejected doesn't apply — no live Tally call
+   happens in this path at all; tallyUnreachable only fires on an
+   actual DB error, which is rare):
+     { exists: true,  message, matches, voucher }  -> duplicate found
+     { exists: false, voucher }                     -> clear to push
+     { tallyUnreachable: true, message, voucher }   -> the DB query
+         itself failed (connection issue, bad query, etc.)
+=========================== */
+
+async function runDuplicateCheck(voucher) {
+  const voucherDateStr =
+    voucher.voucher_date instanceof Date
+      ? voucher.voucher_date.toISOString().split("T")[0]
+      : String(voucher.voucher_date).slice(0, 10);
+
+  let result;
+  try {
+    result = await checkDuplicateFromDb({
+      companyId: voucher.company_id,
+      voucherType: voucher.voucher_type,
+      voucherDate: voucherDateStr,
+      partyLedger: voucher.party_ledger,
+      bankLedger: voucher.bank_ledger,
+      amount: voucher.amount
+    });
+  } catch (dbErr) {
+    // DB failure — not a Tally connectivity issue, but surfaced the
+    // same way so the caller leaves the voucher in a re-triggerable
+    // state instead of silently pushing.
+    return { tallyUnreachable: true, message: `duplicate check failed: ${dbErr.message}`, voucher };
+  }
+
+  const updated = await db.query(
+    `UPDATE app_test.contra_vouchers
+     SET duplicate_checked = true,
+         duplicate_message = $1,
+         status = $2
+     WHERE id = $3
+     RETURNING *`,
+    [
+      result.exists ? result.message : null,
+      result.exists ? "DUPLICATE_FOUND" : "PENDING",
+      voucher.id
+    ]
+  );
+
+  return {
+    exists: result.exists,
+    message: result.message,
+    matches: result.matches,
+    voucher: updated.rows[0]
+  };
+}
+
+/* ===========================
    CREATE VOUCHER (manual)
 =========================== */
 
@@ -183,11 +251,6 @@ router.post("/create", async (req, res) => {
 
 /* ===========================
    UPLOAD BANK STATEMENT (EXCEL)
-   Now includes semantic enrichment (merchant_name, group_key)
-   that used to live on the separate :8000 FastAPI service.
-   Returns BOTH:
-     - data         → DB-backed voucher rows (for "Review")
-     - transactions → enriched raw transaction list (for "AI Suggestion")
 =========================== */
 
 router.post(
@@ -220,7 +283,6 @@ router.post(
 
       const fileName = req.file.originalname;
 
-      // Check if this exact file has already been uploaded for this company
       const existingFile = await db.query(
         `SELECT
           file_name,
@@ -268,14 +330,12 @@ router.post(
         range: headerRowIndex
       });
 
-      // Drop bank separator rows (e.g. rows full of ***)
       rawRows = rawRows.filter((row) => !isSeparatorRow(row));
 
       if (!rawRows.length) {
         return res.status(400).json({ success: false, message: "No data rows found in Excel" });
       }
 
-      // ── Build narration list and run semantic enrichment ONCE for the whole file ──
       const narrationInputs = rawRows.map((row) => ({
         narration: String(
           row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
@@ -284,8 +344,8 @@ router.post(
 
       const enriched = await runSemanticEnrichment(narrationInputs);
 
-      const inserted = [];      // → "Review" shape (DB-backed voucher rows)
-      const transactions = [];  // → "AI Suggestion" shape (old FastAPI response shape)
+      const inserted = [];
+      const transactions = [];
 
       for (const [i, row] of rawRows.entries()) {
         const withdrawalAmt = parseAmount(
@@ -312,7 +372,6 @@ router.post(
         const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
         const chequeRef = cleanString(rawRef) || null;
 
-        // Build the AI-suggestion-style transaction entry (mirrors old FastAPI shape)
         transactions.push({
           transaction_date: String(row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"] ?? "").trim(),
           value_date: String(row["Value Dt"] ?? row["Value Date"] ?? row["VALUE DATE"] ?? row["Date"] ?? "").trim(),
@@ -325,7 +384,6 @@ router.post(
           group_key: groupKey || ""
         });
 
-        // Withdrawal → DEBIT row
         if (withdrawalAmt !== null && withdrawalAmt > 0) {
           const existingDebit = await db.query(
             `SELECT id, status FROM app_test.contra_vouchers
@@ -365,7 +423,6 @@ router.post(
           }
         }
 
-        // Deposit → CREDIT row
         if (depositAmt !== null && depositAmt > 0) {
           const existingCredit = await db.query(
             `SELECT id, status FROM app_test.contra_vouchers
@@ -424,8 +481,6 @@ router.post(
       return res.status(201).json({
         success: true,
         message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
-
-        // ── "Review" shape — DB-backed voucher rows ──
         file_name:      fileName,
         bank_ledger:    bank_ledger,
         start_date:     startDate,
@@ -437,8 +492,6 @@ router.post(
         debit_count:    inserted.filter(v => v.debit_credit === "DEBIT").length,
         credit_count:   inserted.filter(v => v.debit_credit === "CREDIT").length,
         data: inserted,
-
-        // ── "AI Suggestion" shape — mirrors old :8000 FastAPI response ──
         transactions: transactions
       });
 
@@ -501,19 +554,6 @@ router.get("/statement-details", async (req, res) => {
 
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
-   Reshapes existing contra_vouchers rows (no schema change,
-   no extra writes on upload) into the old FastAPI-style
-   transaction list: { success, file_name, total, transactions }
-
-   UPDATED: rows are now ordered by group_key first (so narrations
-   belonging to the same merchant/group sit next to each other in
-   the flat "transactions" list), and a new "groups" array buckets
-   the same rows by group_key for easy client-side rendering.
-
-   Query params:
-     company_id  (required)
-     file_name   (optional — if omitted, uses the most recently
-                  uploaded file for that company)
 =========================== */
 
 router.get("/statement-transactions", async (req, res) => {
@@ -589,7 +629,6 @@ router.get("/statement-transactions", async (req, res) => {
       group_key: r.group_key || ""
     });
 
-    // Build groups first
     const groupsMap = new Map();
     for (const r of result.rows) {
       const key = r.group_key || "__ungrouped__";
@@ -611,14 +650,10 @@ router.get("/statement-transactions", async (req, res) => {
       if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
     }
 
-    // ── ONLY keep groups where the narration repeats (count > 1). ──
-    // This drops: (a) the "__ungrouped__" bucket (narrations that never matched anything),
-    // and (b) any real group_key bucket that only ever had a single row.
     const groups = [...groupsMap.values()]
       .filter(g => g.group_key !== null && g.count > 1)
       .sort((a, b) => b.count - a.count);
 
-    // Flat list rebuilt from the filtered groups only (so it stays consistent with `groups`)
     const transactions = groups.flatMap(g => g.transactions);
 
     if (!transactions.length) {
@@ -645,6 +680,83 @@ router.get("/statement-transactions", async (req, res) => {
     });
   }
 });
+
+/* ===========================
+   SUGGEST PARTY LEDGER
+=========================== */
+
+router.get("/suggest-party-ledger", async (req, res) => {
+  try {
+    const { company_id, bank_ledger, narration, merchant_name, group_key } = req.query;
+
+    if (!company_id || !bank_ledger) {
+      return res.status(400).json({
+        success: false,
+        message: "company_id and bank_ledger are required"
+      });
+    }
+
+    const narrationPattern = narration && narration.trim()
+      ? `%${narration.trim()}%`
+      : null;
+
+    const result = await db.query(
+      `SELECT
+        party_ledger,
+        COUNT(*) AS usage_count,
+        MAX(voucher_date) AS last_used,
+        MAX(
+          CASE
+            WHEN $3::text IS NOT NULL AND group_key = $3 THEN 3
+            WHEN $4::text IS NOT NULL AND merchant_name = $4 THEN 2
+            WHEN $5::text IS NOT NULL AND narration ILIKE $5 THEN 1
+            ELSE 0
+          END
+        ) AS match_strength
+       FROM app_test.contra_vouchers
+       WHERE company_id = $1
+         AND bank_ledger = $2
+         AND party_ledger IS NOT NULL
+         AND status = 'SUCCESS'
+       GROUP BY party_ledger
+       ORDER BY match_strength DESC, usage_count DESC, last_used DESC
+       LIMIT 5`,
+      [company_id, bank_ledger, group_key || null, merchant_name || null, narrationPattern]
+    );
+
+    if (!result.rows.length) {
+      return res.status(200).json({
+        success: true,
+        suggested_party_ledger: null,
+        suggestions: [],
+        message: "No prior successful vouchers found for this bank ledger yet — no suggestion available."
+      });
+    }
+
+    const suggestions = result.rows.map((r) => ({
+      party_ledger: r.party_ledger,
+      usage_count: Number(r.usage_count),
+      last_used: r.last_used,
+      match_strength: Number(r.match_strength),
+      match_reason:
+        Number(r.match_strength) === 3 ? "same transaction group" :
+        Number(r.match_strength) === 2 ? "same merchant" :
+        Number(r.match_strength) === 1 ? "similar narration" :
+        "commonly used for this bank ledger"
+    }));
+
+    return res.status(200).json({
+      success: true,
+      suggested_party_ledger: suggestions[0].party_ledger,
+      suggestions
+    });
+
+  } catch (err) {
+    console.error("suggest-party-ledger error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 /* ===========================
    GET WAITING LEDGER VOUCHERS
 =========================== */
@@ -758,82 +870,158 @@ router.get("/filter", async (req, res) => {
 });
 
 /* ===========================
-   BULK ASSIGN party_ledger + voucher_type → triggers BullMQ
-
-   FIX: previously called voucherQueue.add() directly with a
-   deterministic jobId. If a job with that ID already existed in
-   Redis (e.g. a previously FAILED job that hadn't been removed),
-   BullMQ silently ignored the new add() call — so Postgres said
-   PENDING but no job was ever actually queued. Now uses
-   safeEnqueueVoucher(), which removes any stale job first.
+   ASSIGN party_ledger + voucher_type — CORE LOGIC (shared)
 =========================== */
 
-router.put("/bulk-party-ledger", async (req, res) => {
-  try {
-    const { vouchers } = req.body;
+async function assignPartyLedger(vouchers, forcePushFlag) {
+  const allowed = ["payment", "receipt", "contra"];
 
-    if (!Array.isArray(vouchers) || vouchers.length === 0) {
+  const queued = [];
+  const duplicates = [];
+  const tallyUnreachable = [];
+  const notFound = [];
+  const invalid = [];
+
+  for (const v of vouchers) {
+    if (!v.id || !v.party_ledger || !v.voucher_type) {
+      invalid.push({ id: v.id ?? null, reason: "Missing id, party_ledger, or voucher_type", input: v });
+      continue;
+    }
+    if (!allowed.includes(v.voucher_type.toLowerCase())) {
+      invalid.push({ id: v.id, reason: `Invalid voucher_type "${v.voucher_type}". Allowed: payment, receipt, contra` });
+      continue;
+    }
+
+    const isContra = v.voucher_type.toLowerCase() === "contra";
+
+    const result = await db.query(
+      `UPDATE app_test.contra_vouchers
+       SET
+         party_ledger  = $1,
+         voucher_type  = $2,
+         transfer_bank = $3,
+         status        = 'PENDING',
+         force_push    = $4
+       WHERE id = $5
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+       RETURNING *`,
+      [v.party_ledger, v.voucher_type.toLowerCase(),
+       isContra ? v.party_ledger : null, forcePushFlag, v.id]
+    );
+
+    if (result.rows.length === 0) {
+      notFound.push(v.id);
+      continue;
+    }
+
+    let voucher = result.rows[0];
+
+    if (!forcePushFlag) {
+      const duplicateOutcome = await runDuplicateCheck(voucher);
+
+      if (duplicateOutcome.tallyUnreachable) {
+        await db.query(
+          `UPDATE app_test.contra_vouchers SET status = 'WAITING_LEDGER' WHERE id = $1`,
+          [v.id]
+        );
+        tallyUnreachable.push({ id: v.id, message: duplicateOutcome.message });
+        continue;
+      }
+
+      if (duplicateOutcome.exists) {
+        duplicates.push({
+          id: v.id,
+          message: duplicateOutcome.message,
+          matches: duplicateOutcome.matches
+        });
+        continue;
+      }
+
+      voucher = duplicateOutcome.voucher;
+    }
+
+    await safeEnqueueVoucher(v.id);
+    queued.push(v.id);
+  }
+
+  if (queued.length === 0 && duplicates.length === 0 &&
+      tallyUnreachable.length === 0 && invalid.length === vouchers.length &&
+      notFound.length === 0) {
+    return {
+      status: 400,
+      body: { success: false, message: "All items in the batch were invalid", invalid }
+    };
+  }
+
+  if (queued.length === 0 && duplicates.length === 0 &&
+      tallyUnreachable.length === 0 && invalid.length === 0 &&
+      notFound.length === vouchers.length) {
+    return {
+      status: 404,
+      body: { success: false, message: "No matching WAITING_LEDGER or FAILED vouchers found" }
+    };
+  }
+
+  if (vouchers.length === 1 && duplicates.length === 1) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        duplicate: true,
+        message: duplicates[0].message,
+        matches: duplicates[0].matches,
+        nextSteps: {
+          confirmPush: `POST /voucher/${duplicates[0].id}/confirm-push`,
+          cancelPush: `POST /voucher/${duplicates[0].id}/cancel-push`
+        }
+      }
+    };
+  }
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      message: `${queued.length} queued, ${duplicates.length} duplicate(s) found, ` +
+        `${tallyUnreachable.length} skipped (duplicate-check error), ` +
+        `${notFound.length} not found, ${invalid.length} invalid`,
+      queued,
+      duplicates,
+      tallyUnreachable,
+      notFound,
+      invalid,
+      ...(duplicates.length
+        ? { nextSteps: "For each id in `duplicates`, call POST /voucher/:id/confirm-push or POST /voucher/:id/cancel-push" }
+        : {})
+    }
+  };
+}
+
+/* ===========================
+   ASSIGN party_ledger + voucher_type (single OR bulk) — CANONICAL ROUTE
+=========================== */
+
+router.put("/party-ledger", async (req, res) => {
+  try {
+    const forcePushFlag = req.body.forcePush === true;
+
+    const vouchers = Array.isArray(req.body.vouchers)
+      ? req.body.vouchers
+      : [{
+          id: req.body.id,
+          party_ledger: req.body.party_ledger,
+          voucher_type: req.body.voucher_type
+        }];
+
+    if (!vouchers.length || !vouchers[0]?.id) {
       return res.status(400).json({
         success: false,
-        message: "vouchers[] array is required. Each item needs: id, party_ledger, voucher_type"
+        message: "Provide either { id, party_ledger, voucher_type } or { vouchers: [...] }"
       });
     }
 
-    const allowed = ["payment", "receipt", "contra"];
-
-    for (const v of vouchers) {
-      if (!v.id || !v.party_ledger || !v.voucher_type) {
-        return res.status(400).json({
-          success: false,
-          message: `Missing fields on: ${JSON.stringify(v)}. Need id, party_ledger, voucher_type`
-        });
-      }
-      if (!allowed.includes(v.voucher_type.toLowerCase())) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid voucher_type "${v.voucher_type}" for id ${v.id}. Allowed: payment, receipt, contra`
-        });
-      }
-    }
-
-    const updatedIds = [];
-
-    for (const v of vouchers) {
-      const isContra = v.voucher_type.toLowerCase() === "contra";
-
-      const result = await db.query(
-        `UPDATE app_test.contra_vouchers
-         SET
-           party_ledger  = $1,
-           voucher_type  = $2,
-           transfer_bank = $3,
-           status        = 'PENDING'
-         WHERE id = $4
-           AND status IN ('WAITING_LEDGER', 'FAILED')
-         RETURNING id`,
-        [v.party_ledger, v.voucher_type.toLowerCase(),
-         isContra ? v.party_ledger : null, v.id]
-      );
-
-      if (result.rows.length > 0) updatedIds.push(result.rows[0].id);
-    }
-
-    if (updatedIds.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No matching WAITING_LEDGER or FAILED vouchers found"
-      });
-    }
-
-    for (const voucherId of updatedIds) {
-      await safeEnqueueVoucher(voucherId);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `${updatedIds.length} vouchers assigned and queued for Tally`,
-      queued: updatedIds
-    });
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    return res.status(status).json(body);
 
   } catch (err) {
     console.error(err);
@@ -842,60 +1030,126 @@ router.put("/bulk-party-ledger", async (req, res) => {
 });
 
 /* ===========================
-   SINGLE ASSIGN party_ledger + voucher_type
-
-   FIX: same stale-jobId issue as bulk-party-ledger above — now
-   uses safeEnqueueVoucher() instead of voucherQueue.add() directly.
+   BACKWARD-COMPATIBLE ALIASES (temporary)
 =========================== */
+
+router.put("/bulk-party-ledger", async (req, res) => {
+  try {
+    const forcePushFlag = req.body.forcePush === true;
+    const vouchers = Array.isArray(req.body.vouchers) ? req.body.vouchers : [];
+
+    if (!vouchers.length) {
+      return res.status(400).json({
+        success: false,
+        message: "vouchers[] array is required. Each item needs: id, party_ledger, voucher_type"
+      });
+    }
+
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    return res.status(status).json(body);
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 router.put("/:id/party-ledger", async (req, res) => {
   try {
-    const { party_ledger, voucher_type } = req.body;
+    const forcePushFlag = req.body.forcePush === true;
+    const vouchers = [{
+      id: Number(req.params.id),
+      party_ledger: req.body.party_ledger,
+      voucher_type: req.body.voucher_type
+    }];
+
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    return res.status(status).json(body);
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   CONFIRM PUSH
+=========================== */
+
+router.post("/:id/confirm-push", async (req, res) => {
+  try {
     const voucherId = Number(req.params.id);
-
-    if (!party_ledger || !voucher_type) {
-      return res.status(400).json({
-        success: false,
-        message: "party_ledger and voucher_type are required"
-      });
-    }
-
-    const allowed = ["payment", "receipt", "contra"];
-    if (!allowed.includes(voucher_type.toLowerCase())) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid voucher_type. Allowed: payment, receipt, contra"
-      });
-    }
-
-    const isContra = voucher_type.toLowerCase() === "contra";
 
     const result = await db.query(
       `UPDATE app_test.contra_vouchers
-       SET
-         party_ledger  = $1,
-         voucher_type  = $2,
-         transfer_bank = $3,
-         status        = 'PENDING'
-       WHERE id = $4
-         AND status IN ('WAITING_LEDGER', 'FAILED')
+       SET force_push = true,
+           status = 'PENDING'
+       WHERE id = $1
+         AND status = 'DUPLICATE_FOUND'
        RETURNING *`,
-      [party_ledger, voucher_type.toLowerCase(),
-       isContra ? party_ledger : null, voucherId]
+      [voucherId]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Voucher not found or already processed"
+        message: "Voucher not found or not currently awaiting duplicate confirmation"
       });
     }
 
-    await safeEnqueueVoucher(voucherId);
+    const enqueueResult = await safeEnqueueVoucher(voucherId);
+
+    return res.status(202).json({
+      success: true,
+      message: "Push confirmed — voucher queued for Tally",
+      data: result.rows[0],
+      queue: enqueueResult
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
+   CANCEL PUSH
+=========================== */
+
+router.post("/:id/cancel-push", async (req, res) => {
+  try {
+    const voucherId = Number(req.params.id);
+
+    const jobId = getVoucherJobId(voucherId);
+    const existingJob = await voucherQueue.getJob(jobId);
+
+    let jobRemoved = false;
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (state !== "active") {
+        await existingJob.remove();
+        jobRemoved = true;
+      }
+    }
+
+    const result = await db.query(
+      `UPDATE app_test.contra_vouchers
+       SET status = 'CANCELLED'
+       WHERE id = $1
+         AND status IN ('DUPLICATE_FOUND', 'PENDING', 'WAITING_LEDGER')
+       RETURNING *`,
+      [voucherId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Voucher not found or cannot be cancelled in its current state"
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      message: "Assigned and queued for Tally",
+      jobRemoved,
       data: result.rows[0]
     });
 
@@ -925,8 +1179,5 @@ router.get("/:id", async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-
-
-
 
 export default router;
