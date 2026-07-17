@@ -54,51 +54,76 @@ async function getCompanyInfo(companyId, companyName) {
 /* ===================================================
    TOP SALES LEDGERS — using party_ledger_name + debit_amount
 =================================================== */
-async function getTopSellingLedgers(companyId, yearStart, yearEnd) {
+async function getTopSellingItems(companyId, yearStart, yearEnd) {
   const result = await pool.query(
-    `SELECT party_ledger_name,
-            SUM(ABS(debit_amount)) AS total_sales,
-            COUNT(*) AS voucher_count
-       FROM app_test.vouchers
-      WHERE company_id = $1
-        AND DATE(voucher_date) >= $2
-        AND DATE(voucher_date) < $3
-        AND LOWER(voucher_type) LIKE '%sales%'
-        AND LOWER(voucher_type) NOT LIKE '%return%'
-        AND LOWER(voucher_type) NOT LIKE '%credit note%'
-        AND LOWER(voucher_type) NOT LIKE '%debit note%'
-        AND party_ledger_name IS NOT NULL
-        AND TRIM(party_ledger_name) != ''
-      GROUP BY party_ledger_name
-      ORDER BY total_sales DESC`,
+    `SELECT ledger_entries
+     FROM app_test.vouchers
+     WHERE company_id = $1
+       AND DATE(voucher_date) >= $2
+       AND DATE(voucher_date) < $3
+       AND LOWER(voucher_type) LIKE '%sales%'
+       AND LOWER(voucher_type) NOT LIKE '%return%'
+       AND LOWER(voucher_type) NOT LIKE '%credit note%'
+       AND LOWER(voucher_type) NOT LIKE '%debit note%'`,
     [companyId, yearStart, yearEnd]
   );
 
-  const allLedgers = result.rows.map((r) => ({
-    ledger_name: r.party_ledger_name,
-    total_sales: Number(r.total_sales) || 0,
-    voucher_count: Number(r.voucher_count)
+  const itemMap = new Map();
+
+  for (const row of result.rows) {
+    const entries = row.ledger_entries || [];
+
+    for (const entry of entries) {
+      const inventory = entry["INVENTORYALLOCATIONS.LIST"];
+
+      if (!inventory) continue;
+
+      const itemName = inventory.STOCKITEMNAME;
+      const amount = Math.abs(Number(inventory.AMOUNT) || 0);
+
+      if (!itemName) continue;
+
+      if (!itemMap.has(itemName)) {
+        itemMap.set(itemName, {
+          item_name: itemName,
+          total_sales: 0,
+          voucher_count: 0
+        });
+      }
+
+      const item = itemMap.get(itemName);
+      item.total_sales += amount;
+      item.voucher_count++;
+    }
+  }
+
+  const allItems = [...itemMap.values()].sort(
+    (a, b) => b.total_sales - a.total_sales
+  );
+
+  const grandTotal = allItems.reduce(
+    (sum, item) => sum + item.total_sales,
+    0
+  );
+
+  const topItems = allItems.slice(0, TOP_LEDGERS_LIMIT).map((item, index) => ({
+    rank: index + 1,
+    item_name: item.item_name,
+    total_sales: Number(item.total_sales.toFixed(2)),
+    voucher_count: item.voucher_count,
+    percentage:
+      grandTotal > 0
+        ? Number(((item.total_sales / grandTotal) * 100).toFixed(2))
+        : 0
   }));
 
-  const grandTotal = allLedgers.reduce((sum, l) => sum + l.total_sales, 0);
-
-  const topLedgers = allLedgers
-    .slice(0, TOP_LEDGERS_LIMIT)
-    .map((item, index) => ({
-      rank: index + 1,
-      ledger_name: item.ledger_name,
-      total_sales: Math.round(item.total_sales * 100) / 100,
-      voucher_count: item.voucher_count,
-      percentage:
-        grandTotal > 0
-          ? Math.round((item.total_sales / grandTotal) * 10000) / 100
-          : 0
-    }));
-
   return {
-    topLedgers,
-    grandTotal: Math.round(grandTotal * 100) / 100,
-    totalVoucherCount: allLedgers.reduce((sum, l) => sum + l.voucher_count, 0)
+    topItems,
+    grandTotal: Number(grandTotal.toFixed(2)),
+    totalVoucherCount: allItems.reduce(
+      (sum, item) => sum + item.voucher_count,
+      0
+    )
   };
 }
 
@@ -125,8 +150,8 @@ router.get("/top-sales-ledgers", async (req, res) => {
 
     const { id, name: company, yearStart, yearEnd, fyLabel } = companyInfo;
 
-    const { topLedgers, grandTotal, totalVoucherCount } =
-      await getTopSellingLedgers(id, yearStart, yearEnd);
+    const { topItems, grandTotal, totalVoucherCount } =
+       await getTopSellingItems(id, yearStart, yearEnd);
 
     return res.status(200).json({
       status: "success",
@@ -138,12 +163,12 @@ router.get("/top-sales-ledgers", async (req, res) => {
       financial_year_end: yearEnd,
       voucher_count: totalVoucherCount,
       grand_total_sales: grandTotal,
-      top_ledgers_count: topLedgers.length,
-      data: topLedgers
+      top_items_count: topItems.length,
+      data: topItems
     });
 
   } catch (err) {
-    console.error("❌ TOP SALES LEDGERS ERROR:", err.message);
+    console.error("❌ TOP SALES ITEMS ERROR:", err.message);
 
     return res.status(500).json({
       status: "error",

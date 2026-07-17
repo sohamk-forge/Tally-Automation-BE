@@ -12,9 +12,6 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
-// CHANGED: no longer imports/uses refreshVoucherDataForDay — the
-// duplicate check no longer syncs before checking. Only
-// formatVoucherDate and checkDuplicateFromDb are needed from voucher.js.
 import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
 
 const router = express.Router();
@@ -89,6 +86,48 @@ function isSeparatorRow(row) {
 }
 
 /* ===========================
+   FALLBACK GROUP KEY EXTRACTOR
+
+   Used whenever the semantic enrichment script (semantic_cli.py)
+   couldn't identify a known merchant and returned "unknown"/null.
+   This is common for person-to-person IMPS/NEFT/UPI transfers, since
+   those scripts are usually built to recognize known merchant/brand
+   name patterns, not individual names.
+
+   Extracts the payer/payee name segment sitting between the
+   transaction reference and the bank code (IMPS/NEFT/RTGS), or
+   between "UPI-" and the "@bank" handle (UPI), so transfers to/from
+   the same person still cluster together under a stable group_key
+   instead of every such transaction collapsing into one blanket
+   "unknown" bucket.
+
+   NOTE: this is a best-effort fallback, not a replacement for proper
+   semantic enrichment — it only parses the common bank narration
+   shapes below. If the narration doesn't match either pattern, it
+   returns null and the original "unknown" value is kept as-is.
+=========================== */
+
+function deriveFallbackGroupKey(narration) {
+  if (!narration) return null;
+
+  // Matches: IMPS-<digits>-<NAME SEGMENT>-<BANKCODE>-...
+  //      or: NEFT-<digits>-<NAME SEGMENT>-<BANKCODE>-...
+  //      or: RTGS-<digits>-<NAME SEGMENT>-<BANKCODE>-...
+  const impsMatch = narration.match(/^(?:IMPS|NEFT|RTGS)-\d+-(.+?)-[A-Z]{3,6}-/i);
+  if (impsMatch) {
+    return impsMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
+  }
+
+  // Matches: UPI-<NAME SEGMENT>-<vpa>@<bank>-...
+  const upiMatch = narration.match(/^UPI-(.+?)-[\w.]+@[\w]+-/i);
+  if (upiMatch) {
+    return upiMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
+  }
+
+  return null; // couldn't parse a name segment — leave as unknown
+}
+
+/* ===========================
    SEMANTIC ENRICHMENT (replaces the old :8000 FastAPI service)
 =========================== */
 
@@ -135,20 +174,6 @@ function runSemanticEnrichment(transactions) {
 
 /* ===========================
    DUPLICATE CHECK — DIRECT DB, NO SYNC CALL
-
-   CHANGED: previously this called /voucher-sync (over HTTP) before
-   checking the DB. That step has been removed entirely — this now
-   checks app_test.vouchers directly using checkDuplicateFromDb()
-   from voucher.js, relying on whatever your existing periodic/manual
-   sync has already populated.
-
-   Two outcomes now (tallyRejected doesn't apply — no live Tally call
-   happens in this path at all; tallyUnreachable only fires on an
-   actual DB error, which is rare):
-     { exists: true,  message, matches, voucher }  -> duplicate found
-     { exists: false, voucher }                     -> clear to push
-     { tallyUnreachable: true, message, voucher }   -> the DB query
-         itself failed (connection issue, bad query, etc.)
 =========================== */
 
 async function runDuplicateCheck(voucher) {
@@ -168,9 +193,6 @@ async function runDuplicateCheck(voucher) {
       amount: voucher.amount
     });
   } catch (dbErr) {
-    // DB failure — not a Tally connectivity issue, but surfaced the
-    // same way so the caller leaves the voucher in a re-triggerable
-    // state instead of silently pushing.
     return { tallyUnreachable: true, message: `duplicate check failed: ${dbErr.message}`, voucher };
   }
 
@@ -250,13 +272,258 @@ router.post("/create", async (req, res) => {
 });
 
 /* ===========================
-   UPLOAD BANK STATEMENT (EXCEL)
+   PROCESS A SINGLE UPLOADED FILE
+
+   Extracted from the old /upload-statement handler so that each
+   uploaded file — when multiple are sent in one request — can be
+   parsed, enriched, and inserted independently, and returned as its
+   own review section keyed by file_name.
+=========================== */
+
+async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
+  const fileName = file.originalname;
+
+  const existingFile = await db.query(
+    `SELECT
+      file_name,
+      bank_ledger,
+      TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
+      TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
+      COUNT(*) AS total_rows
+     FROM app_test.contra_vouchers
+     WHERE company_id = $1
+       AND file_name = $2
+       AND file_name IS NOT NULL
+     GROUP BY file_name, bank_ledger`,
+    [company_id, fileName]
+  );
+
+  if (existingFile.rows.length > 0) {
+    return {
+      file_name: fileName,
+      success: false,
+      already_exists: true,
+      message: `This file "${fileName}" has already been uploaded.`,
+      data: existingFile.rows[0]
+    };
+  }
+
+  let workbook;
+  try {
+    workbook = xlsx.read(file.buffer, {
+      type: "buffer",
+      cellDates: true,
+      password: password || undefined
+    });
+  } catch (xlsxErr) {
+    return {
+      file_name: fileName,
+      success: false,
+      message: "Failed to read Excel file. If it is password protected, provide the correct password."
+    };
+  }
+
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const headerRowIndex = findHeaderRowIndex(sheet);
+
+  let rawRows = xlsx.utils.sheet_to_json(sheet, {
+    defval: null,
+    raw: false,
+    range: headerRowIndex
+  });
+
+  rawRows = rawRows.filter((row) => !isSeparatorRow(row));
+
+  if (!rawRows.length) {
+    return { file_name: fileName, success: false, message: "No data rows found in Excel" };
+  }
+
+  const narrationInputs = rawRows.map((row) => ({
+    narration: String(
+      row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
+    ).trim()
+  }));
+
+  const enriched = await runSemanticEnrichment(narrationInputs);
+
+  const inserted = [];
+  const transactions = [];
+
+  for (const [i, row] of rawRows.entries()) {
+    const withdrawalAmt = parseAmount(
+      row["Withdrawal Amt."] ?? row["Withdrawal Amt"] ?? row["Debit"] ?? row["DR"]
+    );
+    const depositAmt = parseAmount(
+      row["Deposit Amt."] ?? row["Deposit Amt"] ?? row["Credit"] ?? row["CR"]
+    );
+
+    if (withdrawalAmt === null && depositAmt === null) continue;
+
+    const txnDate = parseDate(
+      row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"]
+    );
+    if (!txnDate) continue;
+
+    const narration = String(
+      row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
+    ).trim() || null;
+
+    const merchantName = enriched[i]?.merchant_name || null;
+    let groupKey = enriched[i]?.group_key || null;
+
+    // Fallback group_key derivation. If the Python script returned
+    // nothing, or literally "unknown"/"UNKNOWN", try to parse a stable
+    // payer/payee name segment out of the narration itself for common
+    // transfer-type narrations (IMPS/NEFT/RTGS/UPI).
+    if (!groupKey || groupKey.toLowerCase() === "unknown") {
+      const fallbackKey = deriveFallbackGroupKey(narration);
+      if (fallbackKey) {
+        groupKey = fallbackKey;
+      }
+    }
+
+    const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
+    const chequeRef = cleanString(rawRef) || null;
+
+    transactions.push({
+      transaction_date: String(row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"] ?? "").trim(),
+      value_date: String(row["Value Dt"] ?? row["Value Date"] ?? row["VALUE DATE"] ?? row["Date"] ?? "").trim(),
+      narration: narration || "",
+      cheque_ref: chequeRef || "",
+      withdrawal: withdrawalAmt !== null ? String(withdrawalAmt) : "",
+      deposit: depositAmt !== null ? String(depositAmt) : "",
+      balance: String(row["Closing Balance"] ?? row["Balance"] ?? "").trim(),
+      merchant_name: merchantName || "",
+      group_key: groupKey || ""
+    });
+
+    if (withdrawalAmt !== null && withdrawalAmt > 0) {
+      const existingDebit = await db.query(
+        `SELECT id, status FROM app_test.contra_vouchers
+         WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
+           AND amount = $4 AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $5`,
+        [company_id, bank_ledger, txnDate, withdrawalAmt, narration]
+      );
+
+      if (existingDebit.rows.length > 0) {
+        const ex = existingDebit.rows[0];
+        if (ex.status === 'FAILED') {
+          const r = await db.query(
+            `UPDATE app_test.contra_vouchers
+             SET status = 'WAITING_LEDGER', err_message = NULL,
+                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+             WHERE id = $2 RETURNING *`,
+            [chequeRef, ex.id]
+          );
+          inserted.push({ ...r.rows[0], _action: 'reset' });
+        } else {
+          inserted.push({ ...ex, _action: 'skipped' });
+        }
+      } else {
+        const r = await db.query(
+          `INSERT INTO app_test.contra_vouchers
+           (company_id, company_name, voucher_date, bank_ledger,
+            amount, narration, instrument_number,
+            debit_credit, voucher_type, party_ledger, status,
+            statement_password, file_name, merchant_name, group_key)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
+           RETURNING *`,
+          [company_id, company_name, txnDate, bank_ledger,
+           withdrawalAmt, narration, chequeRef, password || null, fileName,
+           merchantName, groupKey]
+        );
+        inserted.push({ ...r.rows[0], _action: 'inserted' });
+      }
+    }
+
+    if (depositAmt !== null && depositAmt > 0) {
+      const existingCredit = await db.query(
+        `SELECT id, status FROM app_test.contra_vouchers
+         WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
+           AND amount = $4 AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $5`,
+        [company_id, bank_ledger, txnDate, depositAmt, narration]
+      );
+
+      if (existingCredit.rows.length > 0) {
+        const ex = existingCredit.rows[0];
+        if (ex.status === 'FAILED') {
+          const r = await db.query(
+            `UPDATE app_test.contra_vouchers
+             SET status = 'WAITING_LEDGER', err_message = NULL,
+                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+             WHERE id = $2 RETURNING *`,
+            [chequeRef, ex.id]
+          );
+          inserted.push({ ...r.rows[0], _action: 'reset' });
+        } else {
+          inserted.push({ ...ex, _action: 'skipped' });
+        }
+      } else {
+        const r = await db.query(
+          `INSERT INTO app_test.contra_vouchers
+           (company_id, company_name, voucher_date, bank_ledger,
+            amount, narration, instrument_number,
+            debit_credit, voucher_type, party_ledger, status,
+            statement_password, file_name, merchant_name, group_key)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
+           RETURNING *`,
+          [company_id, company_name, txnDate, bank_ledger,
+           depositAmt, narration, chequeRef, password || null, fileName,
+           merchantName, groupKey]
+        );
+        inserted.push({ ...r.rows[0], _action: 'inserted' });
+      }
+    }
+  }
+
+  if (!inserted.length) {
+    return { file_name: fileName, success: false, message: "No valid transaction rows found in the file" };
+  }
+
+  const newRows     = inserted.filter(v => v._action === 'inserted');
+  const skippedRows = inserted.filter(v => v._action === 'skipped');
+  const resetRows   = inserted.filter(v => v._action === 'reset');
+
+  const allDates = inserted.map(v => v.voucher_date).filter(Boolean).sort();
+
+  return {
+    file_name: fileName,
+    success: true,
+    message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
+    bank_ledger,
+    start_date: allDates[0] || null,
+    end_date: allDates[allDates.length - 1] || null,
+    total: inserted.length,
+    inserted_count: newRows.length,
+    skipped_count: skippedRows.length,
+    reset_count: resetRows.length,
+    debit_count: inserted.filter(v => v.debit_credit === "DEBIT").length,
+    credit_count: inserted.filter(v => v.debit_credit === "CREDIT").length,
+    data: inserted,
+    transactions
+  };
+}
+
+/* ===========================
+   UPLOAD BANK STATEMENT(S) (EXCEL)
+
+   CHANGED: now accepts MULTIPLE files in one request via the "files"
+   field (was a single "file" field). Each file is parsed, enriched,
+   and inserted independently by processStatementFile(); one file
+   failing (duplicate name, bad password, unreadable, no valid rows)
+   does not block the others. The response returns a `files[]` array
+   — one section per uploaded file, keyed by file_name — so the
+   frontend can render a separate review section for each file,
+   mirroring the shape used by /statement-transactions.
+
+   Still works fine with a single file — `files` will just contain
+   one entry.
 =========================== */
 
 router.post(
   "/upload-statement",
   (req, res, next) => {
-    upload.single("file")(req, res, (err) => {
+    upload.array("files")(req, res, (err) => {
       if (err?.message === "PDF_NOT_SUPPORTED") {
         return res.status(415).json({
           success: false,
@@ -271,8 +538,8 @@ router.post(
     try {
       const { company_id, company_name, bank_ledger, password } = req.body;
 
-      if (!req.file) {
-        return res.status(400).json({ success: false, message: "Excel file is required" });
+      if (!req.files || !req.files.length) {
+        return res.status(400).json({ success: false, message: "At least one Excel file is required" });
       }
       if (!company_id || !company_name || !bank_ledger) {
         return res.status(400).json({
@@ -281,218 +548,31 @@ router.post(
         });
       }
 
-      const fileName = req.file.originalname;
-
-      const existingFile = await db.query(
-        `SELECT
-          file_name,
-          bank_ledger,
-          TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
-          TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
-          COUNT(*) AS total_rows
-         FROM app_test.contra_vouchers
-         WHERE company_id = $1
-           AND file_name = $2
-           AND file_name IS NOT NULL
-         GROUP BY file_name, bank_ledger`,
-        [company_id, fileName]
-      );
-
-      if (existingFile.rows.length > 0) {
-        return res.status(409).json({
-          success: false,
-          already_exists: true,
-          message: `This file "${fileName}" has already been uploaded.`,
-          data: existingFile.rows[0]
-        });
-      }
-
-      let workbook;
-      try {
-        workbook = xlsx.read(req.file.buffer, {
-          type: "buffer",
-          cellDates: true,
-          password: password || undefined
-        });
-      } catch (xlsxErr) {
-        return res.status(400).json({
-          success: false,
-          message: "Failed to read Excel file. If it is password protected, provide the correct password."
-        });
-      }
-
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const headerRowIndex = findHeaderRowIndex(sheet);
-
-      let rawRows = xlsx.utils.sheet_to_json(sheet, {
-        defval: null,
-        raw: false,
-        range: headerRowIndex
-      });
-
-      rawRows = rawRows.filter((row) => !isSeparatorRow(row));
-
-      if (!rawRows.length) {
-        return res.status(400).json({ success: false, message: "No data rows found in Excel" });
-      }
-
-      const narrationInputs = rawRows.map((row) => ({
-        narration: String(
-          row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
-        ).trim()
-      }));
-
-      const enriched = await runSemanticEnrichment(narrationInputs);
-
-      const inserted = [];
-      const transactions = [];
-
-      for (const [i, row] of rawRows.entries()) {
-        const withdrawalAmt = parseAmount(
-          row["Withdrawal Amt."] ?? row["Withdrawal Amt"] ?? row["Debit"] ?? row["DR"]
-        );
-        const depositAmt = parseAmount(
-          row["Deposit Amt."] ?? row["Deposit Amt"] ?? row["Credit"] ?? row["CR"]
-        );
-
-        if (withdrawalAmt === null && depositAmt === null) continue;
-
-        const txnDate = parseDate(
-          row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"]
-        );
-        if (!txnDate) continue;
-
-        const narration = String(
-          row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
-        ).trim() || null;
-
-        const merchantName = enriched[i]?.merchant_name || null;
-        const groupKey = enriched[i]?.group_key || null;
-
-        const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
-        const chequeRef = cleanString(rawRef) || null;
-
-        transactions.push({
-          transaction_date: String(row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"] ?? "").trim(),
-          value_date: String(row["Value Dt"] ?? row["Value Date"] ?? row["VALUE DATE"] ?? row["Date"] ?? "").trim(),
-          narration: narration || "",
-          cheque_ref: chequeRef || "",
-          withdrawal: withdrawalAmt !== null ? String(withdrawalAmt) : "",
-          deposit: depositAmt !== null ? String(depositAmt) : "",
-          balance: String(row["Closing Balance"] ?? row["Balance"] ?? "").trim(),
-          merchant_name: merchantName || "",
-          group_key: groupKey || ""
-        });
-
-        if (withdrawalAmt !== null && withdrawalAmt > 0) {
-          const existingDebit = await db.query(
-            `SELECT id, status FROM app_test.contra_vouchers
-             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
-               AND amount = $4 AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $5`,
-            [company_id, bank_ledger, txnDate, withdrawalAmt, narration]
-          );
-
-          if (existingDebit.rows.length > 0) {
-            const ex = existingDebit.rows[0];
-            if (ex.status === 'FAILED') {
-              const r = await db.query(
-                `UPDATE app_test.contra_vouchers
-                 SET status = 'WAITING_LEDGER', err_message = NULL,
-                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-                 WHERE id = $2 RETURNING *`,
-                [chequeRef, ex.id]
-              );
-              inserted.push({ ...r.rows[0], _action: 'reset' });
-            } else {
-              inserted.push({ ...ex, _action: 'skipped' });
-            }
-          } else {
-            const r = await db.query(
-              `INSERT INTO app_test.contra_vouchers
-               (company_id, company_name, voucher_date, bank_ledger,
-                amount, narration, instrument_number,
-                debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name, merchant_name, group_key)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-               RETURNING *`,
-              [company_id, company_name, txnDate, bank_ledger,
-               withdrawalAmt, narration, chequeRef, password || null, fileName,
-               merchantName, groupKey]
-            );
-            inserted.push({ ...r.rows[0], _action: 'inserted' });
-          }
-        }
-
-        if (depositAmt !== null && depositAmt > 0) {
-          const existingCredit = await db.query(
-            `SELECT id, status FROM app_test.contra_vouchers
-             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
-               AND amount = $4 AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $5`,
-            [company_id, bank_ledger, txnDate, depositAmt, narration]
-          );
-
-          if (existingCredit.rows.length > 0) {
-            const ex = existingCredit.rows[0];
-            if (ex.status === 'FAILED') {
-              const r = await db.query(
-                `UPDATE app_test.contra_vouchers
-                 SET status = 'WAITING_LEDGER', err_message = NULL,
-                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-                 WHERE id = $2 RETURNING *`,
-                [chequeRef, ex.id]
-              );
-              inserted.push({ ...r.rows[0], _action: 'reset' });
-            } else {
-              inserted.push({ ...ex, _action: 'skipped' });
-            }
-          } else {
-            const r = await db.query(
-              `INSERT INTO app_test.contra_vouchers
-               (company_id, company_name, voucher_date, bank_ledger,
-                amount, narration, instrument_number,
-                debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name, merchant_name, group_key)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-               RETURNING *`,
-              [company_id, company_name, txnDate, bank_ledger,
-               depositAmt, narration, chequeRef, password || null, fileName,
-               merchantName, groupKey]
-            );
-            inserted.push({ ...r.rows[0], _action: 'inserted' });
-          }
+      // Process every file independently — one file's failure/duplicate
+      // doesn't block the others; each becomes its own section below.
+      const results = [];
+      for (const file of req.files) {
+        try {
+          const outcome = await processStatementFile({
+            file, company_id, company_name, bank_ledger, password
+          });
+          results.push(outcome);
+        } catch (fileErr) {
+          console.error(`upload-statement error processing "${file.originalname}":`, fileErr);
+          results.push({
+            file_name: file.originalname,
+            success: false,
+            message: fileErr.message
+          });
         }
       }
 
-      if (!inserted.length) {
-        return res.status(400).json({
-          success: false,
-          message: "No valid transaction rows found in the file"
-        });
-      }
+      const anySucceeded = results.some((r) => r.success);
 
-      const newRows     = inserted.filter(v => v._action === 'inserted');
-      const skippedRows = inserted.filter(v => v._action === 'skipped');
-      const resetRows   = inserted.filter(v => v._action === 'reset');
-
-      const allDates = inserted.map(v => v.voucher_date).filter(Boolean).sort();
-      const startDate = allDates[0] || null;
-      const endDate   = allDates[allDates.length - 1] || null;
-
-      return res.status(201).json({
-        success: true,
-        message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
-        file_name:      fileName,
-        bank_ledger:    bank_ledger,
-        start_date:     startDate,
-        end_date:       endDate,
-        total:          inserted.length,
-        inserted_count: newRows.length,
-        skipped_count:  skippedRows.length,
-        reset_count:    resetRows.length,
-        debit_count:    inserted.filter(v => v.debit_credit === "DEBIT").length,
-        credit_count:   inserted.filter(v => v.debit_credit === "CREDIT").length,
-        data: inserted,
-        transactions: transactions
+      return res.status(anySucceeded ? 201 : 400).json({
+        success: anySucceeded,
+        file_count: results.length,
+        files: results   // <-- one section per uploaded file, by file_name
       });
 
     } catch (err) {
@@ -567,28 +647,8 @@ router.get("/statement-transactions", async (req, res) => {
       });
     }
 
-    let targetFileName = file_name;
-
-    if (!targetFileName) {
-      const latest = await db.query(
-        `SELECT file_name
-         FROM app_test.contra_vouchers
-         WHERE company_id = $1
-           AND file_name IS NOT NULL
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [company_id]
-      );
-
-      if (!latest.rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No statement found for this company"
-        });
-      }
-
-      targetFileName = latest.rows[0].file_name;
-    }
+    const fileFilterClause = file_name ? "AND file_name = $2" : "";
+    const params = file_name ? [company_id, file_name] : [company_id];
 
     const result = await db.query(
       `SELECT
@@ -599,21 +659,26 @@ router.get("/statement-transactions", async (req, res) => {
         debit_credit,
         merchant_name,
         group_key,
-        file_name
+        file_name,
+        bank_ledger
        FROM app_test.contra_vouchers
        WHERE company_id = $1
-         AND file_name = $2
+         AND file_name IS NOT NULL
+         ${fileFilterClause}
        ORDER BY
+         file_name ASC,
          COALESCE(group_key, 'zzz_ungrouped') ASC,
          voucher_date ASC,
          id ASC`,
-      [company_id, targetFileName]
+      params
     );
 
     if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: `No transactions found for file "${targetFileName}"`
+        message: file_name
+          ? `No transactions found for file "${file_name}"`
+          : "No statement found for this company"
       });
     }
 
@@ -629,47 +694,94 @@ router.get("/statement-transactions", async (req, res) => {
       group_key: r.group_key || ""
     });
 
-    const groupsMap = new Map();
+    const fileMap = new Map();
     for (const r of result.rows) {
-      const key = r.group_key || "__ungrouped__";
-      if (!groupsMap.has(key)) {
-        groupsMap.set(key, {
-          group_key: r.group_key || null,
-          merchant_name: r.merchant_name || null,
-          count: 0,
-          total_withdrawal: 0,
-          total_deposit: 0,
-          transactions: []
-        });
+      if (!fileMap.has(r.file_name)) {
+        fileMap.set(r.file_name, { file_name: r.file_name, bank_ledger: r.bank_ledger, rows: [] });
       }
-      const bucket = groupsMap.get(key);
-      const txn = toTxn(r);
-      bucket.transactions.push(txn);
-      bucket.count += 1;
-      if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
-      if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
+      fileMap.get(r.file_name).rows.push(r);
     }
 
-    const groups = [...groupsMap.values()]
-      .filter(g => g.group_key !== null && g.count > 1)
-      .sort((a, b) => b.count - a.count);
+    const files = [...fileMap.values()].map(({ file_name: fn, bank_ledger, rows }) => {
+      const groupsMap = new Map();
+      for (const r of rows) {
+        const key = r.group_key || "__ungrouped__";
+        if (!groupsMap.has(key)) {
+          groupsMap.set(key, {
+            group_key: r.group_key || null,
+            merchant_name: r.merchant_name || null,
+            count: 0,
+            total_withdrawal: 0,
+            total_deposit: 0,
+            transactions: [],
+            distinctNarrations: new Set(),
+            seenRowKeys: new Set()
+          });
+        }
+        const bucket = groupsMap.get(key);
+        const rowKey = [
+          (r.narration || "").trim().toLowerCase(),
+          r.instrument_number || "",
+          r.debit_credit,
+          Number(r.amount),
+          r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : ""
+        ].join("|");
 
-    const transactions = groups.flatMap(g => g.transactions);
+        bucket.distinctNarrations.add((r.narration || "").trim().toLowerCase());
 
-    if (!transactions.length) {
+        if (bucket.seenRowKeys.has(rowKey)) continue;
+        bucket.seenRowKeys.add(rowKey);
+
+        const txn = toTxn(r);
+        bucket.transactions.push(txn);
+        bucket.count += 1;
+        if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
+        if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
+      }
+
+      const groups = [...groupsMap.values()]
+        .filter(g => g.group_key !== null && g.count > 1 && g.distinctNarrations.size > 1)
+        .map(({ distinctNarrations, seenRowKeys, ...rest }) => rest)
+        .sort((a, b) => b.count - a.count);
+
+      const transactions = groups.flatMap(g => g.transactions);
+
+      return {
+        file_name: fn,
+        bank_ledger,
+        total: transactions.length,
+        group_count: groups.length,
+        transactions,
+        groups
+      };
+    }).filter((f) => f.transactions.length > 0);
+
+    if (!files.length) {
       return res.status(404).json({
         success: false,
-        message: `No repeated narrations found for file "${targetFileName}"`
+        message: file_name
+          ? `No repeated narrations found for file "${file_name}"`
+          : "No repeated narrations found in any uploaded file"
+      });
+    }
+
+    if (file_name) {
+      const f = files[0];
+      return res.status(200).json({
+        success: true,
+        file_name: f.file_name,
+        bank_ledger: f.bank_ledger,
+        total: f.total,
+        group_count: f.group_count,
+        transactions: f.transactions,
+        groups: f.groups
       });
     }
 
     return res.status(200).json({
       success: true,
-      file_name: targetFileName,
-      total: transactions.length,
-      group_count: groups.length,
-      transactions,
-      groups
+      file_count: files.length,
+      files
     });
 
   } catch (err) {
@@ -683,45 +795,82 @@ router.get("/statement-transactions", async (req, res) => {
 
 /* ===========================
    SUGGEST PARTY LEDGER
+
+   Matches by company_name only (contra_vouchers has both company_id
+   and company_name — using company_name so both tables use the same
+   key). company_id no longer required or used.
+
+   PERFORMANCE: app_test.vouchers is ~14M rows. That side of the query
+   only runs when narration is passed, and always filters by
+   company_name + narration ILIKE together. Make sure you have:
+     CREATE EXTENSION IF NOT EXISTS pg_trgm;
+     CREATE INDEX IF NOT EXISTS idx_vouchers_narration_trgm
+       ON app_test.vouchers USING gin (narration gin_trgm_ops);
+     CREATE INDEX IF NOT EXISTS idx_vouchers_company_name
+       ON app_test.vouchers (company_name);
 =========================== */
 
 router.get("/suggest-party-ledger", async (req, res) => {
   try {
-    const { company_id, bank_ledger, narration, merchant_name, group_key } = req.query;
+    const { company_name, narration } = req.query;
 
-    if (!company_id || !bank_ledger) {
+    if (!company_name) {
       return res.status(400).json({
         success: false,
-        message: "company_id and bank_ledger are required"
+        message: "company_name is required"
       });
     }
 
-    const narrationPattern = narration && narration.trim()
-      ? `%${narration.trim()}%`
-      : null;
+    const trimmedNarration = narration && narration.trim() ? narration.trim() : null;
+    const normalizedNarration = trimmedNarration ? trimmedNarration.toLowerCase() : null;
+    const narrationPattern = trimmedNarration ? `%${trimmedNarration}%` : null;
+
+    // Only bring the 14M-row `vouchers` table into the plan when a
+    // narration filter is actually supplied. With no narration, the
+    // "no narration" branch is a compile-time no-op — Postgres never
+    // even considers scanning `vouchers`.
+    const vouchersBranch = narrationPattern
+      ? `
+        UNION ALL
+
+        SELECT
+          party_ledger_name AS party_ledger,
+          narration,
+          voucher_date
+        FROM app_test.vouchers
+        WHERE company_name = $1
+          AND party_ledger_name IS NOT NULL
+          AND narration ILIKE $2
+      `
+      : "";
 
     const result = await db.query(
-      `SELECT
+      `
+      WITH combined AS (
+        SELECT party_ledger, narration, voucher_date
+        FROM app_test.contra_vouchers
+        WHERE company_name = $1
+          AND party_ledger IS NOT NULL
+          AND status = 'SUCCESS'
+        ${vouchersBranch}
+      )
+      SELECT
         party_ledger,
         COUNT(*) AS usage_count,
         MAX(voucher_date) AS last_used,
         MAX(
           CASE
-            WHEN $3::text IS NOT NULL AND group_key = $3 THEN 3
-            WHEN $4::text IS NOT NULL AND merchant_name = $4 THEN 2
-            WHEN $5::text IS NOT NULL AND narration ILIKE $5 THEN 1
+            WHEN $3::text IS NOT NULL AND LOWER(TRIM(narration)) = $3 THEN 2
+            WHEN $2::text IS NOT NULL AND narration ILIKE $2 THEN 1
             ELSE 0
           END
-        ) AS match_strength
-       FROM app_test.contra_vouchers
-       WHERE company_id = $1
-         AND bank_ledger = $2
-         AND party_ledger IS NOT NULL
-         AND status = 'SUCCESS'
-       GROUP BY party_ledger
-       ORDER BY match_strength DESC, usage_count DESC, last_used DESC
-       LIMIT 5`,
-      [company_id, bank_ledger, group_key || null, merchant_name || null, narrationPattern]
+        ) AS match_tier
+      FROM combined
+      GROUP BY party_ledger
+      ORDER BY match_tier DESC, usage_count DESC, last_used DESC
+      LIMIT 5
+      `,
+      [company_name, narrationPattern, normalizedNarration]
     );
 
     if (!result.rows.length) {
@@ -729,7 +878,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
         success: true,
         suggested_party_ledger: null,
         suggestions: [],
-        message: "No prior successful vouchers found for this bank ledger yet — no suggestion available."
+        message: "No prior vouchers found for this company yet — no suggestion available."
       });
     }
 
@@ -737,12 +886,10 @@ router.get("/suggest-party-ledger", async (req, res) => {
       party_ledger: r.party_ledger,
       usage_count: Number(r.usage_count),
       last_used: r.last_used,
-      match_strength: Number(r.match_strength),
       match_reason:
-        Number(r.match_strength) === 3 ? "same transaction group" :
-        Number(r.match_strength) === 2 ? "same merchant" :
-        Number(r.match_strength) === 1 ? "similar narration" :
-        "commonly used for this bank ledger"
+        Number(r.match_tier) === 2 ? "this exact narration was used before" :
+        Number(r.match_tier) === 1 ? "similar narration" :
+        "commonly used for this company"
     }));
 
     return res.status(200).json({
