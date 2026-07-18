@@ -86,6 +86,49 @@ function isSeparatorRow(row) {
 }
 
 /* ===========================
+   UNIQUE FILE NAME RESOLVER
+
+   Replaces the old "reject if this file_name already exists for this
+   company" behavior. Instead of blocking a re-upload of a
+   same-named file, this finds a free " (n)" variant of the name for
+   this company_id, so the new upload is inserted, processed, and
+   returned as its OWN distinct file_name/section — it is never
+   merged into the rows/groups of the existing file with that name.
+
+   Any trailing " (n)" already present on the incoming name is
+   stripped first to find the "root" name, so repeated re-uploads of
+   the same source file keep incrementing from the same root instead
+   of stacking suffixes like "Statement (1) (1).xls".
+=========================== */
+
+async function getUniqueFileName(company_id, fileName) {
+  const ext = path.extname(fileName);
+  const base = fileName.slice(0, fileName.length - ext.length);
+  const rootMatch = base.match(/^(.*) \((\d+)\)$/);
+  const root = rootMatch ? rootMatch[1] : base;
+
+  const existing = await db.query(
+    `SELECT DISTINCT file_name
+     FROM app_test.contra_vouchers
+     WHERE company_id = $1
+       AND file_name LIKE $2`,
+    [company_id, `${root}%${ext}`]
+  );
+  const existingNames = new Set(existing.rows.map((r) => r.file_name));
+
+  if (!existingNames.has(fileName)) return fileName;
+
+  let n = 1;
+  let candidate;
+  do {
+    candidate = `${root} (${n})${ext}`;
+    n++;
+  } while (existingNames.has(candidate));
+
+  return candidate;
+}
+
+/* ===========================
    FALLBACK GROUP KEY EXTRACTOR
 
    Used whenever the semantic enrichment script (semantic_cli.py)
@@ -278,35 +321,22 @@ router.post("/create", async (req, res) => {
    uploaded file — when multiple are sent in one request — can be
    parsed, enriched, and inserted independently, and returned as its
    own review section keyed by file_name.
+
+   CHANGED: a same-named file is no longer rejected as
+   "already_exists". Instead, getUniqueFileName() resolves a free
+   " (n)" variant for this company_id, and that variant is used for
+   every insert/return below. Because every downstream query that
+   groups by file_name (statement-details, statement-transactions,
+   waiting-ledger, duplicate checks, etc.) keys off this exact
+   file_name column, this upload always lands in its own section and
+   is never merged into the previous file's rows or groups.
 =========================== */
 
 async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
-  const fileName = file.originalname;
+  const originalFileName = file.originalname;
 
-  const existingFile = await db.query(
-    `SELECT
-      file_name,
-      bank_ledger,
-      TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
-      TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
-      COUNT(*) AS total_rows
-     FROM app_test.contra_vouchers
-     WHERE company_id = $1
-       AND file_name = $2
-       AND file_name IS NOT NULL
-     GROUP BY file_name, bank_ledger`,
-    [company_id, fileName]
-  );
-
-  if (existingFile.rows.length > 0) {
-    return {
-      file_name: fileName,
-      success: false,
-      already_exists: true,
-      message: `This file "${fileName}" has already been uploaded.`,
-      data: existingFile.rows[0]
-    };
-  }
+  const fileName = await getUniqueFileName(company_id, originalFileName);
+  const wasRenamed = fileName !== originalFileName;
 
   let workbook;
   try {
@@ -318,6 +348,8 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   } catch (xlsxErr) {
     return {
       file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
       success: false,
       message: "Failed to read Excel file. If it is password protected, provide the correct password."
     };
@@ -335,7 +367,13 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   rawRows = rawRows.filter((row) => !isSeparatorRow(row));
 
   if (!rawRows.length) {
-    return { file_name: fileName, success: false, message: "No data rows found in Excel" };
+    return {
+      file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
+      success: false,
+      message: "No data rows found in Excel"
+    };
   }
 
   const narrationInputs = rawRows.map((row) => ({
@@ -477,7 +515,13 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   if (!inserted.length) {
-    return { file_name: fileName, success: false, message: "No valid transaction rows found in the file" };
+    return {
+      file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
+      success: false,
+      message: "No valid transaction rows found in the file"
+    };
   }
 
   const newRows     = inserted.filter(v => v._action === 'inserted');
@@ -488,8 +532,11 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 
   return {
     file_name: fileName,
+    original_file_name: wasRenamed ? originalFileName : undefined,
+    renamed: wasRenamed,
     success: true,
-    message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.`,
+    message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.` +
+      (wasRenamed ? ` (saved as "${fileName}" — a file named "${originalFileName}" already existed for this company)` : ""),
     bank_ledger,
     start_date: allDates[0] || null,
     end_date: allDates[allDates.length - 1] || null,
@@ -507,14 +554,16 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 /* ===========================
    UPLOAD BANK STATEMENT(S) (EXCEL)
 
-   CHANGED: now accepts MULTIPLE files in one request via the "files"
-   field (was a single "file" field). Each file is parsed, enriched,
-   and inserted independently by processStatementFile(); one file
-   failing (duplicate name, bad password, unreadable, no valid rows)
-   does not block the others. The response returns a `files[]` array
-   — one section per uploaded file, keyed by file_name — so the
-   frontend can render a separate review section for each file,
-   mirroring the shape used by /statement-transactions.
+   Accepts MULTIPLE files in one request via the "files" field. Each
+   file is parsed, enriched, and inserted independently by
+   processStatementFile(); one file failing (bad password,
+   unreadable, no valid rows) does not block the others. A same-named
+   file is auto-renamed (see getUniqueFileName) rather than rejected,
+   so it always ends up as its own separate section — files are never
+   merged together. The response returns a `files[]` array — one
+   section per uploaded file, keyed by file_name — so the frontend
+   can render a separate review section for each file, mirroring the
+   shape used by /statement-transactions.
 
    Still works fine with a single file — `files` will just contain
    one entry.
@@ -548,8 +597,10 @@ router.post(
         });
       }
 
-      // Process every file independently — one file's failure/duplicate
-      // doesn't block the others; each becomes its own section below.
+      // Process every file independently — one file's failure doesn't
+      // block the others; each becomes its own section below. A
+      // same-named file is auto-renamed inside processStatementFile
+      // rather than rejected, so files are never merged.
       const results = [];
       for (const file of req.files) {
         try {
@@ -694,6 +745,11 @@ router.get("/statement-transactions", async (req, res) => {
       group_key: r.group_key || ""
     });
 
+    // NOTE: fileMap keys strictly on the file_name column, and every
+    // uploaded file now has a guaranteed-unique file_name (see
+    // getUniqueFileName above), so two different uploads can never
+    // collapse into the same section here even if the original
+    // filenames the user picked were identical.
     const fileMap = new Map();
     for (const r of result.rows) {
       if (!fileMap.has(r.file_name)) {
