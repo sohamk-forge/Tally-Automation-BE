@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { LEDGER_QUEUE_NAME } from "../queues/ledger.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { createConnectorJob } from "../services/connectorJob.service.js";
 import { createLedgerXML } from "../services/pushXmlBuilder.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -75,6 +76,9 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       // STEP 1: Generate XML (stays in backend) ✅
       // ─────────────────────────────────────────────────────────────
+      // ─────────────────────────────────────────────────────────────
+      // STEP 1: Generate XML (stays in backend) ✅
+      // ─────────────────────────────────────────────────────────────
       const xml = createLedgerXML({
         company: row.company_name?.trim(),
         ledger_name: row.ledger_name,
@@ -109,10 +113,26 @@ const worker = new Worker(
         `,
         [ledgerId]
       );
+      // ─────────────────────────────────────────────────────────────
+      // STEP 2: Get connector pairing info for this ledger's company
+      // ─────────────────────────────────────────────────────────────
+      const pairingResult = await pool.query(
+        `
+        SELECT cpt.user_id
+        FROM app_test.push_ledger pl
+        JOIN app_test.companies c ON pl.company_id = c.id
+        JOIN app_test.connector_pairing_tokens cpt 
+ ON c.id = cpt.company_id
+        WHERE pl.id = $1
+        `,
+        [ledgerId]
+      );
 
       const pairing = pairingResult.rows[0];
       if (!pairing) {
-        throw new Error(`No connector pairing found for ledger ${ledgerId}`);
+        throw new Error(
+          `No connector pairing found for ledger ${ledgerId}`
+        );
       }
 
       // ─────────────────────────────────────────────────────────────
@@ -137,12 +157,19 @@ const worker = new Worker(
         UPDATE ${DB_SCHEMA}.push_ledger
         SET
           status = 'pending',
+          status = 'pending',
           updated_at = NOW()
+        WHERE id = $1
         WHERE id = $1
         `,
         [ledgerId]
+        [ledgerId]
       );
 
+      console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
+        jobId: connectorJob.id,
+        userId: pairing.user_id
+      });
       console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
         jobId: connectorJob.id,
         userId: pairing.user_id
@@ -154,13 +181,21 @@ const worker = new Worker(
         connectorJobId: connectorJob.id
       };
 
+      return {
+        ledgerId,
+        status: 'pending',
+        connectorJobId: connectorJob.id
+      };
+
     } catch (error) {
       console.error(
+        `❌ Ledger failed: ${row.ledger_name}`,
         `❌ Ledger failed: ${row.ledger_name}`,
         error.message
       );
 
       if (isTemporaryLedgerError(error)) {
+        // Mark as pending for retry
         // Mark as pending for retry
         await pool.query(
           `
@@ -178,8 +213,10 @@ const worker = new Worker(
         );
 
         throw error;  // Let Bull retry
+        throw error;  // Let Bull retry
       }
 
+      // Permanent failure
       // Permanent failure
       await pool.query(
         `
@@ -200,6 +237,8 @@ const worker = new Worker(
         ledgerId,
         status: "failed",
         error: error.message
+        status: "failed",
+        error: error.message
       };
     }
   },
@@ -213,11 +252,14 @@ worker.on("completed", (job) => {
   console.log(
     `✅ Ledger job completed: ${job.id}`,
     job.returnvalue
+    `✅ Ledger job completed: ${job.id}`,
+    job.returnvalue
   );
 });
 
 worker.on("failed", async (job, error) => {
   console.error(
+    `❌ Ledger job failed: ${job?.id}`,
     `❌ Ledger job failed: ${job?.id}`,
     error.message
   );
@@ -250,6 +292,8 @@ worker.on("failed", async (job, error) => {
     );
 
     console.error(`Ledger final failure recorded: ${ledgerId}`);
+
+    console.error(`Ledger final failure recorded: ${ledgerId}`);
   } catch (updateError) {
     console.error(
       `Ledger final failure update failed: ${job.id}`,
@@ -261,11 +305,13 @@ worker.on("failed", async (job, error) => {
 worker.on("error", (error) => {
   console.error(
     "❌ Ledger worker error:",
+    "❌ Ledger worker error:",
     error.message
   );
 });
 
 console.log(
+  "✅ Push Ledger BullMQ worker started (using Connector)"
   "✅ Push Ledger BullMQ worker started (using Connector)"
 );
 

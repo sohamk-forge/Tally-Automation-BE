@@ -1,236 +1,177 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: processConnectorJobResult
+// The only entry point POST /api/connector/jobs/result should use to fan a
+// completed/failed connector_jobs row out to the business record that
+// originally created it. Runs on the same DB client/transaction as the
+// connector_jobs UPDATE so both writes commit or roll back together.
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function processConnectorJobResult(client, job) {
-  try {
-    const { id, job_type, status, response_xml, result, payload } = job;
+  if (!job || !job.job_type) {
+    console.log("ℹ️ CONNECTOR JOB RESULT: job missing job_type, nothing to sync", {
+      jobId: job?.id
+    });
+    return;
+  }
 
-    console.log(
-      `Processing connector job result: job_id=${id}, job_type=${job_type}, status=${status}`
+  switch (job.job_type) {
+    case "sales_invoice":
+      await processSalesInvoiceJobResult(client, job);
+      break;
+
+    case "ledger":
+      await processLedgerJobResult(client, job);
+      break;
+
+    // TODO(stock): job_type = "stock_item" — once stock push is migrated to
+    // create connector_jobs rows, update app_test.push_stock_item here.
+
+    // TODO(voucher): job_type = "voucher" — once voucher push is migrated to
+    // create connector_jobs rows, update the relevant voucher extraction
+    // table here.
+
+    default:
+      console.log(`ℹ️ CONNECTOR JOB RESULT: no handler for job_type "${job.job_type}", skipped business record sync`, {
+        jobId: job.id
+      });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// job_type = "sales_invoice"
+// Payload shape (see pushSalesInvoice.worker.js STEP 8):
+//   { invoice_id, company_id, invoice_no, customer_name }
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function processSalesInvoiceJobResult(client, job) {
+  const invoiceId = job.payload?.invoice_id;
+
+  if (!invoiceId) {
+    console.error("❌ CONNECTOR JOB RESULT: sales_invoice job has no payload.invoice_id, cannot sync", {
+      jobId: job.id
+    });
+    return;
+  }
+
+  if (job.status === "completed") {
+    await client.query(
+      `
+      UPDATE app_test.sales_invoice_extractions
+      SET
+        sync_status = 'completed',
+        tally_response = $1,
+        synced_at = NOW(),
+        error_message = NULL,
+        last_error = NULL,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [job.response_xml || null, invoiceId]
     );
 
-    switch (job_type) {
-      case "ledger":
-        await client.query(
-          `
-          UPDATE app_test.push_ledger
-          SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
-            tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.ledger_id
-          ]
-        );
-
-        console.log(`✅ Ledger ${payload.ledger_id} marked ${status}`);
-        break;
-
-      case "sales_invoice":
-        await client.query(
-          `
-          UPDATE app_test.sales_invoice_extractions
-          SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
-            tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.invoice_id
-          ]
-        );
-
-        console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${status}`);
-        break;
-
-   case "purchase_invoice":
-  // Parse Tally response to check if actually created
-  let invoiceStatus = status;
-  let invoiceError = null;
-  
-  try {
-    const responseXml = response_xml || "";
-    const createdMatch = responseXml.match(/<CREATED>(\d+)<\/CREATED>/);
-    const exceptionsMatch = responseXml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-    const errorMatch = responseXml.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
-    
-    const created = parseInt(createdMatch?.[1] || 0);
-    const exceptions = parseInt(exceptionsMatch?.[1] || 0);
-    
-    if (created > 0 && exceptions === 0) {
-      invoiceStatus = 'success';
-    } else if (exceptions > 0 || created === 0) {
-      invoiceStatus = 'failed';
-      invoiceError = errorMatch?.[1] || 'Tally import failed';
-    }
-  } catch (e) {
-    console.error("Error parsing Tally response:", e.message);
+    console.log("✅ SALES INVOICE MARKED COMPLETED FROM CONNECTOR RESULT:", {
+      jobId: job.id,
+      invoiceId
+    });
+    return;
   }
-  
-  await client.query(
-    `UPDATE app_test.invoice_extractions
-    SET
-      sync_status = $1,
-      tally_response = $2,
-      error_message = $3,
-      updated_at = NOW()
-    WHERE id = $4
-    `,
-    [invoiceStatus, response_xml || null, invoiceError, payload.invoice_id]
-  );
 
-  console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${invoiceStatus}`);
-  break;
+  if (job.status === "failed") {
+    const lineError = job.result?.line_error;
+    const errorMessage = lineError || job.error_message || "Connector job failed";
 
-      case "stock_item":
-        await client.query(
-          `
-          UPDATE app_test.push_stock_item
-          SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
-            tally_response = $2,
-            last_error = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.stock_item_id
-          ]
-        );
-
-        console.log(`✅ Stock Item ${payload.stock_item_id} marked ${status}`);
-        break;
-
-      case "bank":
-        await client.query(
-          `
-          UPDATE app_test.push_bank
-          SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
-            tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.bank_id
-          ]
-        );
-
-        console.log(`✅ Bank ${payload.bank_id} marked ${status}`);
-        break;
-
-      case "odbank":
-  await client.query(
-    `
-    UPDATE app_test.bank_od_accounts
-    SET
-      sync_status = CASE
-        WHEN $1 = 'completed' THEN 'success'
-        WHEN $1 = 'failed' THEN 'failed'
-        ELSE sync_status
-      END,
-      tally_response = $2,
-      error_message = CASE
-        WHEN $1 = 'failed' THEN $3
-        ELSE NULL
-      END,
-      updated_at = NOW()
-    WHERE id = $4
-    `,
-    [
-      status,
-      response_xml || null,
-      result?.error || null,
-      payload.odbank_id
-    ]
-  );
-
-  console.log(`✅ OD/OC Bank ${payload.odbank_id} marked ${status}`);
-  break;
-      case "alter_stock_item":
-        await client.query(
-          `
-          UPDATE app_test.alter_stock_item
-          SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
-            tally_response = $2,
-            last_error = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.alter_stock_item_id
-          ]
-        );
-
-        console.log(`✅ Alter Stock Item ${payload.alter_stock_item_id} marked ${status}`);
-        break;
-
-      default:
-        console.log(
-          `ℹ️ CONNECTOR JOB RESULT: no handler for job_type "${job_type}", skipped business record sync`,
-          { jobId: id }
-        );
-    }
-
-  } catch (err) {
-    console.error(
-      "❌ Error processing connector job result:",
-      err.message
+    await client.query(
+      `
+      UPDATE app_test.sales_invoice_extractions
+      SET
+        sync_status = 'failed',
+        error_message = $1,
+        tally_response = $2,
+        updated_at = NOW()
+      WHERE id = $3
+      `,
+      [errorMessage, job.response_xml || null, invoiceId]
     );
-    throw err;
+
+    console.error("❌ SALES INVOICE MARKED FAILED FROM CONNECTOR RESULT:", {
+      jobId: job.id,
+      invoiceId,
+      errorMessage
+    });
+    return;
   }
+
+  console.log(`ℹ️ CONNECTOR JOB RESULT: status "${job.status}" ignored for sales_invoice, no business record change`, {
+    jobId: job.id,
+    invoiceId
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// job_type = "ledger"
+// Payload shape (see pushLedger.worker.js):
+//   { ledger_id, company_id, ledger_name }
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function processLedgerJobResult(client, job) {
+  const ledgerId = job.payload?.ledger_id;
+
+  if (!ledgerId) {
+    console.error("❌ CONNECTOR JOB RESULT: ledger job has no payload.ledger_id, cannot sync", {
+      jobId: job.id
+    });
+    return;
+  }
+
+  if (job.status === "completed") {
+    await client.query(
+      `
+      UPDATE app_test.push_ledger
+      SET
+        status = 'success',
+        tally_response = $1,
+        sync_at = NOW(),
+        error_message = NULL,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [job.response_xml || null, ledgerId]
+    );
+
+    console.log("✅ LEDGER MARKED COMPLETED FROM CONNECTOR RESULT:", {
+      jobId: job.id,
+      ledgerId
+    });
+    return;
+  }
+
+  if (job.status === "failed") {
+    const lineError = job.result?.line_error;
+    const errorMessage = lineError || job.error_message || "Connector job failed";
+
+    await client.query(
+      `
+      UPDATE app_test.push_ledger
+      SET
+        status = 'failed',
+        error_message = $1,
+        tally_response = $2,
+        updated_at = NOW()
+      WHERE id = $3
+      `,
+      [errorMessage, job.response_xml || null, ledgerId]
+    );
+
+    console.error("❌ LEDGER MARKED FAILED FROM CONNECTOR RESULT:", {
+      jobId: job.id,
+      ledgerId,
+      errorMessage
+    });
+    return;
+  }
+
+  console.log(`ℹ️ CONNECTOR JOB RESULT: status "${job.status}" ignored for ledger, no business record change`, {
+    jobId: job.id,
+    ledgerId
+  });
 }

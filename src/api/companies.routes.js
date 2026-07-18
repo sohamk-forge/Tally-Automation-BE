@@ -5,34 +5,25 @@ import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
-   GET ALL COMPANIES (USER-FILTERED)
+   GET ALL COMPANIES
 ========================================= */
 router.get("/", async (req, res) => {
   try {
-    const { user_id } = req.query;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
 
-    if (!user_id) {
-      return res.status(400).json({
-        status: "error",
-        message: "user_id query parameter required"
-      });
-    }
-
-    // COUNT TOTAL FOR THIS USER
+    // COUNT TOTAL
     const totalResult = await pool.query(
       `SELECT COUNT(*) FROM app_test.companies c
        INNER JOIN app_test.connector_machines m
            ON c.name = m.company_name
-       WHERE m.tally_connected = true AND m.user_id = $1`,
-      [user_id]
+       WHERE m.tally_connected = true`
     );
 
     const total = parseInt(totalResult.rows[0].count);
 
-    // FETCH ONLY THIS USER'S COMPANIES
+    // FETCH ALL COMPANIES
     const result = await pool.query(
       `SELECT 
          c.id, 
@@ -44,10 +35,10 @@ router.get("/", async (req, res) => {
        FROM app_test.companies c
        INNER JOIN app_test.connector_machines m
            ON c.name = m.company_name
-       WHERE m.tally_connected = true AND m.user_id = $1
+       WHERE m.tally_connected = true
        ORDER BY c.id DESC
-       LIMIT $2 OFFSET $3`,
-      [user_id, limit, offset]
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
 
     return res.json({
@@ -75,14 +66,6 @@ router.get("/", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { user_id } = req.query;
-
-    if (!user_id) {
-      return res.status(400).json({
-        status: "error",
-        message: "user_id query parameter required"
-      });
-    }
 
     const result = await pool.query(
       `SELECT 
@@ -95,8 +78,8 @@ router.get("/:id", async (req, res) => {
        FROM app_test.companies c
        INNER JOIN app_test.connector_machines m
            ON c.name = m.company_name
-       WHERE c.id = $1 AND m.user_id = $2 AND m.tally_connected = true`,
-      [id, user_id]
+       WHERE c.id = $1 AND m.tally_connected = true`,
+      [id]
     );
 
     if (result.rows.length === 0) {
@@ -121,12 +104,10 @@ router.get("/:id", async (req, res) => {
 });
 
 /* =========================================
-   GET COMPANIES BY USER (SIMPLE)
+   GET ALL COMPANIES (SIMPLE)
 ========================================= */
-router.get("/user/:user_id", async (req, res) => {
+router.get("/all/list", async (req, res) => {
   try {
-    const { user_id } = req.params;
-
     const result = await pool.query(
       `SELECT 
          c.id, 
@@ -139,9 +120,7 @@ router.get("/user/:user_id", async (req, res) => {
        FROM app_test.companies c
        INNER JOIN app_test.connector_machines m
            ON c.name = m.company_name
-       WHERE m.user_id = $1
-       ORDER BY c.id DESC`,
-      [user_id]
+       ORDER BY c.id DESC`
     );
 
     return res.json({
@@ -151,7 +130,7 @@ router.get("/user/:user_id", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ COMPANY USER ERROR:", err);
+    console.log("❌ COMPANY LIST ERROR:", err);
     return res.status(500).json({
       status: "error",
       message: err.message
