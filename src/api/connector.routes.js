@@ -25,13 +25,8 @@ router.post("/generate-key", verifySession(), async (req, res) => {
       });
     }
 
-    const token =
-      "PAIR-" +
-      crypto.randomBytes(4).toString("hex").toUpperCase();
-
-    const expiresAt = new Date(
-      Date.now() + 10 * 60 * 1000
-    );
+    const token = "PAIR-" + crypto.randomBytes(4).toString("hex").toUpperCase();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query(
       `
@@ -50,11 +45,7 @@ router.post("/generate-key", verifySession(), async (req, res) => {
         $3
       )
       `,
-      [
-        user_id,
-        token,
-        expiresAt
-      ]
+      [user_id, token, expiresAt]
     );
 
     return res.status(200).json({
@@ -64,14 +55,11 @@ router.post("/generate-key", verifySession(), async (req, res) => {
     });
 
   } catch (err) {
-
     console.error("Generate Key Error:", err);
-
     return res.status(500).json({
       status: "error",
       message: err.message
     });
-
   }
 });
 
@@ -87,37 +75,36 @@ router.get("/current", verifySession(), async (req, res) => {
       });
     }
 
-  const result = await pool.query(
-`
-SELECT
-    company_name,
-    from_year,
-    to_year,
-    tally_connected
-FROM ${DB_SCHEMA}.connector_machines
-WHERE user_id = $1
-  AND tally_connected = true
-ORDER BY updated_at DESC
-LIMIT 1
-`,
-[user_id]
-);
+    const result = await pool.query(
+      `
+      SELECT
+          company_name,
+          from_year,
+          to_year,
+          tally_connected
+      FROM ${DB_SCHEMA}.connector_machines
+      WHERE user_id = $1
+        AND tally_connected = true
+      ORDER BY updated_at DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
 
     if (result.rows.length === 0) {
-      return res.json({
-        status: "success",
-        paired: false,
-        data: null
+      return res.status(404).json({
+        status: "error",
+        message: "No connected machine found"
       });
     }
 
-    return res.json({
+    return res.status(200).json({
       status: "success",
-      paired: true,
       data: result.rows[0]
     });
 
   } catch (err) {
+    console.error("Current Connector Error:", err);
     return res.status(500).json({
       status: "error",
       message: err.message

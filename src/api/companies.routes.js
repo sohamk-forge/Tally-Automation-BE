@@ -5,11 +5,10 @@ import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
-   GET ALL COMPANIES (USER-FILTERED)
+   GET ALL COMPANIES
 ========================================= */
 router.get("/", async (req, res) => {
   try {
-    const { user_id } = req.query;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
@@ -25,7 +24,7 @@ router.get("/", async (req, res) => {
 
     const total = parseInt(totalResult.rows[0].count);
 
-    // FETCH ONLY THIS USER'S COMPANIES
+    // FETCH ALL COMPANIES
     const result = await pool.query(
       `
      SELECT
@@ -73,14 +72,6 @@ LIMIT $1 OFFSET $2
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { user_id } = req.query;
-
-    if (!user_id) {
-      return res.status(400).json({
-        status: "error",
-        message: "user_id query parameter required"
-      });
-    }
 
     const result = await pool.query(
       `SELECT 
@@ -93,8 +84,8 @@ router.get("/:id", async (req, res) => {
        FROM app_test.companies c
        INNER JOIN app_test.connector_machines m
            ON c.name = m.company_name
-       WHERE c.id = $1 AND m.user_id = $2 AND m.tally_connected = true`,
-      [id, user_id]
+       WHERE c.id = $1 AND m.tally_connected = true`,
+      [id]
     );
 
     if (!companies.length) {
@@ -210,7 +201,7 @@ const financial_year_end =
     });
 
   } catch (err) {
-    console.log("❌ COMPANY USER ERROR:", err);
+    console.log("❌ COMPANY LIST ERROR:", err);
     return res.status(500).json({
       status: "error",
       message: err.message

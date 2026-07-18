@@ -143,3 +143,6 @@ uploads/
 lastVoucher.xml
 src/python/voucher_counter.txt
 src/python/sales_voucher_counter.txt
+connector-jwt.txt
+connector-api-key.txt
+machine-guid.txt
