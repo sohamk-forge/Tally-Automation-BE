@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { BANK_QUEUE_NAME } from "../queues/bank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { createBankLedgerXML } from "../services/pushXmlBuilder.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -36,83 +37,79 @@ function isTemporaryBankError(error) {
     message.includes("server unavailable") ||
     message.includes("network") ||
     message.includes("fetch failed") ||
-    message.includes("socket hang up") ||
-    message.includes("econnreset") ||
-    message.includes("econnrefused") ||
-    message.includes("etimedout")
-  );
-}
-
-    message.includes("etimedout")
+    message.includes("socket hang up")
   );
 }
 
 const worker = new Worker(
-  BANK_QUEUE_NAME,
+  BANK_QUEUE_NAME,  // ✅ Uses "bank-push" from queues/bank.queue.js
   async (job) => {
     const { bankId } = job.data;
 
     console.log(`Processing bank ID ${bankId}`);
 
-    console.log(`Processing bank ID ${bankId}`);
-
+    // STEP 1: GET BANK FROM DB
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.push_bank
-      WHERE id = $1
-      `,
+      `SELECT * FROM app_test.push_bank WHERE id = $1`,
       [bankId]
     );
 
     const row = result.rows[0];
-
     if (!row) {
       throw new Error(`Bank ${bankId} not found`);
       throw new Error(`Bank ${bankId} not found`);
     }
 
+    // STEP 2: MARK AS PROCESSING
     await pool.query(
-      `
-      UPDATE app_test.push_bank
-      SET
-        status = 'processing',
-        updated_at = NOW()
-      WHERE id = $1
-      `,
+      `UPDATE app_test.push_bank SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [bankId]
     );
 
     try {
-      // ─────────────────────────────────────────────────────────────
-      // STEP 1: Generate XML (stays in backend) ✅
-      // ─────────────────────────────────────────────────────────────
-      const xml = await generateBankXML(row);
+      // STEP 3: GENERATE XML (no Tally calls here!) ✅
+      const xml = createBankLedgerXML({
+  company: row.company_name,
+  ledger_name: row.ledger_name,
+  parent: row.parent_group || "Bank Accounts",
+  opening_balance: row.opening_balance,
+  bank_name: row.bank_name,
+  branch_name: row.branch_name,
+  account_holder: row.account_holder,
+  account_number: row.account_number,
+  ifsc_code: row.ifsc_code,
+  swift_code: row.swift_code,
+  address: row.address,
+  state: row.state,
+  country: row.country || "India",
+  pincode: row.pincode,
+  contact_person: row.contact_person,
+  mobile: row.mobile,
+  email: row.email
+});
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 2: Get connector pairing info for this bank's company
-      // ─────────────────────────────────────────────────────────────
+      console.log(`📤 Bank XML generated: ${row.bank_name}`);
+
+      // STEP 4: GET CONNECTOR PAIRING (same as pushLedger)
       const pairingResult = await pool.query(
         `
         SELECT cpt.user_id
-        FROM app_test.companies c
-        JOIN app_test.connector_pairing_tokens cpt 
+        FROM app_test.push_bank pb
+        JOIN app_test.companies c
+          ON pb.company_id = c.id
+        JOIN app_test.connector_pairing_tokens cpt
           ON c.id = cpt.company_id
-        WHERE c.id = $1
+        WHERE pb.id = $1
         `,
-        [row.company_id]
+        [bankId]
       );
 
       const pairing = pairingResult.rows[0];
       if (!pairing) {
-        throw new Error(
-          `No connector pairing found for bank ${bankId}`
-        );
+        throw new Error(`No connector pairing found for bank ${bankId}`);
       }
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 3: Create connector job (moves Tally work to connector)
-      // ─────────────────────────────────────────────────────────────
+      // STEP 5: CREATE CONNECTOR JOB (instead of calling Tally directly!) ✅
       const connectorJob = await createConnectorJob({
         userId: pairing.user_id,
         jobType: 'bank',
@@ -124,17 +121,9 @@ const worker = new Worker(
         }
       });
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 4: Mark as pending (waiting for connector result)
-      // ─────────────────────────────────────────────────────────────
+      // STEP 6: MARK AS PENDING
       await pool.query(
-        `
-        UPDATE app_test.push_bank
-        SET
-          status = 'pending',
-          updated_at = NOW()
-        WHERE id = $1
-        `,
+        `UPDATE app_test.push_bank SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
         [bankId]
       );
 
@@ -160,56 +149,21 @@ const worker = new Worker(
       };
 
     } catch (error) {
-      console.error(
-        `❌ Bank failed: ${row.bank_name}`,
-        error.message
-      );
+      console.error(`❌ Bank failed: ${row.bank_name}`, error.message);
 
       if (isTemporaryBankError(error)) {
-        // Mark as pending for retry
-        // Mark as pending for retry
         await pool.query(
-          `
-          UPDATE app_test.push_bank
-          SET
-            status = 'pending',
-            error_message = $1,
-            updated_at = NOW()
-          WHERE id = $2
-          `,
-          [
-            error.message,
-            bankId
-          ]
+          `UPDATE app_test.push_bank SET sync_status = 'pending', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          [error.message, bankId]
         );
-
-        throw error;  // Let Bull retry
-
-        throw error;  // Let Bull retry
+        throw error;
       }
 
-      // Permanent failure
-      // Permanent failure
       await pool.query(
-        `
-        UPDATE app_test.push_bank
-        SET
-          status = 'failed',
-          error_message = $1,
-          updated_at = NOW()
-        WHERE id = $2
-        `,
-        [
-          error.message,
-          bankId
-        ]
+        `UPDATE app_test.push_bank SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+        [error.message, bankId]
       );
 
-      return {
-        bankId,
-        status: "failed",
-        error: error.message
-      };
       return {
         bankId,
         status: "failed",
@@ -224,85 +178,34 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(
-    `✅ Bank job completed: ${job.id}`,
-    job.returnvalue
-  );
+  console.log(`✅ Bank job completed: ${job.id}`, job.returnvalue);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(
-    `❌ Bank job failed: ${job?.id}`,
-    error.message
-  );
+  console.error(`❌ Bank job failed: ${job?.id}`, error.message);
 
   if (!job) return;
   if (!job) return;
 
-  const maximumAttempts =
-    Number(job.opts.attempts || 1);
-
-  if (job.attemptsMade < maximumAttempts) {
-    return;
-    return;
-  }
+  const maximumAttempts = Number(job.opts.attempts || 1);
+  if (job.attemptsMade < maximumAttempts) return;
 
   try {
     const { bankId } = job.data;
-
-
     await pool.query(
-      `
-      UPDATE app_test.push_bank
-      SET
-        status = 'failed',
-        error_message = $1,
-        updated_at = NOW()
-      WHERE id = $2
-      `,
-      [
-        error.message,
-        bankId
-      ]
+      `UPDATE app_test.push_bank SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+      [error.message, bankId]
     );
-
-    console.error(`Bank final failure recorded: ${bankId}`);
-
     console.error(`Bank final failure recorded: ${bankId}`);
   } catch (updateError) {
-    console.error(
-      `Bank final failure update failed: ${job.id}`,
-      updateError.message
-    );
+    console.error(`Bank final failure update failed: ${job.id}`, updateError.message);
   }
 });
 
 worker.on("error", (error) => {
-  console.error(
-    "❌ Bank worker error:",
-    error.message
-  );
+  console.error("❌ Bank worker error:", error.message);
 });
 
-// ─────────────────────────────────────────────────────────────
-// Helper: Generate Bank XML (keep your original implementation)
-// ─────────────────────────────────────────────────────────────
-async function generateBankXML(row) {
-  // Keep your original XML generation logic here
-  // This is where your existing bank XML builder goes
-  return `<BankXML><!-- Your original XML generation --></BankXML>`;
-}
-// ─────────────────────────────────────────────────────────────
-// Helper: Generate Bank XML (keep your original implementation)
-// ─────────────────────────────────────────────────────────────
-async function generateBankXML(row) {
-  // Keep your original XML generation logic here
-  // This is where your existing bank XML builder goes
-  return `<BankXML><!-- Your original XML generation --></BankXML>`;
-}
-
-console.log(
-  "✅ Push Bank BullMQ worker started (using Connector)"
-);
+console.log("✅ Push Bank BullMQ worker started (using Connector)");
 
 export default worker;
