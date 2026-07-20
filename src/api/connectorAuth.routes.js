@@ -1,6 +1,7 @@
 import express from "express";
+import crypto from "crypto";
 import pool from "../db/index.js";
-import jwt from "jsonwebtoken";
+import { hashApiKey } from "../middleware/apiKey.middleware.js";
 
 const router = express.Router();
 
@@ -82,19 +83,32 @@ router.post("/pair", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Generate JWT
-   const jwtToken = jwt.sign(
-  {
-    id: user.id,
-    email: user.email,
-    role: user.role,
-    machine_id
-  },
-  process.env.JWT_SECRET,
-  {
-     expiresIn: "30d"
-  }
-);
+    // Generate a long-lived, revocable API key for this machine (shown once —
+    // only its hash is stored). Replaces the old 30-day JWT.
+    const apiKey = crypto.randomBytes(32).toString("hex");
+    const keyHash = hashApiKey(apiKey);
+
+    await pool.query(
+      `
+      INSERT INTO app_test.connector_api_keys
+      (
+        user_id,
+        machine_id,
+        key_hash
+      )
+      VALUES
+      (
+        $1,
+        $2,
+        $3
+      )
+      `,
+      [
+        user.id,
+        machine_id,
+        keyHash
+      ]
+    );
 
     // Mark token as used and verify update succeeded
     const updateResult = await pool.query(
@@ -119,11 +133,12 @@ router.post("/pair", async (req, res) => {
       });
     }
 
-    // Return JWT with full user details
+    // Return the API key with full user details — the raw key is only ever
+    // shown here, the connector app must store it locally.
     return res.status(200).json({
       status: "success",
       message: "Connector paired successfully",
-      jwt_token: jwtToken,
+      api_key: apiKey,
       user: {
         id: user.id,
         email: user.email,

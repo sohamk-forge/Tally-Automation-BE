@@ -1,0 +1,17 @@
+services:
+  supertokens:
+    image: supertokens/supertokens-postgresql:12.0.7
+    ports:
+      - "3567:3567"
+    environment:
+      POSTGRESQL_CONNECTION_URI: "postgresql://${SUPERTOKENS_DB_USER}:${SUPERTOKENS_DB_PASSWORD}@host.docker.internal:${DB_PORT}/${DB_NAME}"
+      POSTGRESQL_TABLE_SCHEMA: "supertokens_core"
+      API_KEYS: "${SUPERTOKENS_API_KEY}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3567/hello"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

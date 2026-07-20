@@ -1,12 +1,17 @@
 import express from "express";
 import cors from "cors";
+import supertokens from "supertokens-node";
+import { middleware as supertokensMiddleware, errorHandler as supertokensErrorHandler } from "supertokens-node/framework/express/index.js";
+import { initSupertokens } from "./config/supertokens.js";
+import { requireSessionOrApiKey } from "./middleware/sessionOrApiKey.middleware.js";
+
+initSupertokens();
 
 /* =================================
    DAILY CRON
 ================================= */
 
 import "./cron/dailySync.cron.js";
-
 
 
 
@@ -45,7 +50,6 @@ import "./workers/pushVoucher.worker.js";
 
    ROUTES
 ================================= */
-import authRoutes from "./modules/auth/auth.routes.js";
 
 import db
 from "./api/db.routes.js";
@@ -141,28 +145,28 @@ import connectorAuthRoutes from "./api/connectorAuth.routes.js";
 import voucherRoutes
  from "./api/voucher.routes.js";
 
-import salesAccountRoutes 
+import salesAccountRoutes
  from "./api/salesAccount.routes.js";
 
-import purchaseAccountRoutes 
+import purchaseAccountRoutes
  from "./api/purchaseAccount.routes.js";
 
-import stockInHandRoutes 
+import stockInHandRoutes
  from "./api/stockInHand.routes.js";
 
-import trendsRouter 
+import trendsRouter
  from "./api/salesPurchaseTrend.routes.js";
 
-import topSalesLedgersRouter 
+import topSalesLedgersRouter
  from "./api/topSalesLedgers.js";
 
-import monthlySalesTrendRouter 
+import monthlySalesTrendRouter
  from "./api/monthlySalesTrend.js";
 
-import challanRoutes 
+import challanRoutes
  from "./api/challan.routes.js";
 
-import purchaseValidationRoutes 
+import purchaseValidationRoutes
  from "./api/purchaseValidation.routes.js";
 
 /* =================================
@@ -183,7 +187,15 @@ const app = express();
    GLOBAL MIDDLEWARE
 ================================= */
 
-app.use(cors({ origin: '*' }));
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    allowedHeaders: ["content-type", ...supertokens.getAllCORSHeaders()],
+    credentials: true,
+  })
+);
+
+app.use(supertokensMiddleware());
 
 app.use(express.json());
 
@@ -201,6 +213,7 @@ app.use(
 
 app.use(
   "/api/db",
+  ...requireSessionOrApiKey(),
   db
 );
 
@@ -210,6 +223,7 @@ app.use(
 
 app.use(
   "/api/companies",
+  ...requireSessionOrApiKey(),
   companies
 );
 
@@ -219,6 +233,7 @@ app.use(
 
 app.use(
   "/api/ledgers",
+  ...requireSessionOrApiKey(),
   ledgers
 );
 
@@ -228,6 +243,7 @@ app.use(
 
 app.use(
   "/api/sync",
+  ...requireSessionOrApiKey(),
   syncRoutes
 );
 
@@ -237,7 +253,28 @@ app.use(
 
 app.use(
   "/api/group-summary-bank",
+  ...requireSessionOrApiKey(),
   groupSummaryBank
+);
+
+/* =================================
+   CONNECTOR APIs (desktop Tally connector — API-key auth, not
+   SuperTokens sessions; see src/middleware/apiKey.middleware.js)
+
+   Mounted here, ahead of the generic "/api" mounts below, since Express
+   matches middleware by registration order — a generic "/api" gate mounted
+   earlier would otherwise intercept and 401 these before they're ever
+   reached, as "/api/connector-auth/..." also starts with "/api".
+================================= */
+
+app.use(
+  "/api/connector",
+  connectorRoutes
+);
+
+app.use(
+  "/api/connector-auth",
+  connectorAuthRoutes
 );
 
 /* =================================
@@ -246,6 +283,7 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   ledgerVouchersRoutes
 );
 
@@ -255,11 +293,13 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   parentGroupsRoutes
 );
 
 app.use(
   "/api/all-parent-groups",
+  ...requireSessionOrApiKey(),
   allParentGroupsRoutes
 );
 
@@ -269,6 +309,7 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   payableDebtorsRoutes
 );
 
@@ -278,6 +319,7 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   profitLossRoutes
 );
 
@@ -287,6 +329,7 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   salesItemsRoutes
 );
 
@@ -296,6 +339,7 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   stockGroupSummaryRoute
 );
 
@@ -305,6 +349,7 @@ app.use(
 
 app.use(
   "/api/units",
+  ...requireSessionOrApiKey(),
   unitsRoutes
 );
 
@@ -314,11 +359,13 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   stockAlertRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pullStockAlertRoutes
 );
 /* =================================
@@ -327,78 +374,86 @@ app.use(
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pushLedgerRoutes
 );
-app.use("/auth", authRoutes);
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pushBankRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pushOdBankRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   invoiceRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   salesInvoiceRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pushStockItemRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   pushStockItemOpeningRoutes
 );
 
 app.use(
   "/api/all-ledger-details",
+  ...requireSessionOrApiKey(),
   allLedgerDetailsRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   bulkStockItemRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   purchaseLedgerMappingRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   salesLedgerMappingRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   purchaseSalesLedgerRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   godownRoutes
 );
 
 app.use(
   "/api",
+  ...requireSessionOrApiKey(),
   bulkSalesUploadRoutes
-);
-
-app.use(
-  "/api/connector",
-  connectorRoutes
 );
 
 /* =================================
@@ -406,30 +461,26 @@ app.use(
 ================================= */
 app.use(
   "/api/v1/voucher",
+  ...requireSessionOrApiKey(),
   voucherRoutes
 );
 
-app.use("/api/v1/sales", salesAccountRoutes);
+app.use("/api/v1/sales", ...requireSessionOrApiKey(), salesAccountRoutes);
 
-app.use("/api/v1/purchase", purchaseAccountRoutes);
+app.use("/api/v1/purchase", ...requireSessionOrApiKey(), purchaseAccountRoutes);
 
-app.use("/api/v1/stock", stockInHandRoutes);
+app.use("/api/v1/stock", ...requireSessionOrApiKey(), stockInHandRoutes);
 
-app.use("/api/v1/trends", trendsRouter);
+app.use("/api/v1/trends", ...requireSessionOrApiKey(), trendsRouter);
 
-app.use("/api/v1", topSalesLedgersRouter);
+app.use("/api/v1", ...requireSessionOrApiKey(), topSalesLedgersRouter);
 
-app.use("/api/v1", monthlySalesTrendRouter);
+app.use("/api/v1", ...requireSessionOrApiKey(), monthlySalesTrendRouter);
 
-app.use("/api/v1/challan", challanRoutes);
+app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanRoutes);
 
-app.use("/api/purchase-validation", purchaseValidationRoutes);
+app.use("/api/purchase-validation", ...requireSessionOrApiKey(), purchaseValidationRoutes);
 
-
-app.use(
-  "/api/connector-auth",
-  connectorAuthRoutes
-);
 /* =================================
    DEFAULT API
 ================================= */
@@ -453,7 +504,7 @@ app.get(
 
 );
 
-
+app.use(supertokensErrorHandler());
 
 /* =================================
    EXPORT APP

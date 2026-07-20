@@ -2,7 +2,7 @@
  * @param {import('knex')} knex
  */
 export async function up(knex) {
-  return knex.schema.createTable("account_closing_balances", (table) => {
+  return knex.schema.withSchema("app_test").createTable("account_closing_balances", (table) => {
     table.increments("id").primary();
 
     table.text("company_name").notNullable();
@@ -20,5 +20,5 @@ export async function up(knex) {
  * @param {import('knex')} knex
  */
 export async function down(knex) {
-  return knex.schema.dropTable("account_closing_balances");
+  return knex.schema.withSchema("app_test").dropTable("account_closing_balances");
 }

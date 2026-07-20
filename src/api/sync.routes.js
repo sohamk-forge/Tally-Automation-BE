@@ -1,8 +1,8 @@
   import express from "express";
   import pool from "../db/index.js";
   import { sendToTally } from "../services/tallyClient.js";
-  import authMiddleware from "../middleware/auth.middleware.js";
   import axios from "axios";
+  import { getLocalUserId } from "../utils/getLocalUserId.js";
   import {
     getCompaniesXML,
       getUnitsXML,
@@ -2591,12 +2591,16 @@ router.post(
 
     try {
 
-      const { user_id: userId } = req.body;
+      // Derived from the authenticated request, not a client-supplied
+      // body field — a dashboard session or the connector's own API key.
+      const userId = req.session
+        ? await getLocalUserId(req.session.getUserId())
+        : req.connectorMachine?.userId;
 
       if (!userId) {
-        return res.status(400).json({
+        return res.status(401).json({
           status: "error",
-          message: "user_id is required"
+          message: "Unauthenticated"
         });
       }
 
