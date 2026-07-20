@@ -2154,43 +2154,30 @@ for (const [name, item] of uniqueCompanies) {
     STOCK GROUP SUMMARY SYNC
   =================================================== */
 
-  router.get(
-    "/stock-group-summary-sync",
-    async (req, res) => {
-      /* =====================================
-        COMPANY
-      ===================================== */
-      const company = req.query.company;
-      if (!company) {
-        return res.status(400).json({
-          status: "error",
-          message: "company required"
-        });
+ router.get(
+  "/stock-group-summary-sync",
+  async (req, res) => {
+
+    const company = req.query.company;
+    if (!company) {
+      return res.status(400).json({
+        status: "error",
+        message: "company required"
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+
+      await client.query("BEGIN");
+
+      const companyId = await getCompanyId(company, client);
+      if (!companyId) {
+        throw new Error("Company not found");
       }
 
-      /* =====================================
-        DB CLIENT
-      ===================================== */
-      const client = await pool.connect();
-
-      try {
-        /* =====================================
-          BEGIN TRANSACTION
-        ===================================== */
-        await client.query("BEGIN");
-
-        /* =====================================
-          GET COMPANY ID
-        ===================================== */
-        const companyId = await getCompanyId(company, client);
-        if (!companyId) {
-          throw new Error("Company not found");
-        }
-
-        /* =====================================
-          XML
-        ===================================== */
-        const xml = getStockGroupSummaryXML(company);
+      const xml = getStockGroupSummaryXML(company);
 
         /* =====================================
           TALLY RESPONSE
@@ -2198,82 +2185,110 @@ for (const [name, item] of uniqueCompanies) {
         const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         console.log(responseXML);
 
-        /* =====================================
-          XML PARSE
-        ===================================== */
-        const parsed = await parseXML(responseXML);
+      const parsed = await parseXML(responseXML);
 
-       
-        /* =====================================
-          STOCK ITEMS
-        ===================================== */
-        const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
-        const list = Array.isArray(stockItems) ? stockItems : [stockItems];
+      const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
+      const list = Array.isArray(stockItems) ? stockItems : [stockItems];
 
-        /* =====================================
-          COUNTERS
-        ===================================== */
-        let inserted = 0;
-        let updated = 0;
+      let inserted = 0;
+      let updated = 0;
 
-        /* =====================================
-          LOOP
-        ===================================== */
-        for (const item of list) {
-          /* =================================
-            ITEM NAME
-          ================================= */
+      for (const item of list) {
+
+        /* =================================
+          ITEM NAME
+        ================================= */
         let itemName =
-    item?.NAME ||
-    item?.["@_NAME"] ||
-    item?.["$"]?.NAME ||
-    item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-    null;
+          item?.NAME ||
+          item?.["@_NAME"] ||
+          item?.["$"]?.NAME ||
+          item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+          null;
 
-  if (Array.isArray(itemName)) {
-    itemName = itemName[0];
-  }
+        if (Array.isArray(itemName)) {
+          itemName = itemName[0];
+        }
 
-  if (typeof itemName === "object" && itemName !== null) {
-    itemName =
-      itemName._ ||
-      itemName.NAME ||
-      JSON.stringify(itemName);
-  }
+        if (typeof itemName === "object" && itemName !== null) {
+          itemName =
+            itemName._ ||
+            itemName.NAME ||
+            JSON.stringify(itemName);
+        }
 
-  itemName = clean(itemName);
+        itemName = clean(itemName);
 
-          /* =================================
-            GROUP NAME
-          ================================= */
-          const groupName = (item?.PARENT || "").replace("&#4;", "").trim();
+        /* =================================
+          GROUP NAME
+        ================================= */
+        const groupName = (item?.PARENT || "").replace("&#4;", "").trim();
 
-          /* =================================
-            QUANTITY
-          ================================= */
-          const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
+        /* =================================
+          QUANTITY
+        ================================= */
+        const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
 
-          /* =================================
-            STOCK VALUE
-          ================================= */
-          const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
+        /* =================================
+          STOCK VALUE
+        ================================= */
+        const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
+        const stockValue = rawStockValue * -1;
 
-          /* =================================
-            FIX TALLY SIGN
-          ================================= */
-          const stockValue = rawStockValue * -1;
+        /* =================================
+          HSN CODE
+        ================================= */
+        let hsnCode = null;
+        const hsnList = item?.["HSNDETAILS.LIST"] || [];
+        if (Array.isArray(hsnList)) {
+          const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
+          hsnCode = validHSN?.HSNCODE || null;
+        } else {
+          hsnCode = hsnList?.HSNCODE || null;
+        }
 
-          /* =================================
-            HSN CODE
-          ================================= */
-          let hsnCode = null;
-          const hsnList = item?.["HSNDETAILS.LIST"] || [];
-          if (Array.isArray(hsnList)) {
-            const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
-            hsnCode = validHSN?.HSNCODE || null;
-          } else {
-            hsnCode = hsnList?.HSNCODE || null;
+        /* =================================
+          GST RATE
+        ================================= */
+        let gstRate = 0;
+
+        const gstDetails = item?.["GSTDETAILS.LIST"];
+        const gstDetailsArr = Array.isArray(gstDetails) ? gstDetails : gstDetails ? [gstDetails] : [];
+
+        for (const gd of gstDetailsArr) {
+          const stateWise = gd?.["STATEWISEDETAILS.LIST"];
+          const stateWiseArr = Array.isArray(stateWise) ? stateWise : stateWise ? [stateWise] : [];
+
+          for (const sw of stateWiseArr) {
+            const rateDetails = sw?.["GSTRATEDETAILS.LIST"];
+            const rateArr = Array.isArray(rateDetails) ? rateDetails : rateDetails ? [rateDetails] : [];
+
+            for (const rd of rateArr) {
+              const r = parseFloat(rd?.GSTRATE || 0);
+              if (r > 0) gstRate = r;
+            }
           }
+        }
+
+        if (!gstRate) {
+          gstRate = parseFloat(item?.RATEOFGSTPERCENT || 0) || 0;
+        }
+
+        console.log("GST RATE CHECK:", itemName, gstRate);
+
+        /* =================================
+          RATE (unit price)
+        ================================= */
+        let rate = 0;
+
+        const priceList = item?.["STANDARDPRICE.LIST"];
+        const priceArr = Array.isArray(priceList) ? priceList : priceList ? [priceList] : [];
+        if (priceArr.length) {
+          rate = parseFloat(priceArr[priceArr.length - 1]?.RATE || 0) || 0;
+        }
+
+        if (!rate && quantity) {
+          rate = Number((Math.abs(stockValue) / quantity).toFixed(2));
+        }
 
           /* =================================
             CHECK EXISTING
@@ -2332,98 +2347,32 @@ for (const [name, item] of uniqueCompanies) {
           inserted++;
         }
 
-        /* =====================================
-          COMMIT
-        ===================================== */
-        await client.query("COMMIT");
+      await client.query("COMMIT");
 
-        /* =====================================
-          FINAL RESPONSE
-        ===================================== */
-        return res.status(200).json({
-          status: "success",
-          source: "tally",
-          message: "Stock group summary synced successfully",
-          company,
-          summary: {
-            inserted,
-            updated,
-            total: list.length
-          },
-          data: list.map((item) => {
-            /* =============================
-              QUANTITY
-            ============================= */
-            const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Stock group summary synced successfully",
+        company,
+        summary: {
+          inserted,
+          updated,
+          total: list.length
+        }
+      });
 
-            /* =============================
-              STOCK VALUE
-            ============================= */
-            const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
-
-            /* =============================
-              FIX TALLY SIGN
-            ============================= */
-            const stockValue = rawStockValue * -1;
-
-            /* =============================
-              DEBUG
-            ============================= */
-           // ✅ REPLACE with this — derive itemName inline
-const mappedName = item?.NAME ||
-  item?.["@_NAME"] ||
-  item?.["$"]?.NAME ||
-  item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-  null;
-
-console.log({
-  item_name: mappedName,
-  quantity,
-  rawStockValue,
-  finalStockValue: stockValue
-});
-
-            /* =============================
-              RETURN
-            ============================= */
-            return {
-              group_name: (item?.PARENT || "").replace("&#4;", "").trim(),
-              item_name: item?.NAME ||
-                item?.["@_NAME"] ||
-                item?.["$"]?.NAME ||
-                item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-                null,
-              hsn_code: (() => {
-                const hsnList = item?.["HSNDETAILS.LIST"] || [];
-                if (Array.isArray(hsnList)) {
-                  const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
-                  return validHSN?.HSNCODE || null;
-                }
-                return hsnList?.HSNCODE || null;
-              })(),
-              quantity,
-              stock_value: stockValue
-            };
-          })
-        });
-      } catch (err) {
-        /* =====================================
-          ROLLBACK
-        ===================================== */
-        await client.query("ROLLBACK");
-        console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
-        return res.status(500).json({
-          status: "error",
-          message: err.message
-        });
-      } finally { 
-        /* =====================================
-          RELEASE CLIENT
-        ===================================== */
-        client.release();
-      }
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+    } finally {
+      client.release();
     }
-  );
+  }
+);
   /* ===================================================
     CREATE SYNC JOB
   =================================================== */
