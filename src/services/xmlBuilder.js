@@ -1,5 +1,6 @@
   export const getCompaniesXML = () => {
 
+
     return `
   <ENVELOPE>
 
@@ -1079,6 +1080,12 @@ export const getStockGroupSummaryXML = (
 
               HSNDETAILS.LIST,
 
+              GSTDETAILS.LIST,
+
+              RATEOFGSTPERCENT,
+
+              STANDARDPRICE.LIST,
+
               CLOSINGBALANCE,
 
               CLOSINGVALUE
@@ -1100,7 +1107,6 @@ export const getStockGroupSummaryXML = (
 `;
 
 };
-
 /* ===================================================
    SIMPLE UNITS XML
 =================================================== */

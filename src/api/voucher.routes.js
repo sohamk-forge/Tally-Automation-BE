@@ -685,6 +685,19 @@ router.get("/statement-details", async (req, res) => {
 
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
+
+   CHANGED (per request): raw per-file data is now FULL — every row
+   for every file, never filtered by group membership — and stays
+   separated by file_name under `files[]`.
+
+   The "AI suggestion" groups (merchant/group_key clusters) are now
+   built ONCE, across ALL files combined — not per file. So if the
+   same group_key shows up in two different uploaded files, it comes
+   back as a SINGLE merged group (combined count/totals/transactions)
+   in the top-level `groups[]` array, instead of two separate groups
+   nested under two different files. Each transaction inside a group
+   still carries its own `file_name` so you can trace which file it
+   came from.
 =========================== */
 
 router.get("/statement-transactions", async (req, res) => {
@@ -742,102 +755,73 @@ router.get("/statement-transactions", async (req, res) => {
       withdrawal: r.debit_credit === "DEBIT" ? String(r.amount) : "",
       deposit: r.debit_credit === "CREDIT" ? String(r.amount) : "",
       merchant_name: r.merchant_name || "",
-      group_key: r.group_key || ""
+      group_key: r.group_key || "",
+      file_name: r.file_name
     });
 
-    // NOTE: fileMap keys strictly on the file_name column, and every
-    // uploaded file now has a guaranteed-unique file_name (see
-    // getUniqueFileName above), so two different uploads can never
-    // collapse into the same section here even if the original
-    // filenames the user picked were identical.
+    // ---- FULL per-file data (every row, every file — no group filtering,
+    //      never merged/filtered by file_name across files) ----
     const fileMap = new Map();
     for (const r of result.rows) {
       if (!fileMap.has(r.file_name)) {
-        fileMap.set(r.file_name, { file_name: r.file_name, bank_ledger: r.bank_ledger, rows: [] });
+        fileMap.set(r.file_name, { file_name: r.file_name, bank_ledger: r.bank_ledger, transactions: [] });
       }
-      fileMap.get(r.file_name).rows.push(r);
+      fileMap.get(r.file_name).transactions.push(toTxn(r));
     }
+    const files = [...fileMap.values()].map((f) => ({
+      ...f,
+      total: f.transactions.length
+    }));
 
-    const files = [...fileMap.values()].map(({ file_name: fn, bank_ledger, rows }) => {
-      const groupsMap = new Map();
-      for (const r of rows) {
-        const key = r.group_key || "__ungrouped__";
-        if (!groupsMap.has(key)) {
-          groupsMap.set(key, {
-            group_key: r.group_key || null,
-            merchant_name: r.merchant_name || null,
-            count: 0,
-            total_withdrawal: 0,
-            total_deposit: 0,
-            transactions: [],
-            distinctNarrations: new Set(),
-            seenRowKeys: new Set()
-          });
-        }
-        const bucket = groupsMap.get(key);
-        const rowKey = [
-          (r.narration || "").trim().toLowerCase(),
-          r.instrument_number || "",
-          r.debit_credit,
-          Number(r.amount),
-          r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : ""
-        ].join("|");
-
-        bucket.distinctNarrations.add((r.narration || "").trim().toLowerCase());
-
-        if (bucket.seenRowKeys.has(rowKey)) continue;
-        bucket.seenRowKeys.add(rowKey);
-
-        const txn = toTxn(r);
-        bucket.transactions.push(txn);
-        bucket.count += 1;
-        if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
-        if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
+    // ---- AI suggestion groups: merged ACROSS all files by group_key ----
+    const groupsMap = new Map();
+    for (const r of result.rows) {
+      const key = r.group_key || "__ungrouped__";
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          group_key: r.group_key || null,
+          merchant_name: r.merchant_name || null,
+          count: 0,
+          total_withdrawal: 0,
+          total_deposit: 0,
+          transactions: [],
+          distinctNarrations: new Set(),
+          seenRowKeys: new Set()
+        });
       }
+      const bucket = groupsMap.get(key);
+      const rowKey = [
+        (r.narration || "").trim().toLowerCase(),
+        r.instrument_number || "",
+        r.debit_credit,
+        Number(r.amount),
+        r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : "",
+        r.file_name   // keeps identical txns in two different files from deduping into one
+      ].join("|");
 
-      const groups = [...groupsMap.values()]
-        .filter(g => g.group_key !== null && g.count > 1 && g.distinctNarrations.size > 1)
-        .map(({ distinctNarrations, seenRowKeys, ...rest }) => rest)
-        .sort((a, b) => b.count - a.count);
+      bucket.distinctNarrations.add((r.narration || "").trim().toLowerCase());
 
-      const transactions = groups.flatMap(g => g.transactions);
+      if (bucket.seenRowKeys.has(rowKey)) continue;
+      bucket.seenRowKeys.add(rowKey);
 
-      return {
-        file_name: fn,
-        bank_ledger,
-        total: transactions.length,
-        group_count: groups.length,
-        transactions,
-        groups
-      };
-    }).filter((f) => f.transactions.length > 0);
-
-    if (!files.length) {
-      return res.status(404).json({
-        success: false,
-        message: file_name
-          ? `No repeated narrations found for file "${file_name}"`
-          : "No repeated narrations found in any uploaded file"
-      });
+      const txn = toTxn(r);
+      bucket.transactions.push(txn);
+      bucket.count += 1;
+      if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
+      if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
     }
 
-    if (file_name) {
-      const f = files[0];
-      return res.status(200).json({
-        success: true,
-        file_name: f.file_name,
-        bank_ledger: f.bank_ledger,
-        total: f.total,
-        group_count: f.group_count,
-        transactions: f.transactions,
-        groups: f.groups
-      });
-    }
+    const groups = [...groupsMap.values()]
+      .filter(g => g.group_key !== null && g.count > 1 && g.distinctNarrations.size > 1)
+      .map(({ distinctNarrations, seenRowKeys, ...rest }) => rest)
+      .sort((a, b) => b.count - a.count);
 
     return res.status(200).json({
       success: true,
       file_count: files.length,
-      files
+      files,          // full raw data, still separated by file_name
+      group_count: groups.length,
+      groups          // AI suggestion — merged across all files by group_key
     });
 
   } catch (err) {

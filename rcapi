@@ -355,28 +355,29 @@ router.get("/statement-details", async (req, res) => {
        WHERE company_id = $1
          AND file_name IS NOT NULL
        GROUP BY file_name, bank_ledger
-       ORDER BY MAX(created_at) DESC
-       LIMIT 1`,
+       ORDER BY MAX(created_at) DESC`,
       [company_id]
     );
 
     if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: "No statement uploaded today for this company"
+        message: "No statement found for this company"
       });
     }
 
-    const row = result.rows[0];
+    // Return ALL uploaded files, not just the most recent one.
+    const data = result.rows.map((row) => ({
+      file_name:   row.file_name,
+      bank_ledger: row.bank_ledger,
+      start_date:  row.start_date,
+      end_date:    row.end_date
+    }));
 
     return res.status(200).json({
       success: true,
-      data: {
-        file_name:   row.file_name,
-        bank_ledger: row.bank_ledger,
-        start_date:  row.start_date,
-        end_date:    row.end_date
-      }
+      count: data.length,
+      data
     });
 
   } catch (err) {
