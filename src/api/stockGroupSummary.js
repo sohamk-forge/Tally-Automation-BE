@@ -65,25 +65,24 @@ router.get(
         });
       }
 
-      /* =====================================
-         COMPUTE CGST / SGST FOR FRONTEND
-      ===================================== */
-      const data = result.rows.map((row) => {
+      /* ================================================
+         ⬇️ PASTE THE NEW CODE RIGHT HERE ⬇️
+         (this replaces whatever your old success
+          response block looked like)
+      ================================================ */
 
+      const data = result.rows.map((row) => {
         const stockValue = Math.abs(Number(row.stock_value) || 0);
         const gstRate = Number(row.gst_rate) || 0;
-
         const cgst = Number(
           ((stockValue * (gstRate / 2)) / 100).toFixed(2)
         );
         const sgst = cgst;
-
         return {
           ...row,
           cgst,
           sgst
         };
-
       });
 
       return res.status(200).json({
@@ -93,6 +92,10 @@ router.get(
         total: data.length,
         data
       });
+
+      /* ================================================
+         ⬆️ END OF NEW CODE ⬆️
+      ================================================ */
 
     } catch (err) {
 

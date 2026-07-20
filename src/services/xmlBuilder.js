@@ -1072,25 +1072,23 @@ export const getStockGroupSummaryXML = (
               StockItem
             </TYPE>
 
-            <FETCH>
+          <FETCH>
 
-              NAME,
+  NAME,
 
-              PARENT,
+  PARENT,
 
-              HSNDETAILS.LIST,
+  HSNDETAILS.LIST,
 
-              GSTDETAILS.LIST,
+  GSTDETAILS.LIST,
 
-              RATEOFGSTPERCENT,
+  STANDARDPRICE,
 
-              STANDARDPRICE.LIST,
+  CLOSINGBALANCE,
 
-              CLOSINGBALANCE,
+  CLOSINGVALUE
 
-              CLOSINGVALUE
-
-            </FETCH>
+</FETCH>
 
           </COLLECTION>
 

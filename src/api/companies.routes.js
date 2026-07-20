@@ -5,12 +5,15 @@ import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
-   GET ALL COMPANIES (USER-FILTERED)
+   GET ALL COMPANIES
 ========================================= */
+
 router.get("/", async (req, res) => {
+
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
+
     const offset = (page - 1) * limit;
 
     // TOTAL COUNT
@@ -58,7 +61,9 @@ LIMIT $1 OFFSET $2
     });
 
   } catch (err) {
-    console.log("❌ COMPANY GET ERROR:", err);
+
+    console.log("COMPANY ERROR:", err);
+
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -67,7 +72,7 @@ LIMIT $1 OFFSET $2
 });
 
 /* =========================================
-   GET SINGLE COMPANY BY ID
+   SYNC COMPANIES FROM TALLY
 ========================================= */
 router.get("/:id", async (req, res) => {
   try {
@@ -196,8 +201,9 @@ const financial_year_end =
     // SUCCESS RESPONSE
     return res.json({
       status: "success",
-      count: result.rows.length,
-      data: result.rows
+      source: "tally",
+      synced: results.length,
+      data: results
     });
 
   } catch (err) {
