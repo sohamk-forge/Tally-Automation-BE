@@ -2243,48 +2243,59 @@ for (const [name, item] of uniqueCompanies) {
         }
 
         /* =================================
-          GST RATE
-        ================================= */
-        let gstRate = 0;
+  GST RATE — take IGST value (combined CGST+SGST)
+================================= */
+let gstRate = 0;
 
-        const gstDetails = item?.["GSTDETAILS.LIST"];
-        const gstDetailsArr = Array.isArray(gstDetails) ? gstDetails : gstDetails ? [gstDetails] : [];
+const gstDetails = item?.["GSTDETAILS.LIST"];
+const gstDetailsArr = Array.isArray(gstDetails) ? gstDetails : gstDetails ? [gstDetails] : [];
 
-        for (const gd of gstDetailsArr) {
-          const stateWise = gd?.["STATEWISEDETAILS.LIST"];
-          const stateWiseArr = Array.isArray(stateWise) ? stateWise : stateWise ? [stateWise] : [];
+for (const gd of gstDetailsArr) {
+  const stateWise = gd?.["STATEWISEDETAILS.LIST"];
+  const stateWiseArr = Array.isArray(stateWise) ? stateWise : stateWise ? [stateWise] : [];
 
-          for (const sw of stateWiseArr) {
-            const rateDetails = sw?.["GSTRATEDETAILS.LIST"];
-            const rateArr = Array.isArray(rateDetails) ? rateDetails : rateDetails ? [rateDetails] : [];
+  for (const sw of stateWiseArr) {
+    const rateDetails = sw?.["RATEDETAILS.LIST"];
+    const rateArr = Array.isArray(rateDetails) ? rateDetails : rateDetails ? [rateDetails] : [];
 
-            for (const rd of rateArr) {
-              const r = parseFloat(rd?.GSTRATE || 0);
-              if (r > 0) gstRate = r;
-            }
-          }
-        }
+    for (const rd of rateArr) {
+      const dutyHead =
+        typeof rd?.GSTRATEDUTYHEAD === "object"
+          ? rd.GSTRATEDUTYHEAD?._ || ""
+          : String(rd?.GSTRATEDUTYHEAD || "").trim();
 
-        if (!gstRate) {
-          gstRate = parseFloat(item?.RATEOFGSTPERCENT || 0) || 0;
-        }
+      if (dutyHead === "IGST") {
+        const rawRate = rd?.GSTRATE;
+        const r = typeof rawRate === "object"
+          ? parseFloat(rawRate?._ || 0)
+          : parseFloat(rawRate || 0);
 
-        console.log("GST RATE CHECK:", itemName, gstRate);
+        if (r > 0) gstRate = r;
+      }
+    }
+  }
+}
 
-        /* =================================
-          RATE (unit price)
-        ================================= */
-        let rate = 0;
+console.log("GST RATE CHECK:", itemName, gstRate);
 
-        const priceList = item?.["STANDARDPRICE.LIST"];
-        const priceArr = Array.isArray(priceList) ? priceList : priceList ? [priceList] : [];
-        if (priceArr.length) {
-          rate = parseFloat(priceArr[priceArr.length - 1]?.RATE || 0) || 0;
-        }
+/* =================================
+  RATE (unit price) — parsed from "338.98/pc"
+================================= */
+let rate = 0;
 
-        if (!rate && quantity) {
-          rate = Number((Math.abs(stockValue) / quantity).toFixed(2));
-        }
+const rawStandardPrice =
+  typeof item?.STANDARDPRICE === "object"
+    ? item.STANDARDPRICE?._ || ""
+    : String(item?.STANDARDPRICE || "").trim();
+
+if (rawStandardPrice) {
+  const ratePart = rawStandardPrice.split("/")[0];
+  rate = parseFloat(ratePart) || 0;
+}
+
+if (!rate && quantity) {
+  rate = Number((Math.abs(stockValue) / quantity).toFixed(2));
+}
 
         /* =================================
           CHECK EXISTING
