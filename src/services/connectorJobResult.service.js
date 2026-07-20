@@ -65,34 +65,44 @@ export async function processConnectorJobResult(client, job) {
         console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${status}`);
         break;
 
-      case "purchase_invoice":
-        await client.query(
-          `
-          UPDATE app_test.invoice_extractions
-          SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
-            tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.invoice_id
-          ]
-        );
+   case "purchase_invoice":
+  // Parse Tally response to check if actually created
+  let invoiceStatus = status;
+  let invoiceError = null;
+  
+  try {
+    const responseXml = response_xml || "";
+    const createdMatch = responseXml.match(/<CREATED>(\d+)<\/CREATED>/);
+    const exceptionsMatch = responseXml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+    const errorMatch = responseXml.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
+    
+    const created = parseInt(createdMatch?.[1] || 0);
+    const exceptions = parseInt(exceptionsMatch?.[1] || 0);
+    
+    if (created > 0 && exceptions === 0) {
+      invoiceStatus = 'success';
+    } else if (exceptions > 0 || created === 0) {
+      invoiceStatus = 'failed';
+      invoiceError = errorMatch?.[1] || 'Tally import failed';
+    }
+  } catch (e) {
+    console.error("Error parsing Tally response:", e.message);
+  }
+  
+  await client.query(
+    `UPDATE app_test.invoice_extractions
+    SET
+      sync_status = $1,
+      tally_response = $2,
+      error_message = $3,
+      updated_at = NOW()
+    WHERE id = $4
+    `,
+    [invoiceStatus, response_xml || null, invoiceError, payload.invoice_id]
+  );
 
-        console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${status}`);
-        break;
+  console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${invoiceStatus}`);
+  break;
 
       case "stock_item":
         await client.query(
@@ -153,34 +163,33 @@ export async function processConnectorJobResult(client, job) {
         break;
 
       case "odbank":
-        await client.query(
-          `
-          UPDATE app_test.push_odbank
-          SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
-            tally_response = $2,
-            last_error = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.odbank_id
-          ]
-        );
+  await client.query(
+    `
+    UPDATE app_test.bank_od_accounts
+    SET
+      sync_status = CASE
+        WHEN $1 = 'completed' THEN 'success'
+        WHEN $1 = 'failed' THEN 'failed'
+        ELSE sync_status
+      END,
+      tally_response = $2,
+      error_message = CASE
+        WHEN $1 = 'failed' THEN $3
+        ELSE NULL
+      END,
+      updated_at = NOW()
+    WHERE id = $4
+    `,
+    [
+      status,
+      response_xml || null,
+      result?.error || null,
+      payload.odbank_id
+    ]
+  );
 
-        console.log(`✅ OD Bank ${payload.odbank_id} marked ${status}`);
-        break;
-
+  console.log(`✅ OD/OC Bank ${payload.odbank_id} marked ${status}`);
+  break;
       case "alter_stock_item":
         await client.query(
           `

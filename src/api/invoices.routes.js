@@ -4,6 +4,10 @@ import {
   purchaseQueue,
   getPurchaseJobId
 } from "../queues/purchase.queue.js";
+import {
+  purchaseQueue,
+  getPurchaseJobId
+} from "../queues/purchase.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -20,7 +24,13 @@ router.post("/invoices", async (req, res) => {
     // ─────────────────────────────────────────────────────────────
 
     if (!company?.trim()) {
+    // ─────────────────────────────────────────────────────────────
+    // STEP 1: VALIDATE REQUIRED FIELDS
+    // ─────────────────────────────────────────────────────────────
+
+    if (!company?.trim()) {
       return res.status(400).json({
+        error: "Company is required"
         error: "Company is required"
       });
     }
@@ -32,9 +42,18 @@ router.post("/invoices", async (req, res) => {
     }
 
     const { invoice_no, invoice_date, customer_name, gstin } = invoice_data;
+    if (!invoice_data) {
+      return res.status(400).json({
+        error: "invoice_data is required"
+      });
+    }
+
+    const { invoice_no, invoice_date, customer_name, gstin } = invoice_data;
 
     if (!invoice_no?.trim()) {
+    if (!invoice_no?.trim()) {
       return res.status(400).json({
+        error: "invoice_no is required"
         error: "invoice_no is required"
       });
     }
@@ -46,12 +65,20 @@ router.post("/invoices", async (req, res) => {
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
     const companyResult = await pool.query(
+    // ─────────────────────────────────────────────────────────────
+    // STEP 2: GET COMPANY ID ✅
+    // ─────────────────────────────────────────────────────────────
+
+    console.log(`🔍 Looking up company: ${company.trim()}`);
+
+    const companyResult = await pool.query(
       `
       SELECT id
-      FROM ${DB_SCHEMA}.companies
-      WHERE TRIM(name) = TRIM($1)
+      FROM app_test.companies
+      WHERE name = $1
       LIMIT 1
       `,
+      [company.trim()]
       [company.trim()]
     );
 
@@ -73,7 +100,7 @@ router.post("/invoices", async (req, res) => {
 
     const insertResult = await pool.query(
       `
-      INSERT INTO ${DB_SCHEMA}.invoice_extractions
+      INSERT INTO app_test.invoice_extractions
       (
         company_id,
         company_name,
@@ -146,66 +173,7 @@ router.post("/invoices", async (req, res) => {
   } catch (error) {
     console.error("Push invoice error:", error.message);
     return res.status(500).json({
-      status: "error",
       error: error.message
-    });
-  }
-});
-
-// ✅ GET API FOR INVOICES
-router.get("/invoices", async (req, res) => {
-  try {
-    const { company_id, company_name, sync_status, invoice_no, error_only } = req.query;
-
-    if (!company_id && !company_name) {
-      return res.status(400).json({
-        status: "error",
-        message: "company_id or company_name query parameter required"
-      });
-    }
-
-    let query = `SELECT * FROM ${DB_SCHEMA}.invoice_extractions WHERE 1=1`;
-    const params = [];
-
-    if (company_id) {
-      query += ` AND company_id = $${params.length + 1}`;
-      params.push(company_id);
-    }
-
-    if (company_name) {
-      query += ` AND TRIM(company_name) = TRIM($${params.length + 1})`;
-      params.push(company_name);
-    }
-
-    if (sync_status) {
-      query += ` AND sync_status = $${params.length + 1}`;
-      params.push(sync_status);
-    }
-
-    if (invoice_no) {
-      query += ` AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($${params.length + 1}))`;
-      params.push(invoice_no);
-    }
-
-    if (error_only === 'true') {
-      query += ` AND error_count > 0`;
-    }
-
-    query += ` ORDER BY id DESC`;
-
-    const result = await pool.query(query, params);
-
-    return res.status(200).json({
-      status: "success",
-      count: result.rows.length,
-      data: result.rows
-    });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
     });
   }
 });
