@@ -35,18 +35,18 @@ if "voucher_number" not in invoice:
 # =========================================
 # COMPANY
 # =========================================
-COMPANY_NAME = invoice.get("company", "")
+COMPANY_NAME = invoice.get("company") or invoice.get("company_name", "")
 
 # =========================================
 # DYNAMIC LEDGER NAMES
 # =========================================
-purchase_ledger    = invoice.get("purchase_ledger",    "Purchase")
-cgst_ledger        = invoice.get("cgst_ledger",        "CGST")
-sgst_ledger        = invoice.get("sgst_ledger",        "SGST")
-igst_ledger        = invoice.get("igst_ledger",        "IGST")
+purchase_ledger = invoice.get("purchase_ledger", "")
+cgst_ledger = invoice.get("cgst_ledger", "")
+sgst_ledger = invoice.get("sgst_ledger", "")
+igst_ledger = invoice.get("igst_ledger", "")
 tds_ledger         = invoice.get("tds_ledger",         "")
 cess_ledger        = invoice.get("cess_ledger",        "")
-rounded_off_ledger = invoice.get("rounded_off_ledger", "Round Off")
+rounded_off_ledger = invoice.get("rounded_off_ledger", "")
 
 # =========================================
 # DEBUG: Print ledger mappings
@@ -150,13 +150,13 @@ sub(vch, "DATE",                        date)
 sub(vch, "VCHSTATUSDATE",               date)
 sub(vch, "REFERENCEDATE",               ref_date)
 sub(vch, "VOUCHERTYPENAME",             "Purchase")
-sub(vch, "VOUCHERNUMBER",               voucher_number)
+# sub(vch, "VOUCHERNUMBER",               voucher_number)
 sub(vch, "REFERENCE",                   reference)
 sub(vch, "PARTYNAME",                   party_name)
 sub(vch, "PARTYLEDGERNAME",             party_name)
 sub(vch, "PARTYGSTIN",                  party_gstin)
 sub(vch, "ISINVOICE",                   "Yes")
-sub(vch, "PURCHASELED",                 purchase_ledger)  # ✅ fills Purchase Ledger field
+# sub(vch, "PURCHASELED",                 purchase_ledger)  # ✅ fills Purchase Ledger field
 sub(vch, "NARRATION",                   narration)        # ✅ fills Narration field
 
 # =========================================
@@ -166,7 +166,7 @@ for item in line_items:
     # FIXED: Use item_name or name (both supported)
     name   = item.get("item_name") or item.get("name", "")
     qty    = float(item.get("qty", 1))
-    unit   = item.get("unit", "nos")
+    unit               = item.get("unit", "") 
     rate   = float(item.get("rate", 0))
     amount = float(item.get("amount", 0))
     # FIXED: Use item ledger or purchase_ledger

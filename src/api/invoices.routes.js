@@ -1,174 +1,155 @@
-// =========================================
-// src/api/invoices.routes.js
-// =========================================
-
 import express from "express";
 import pool from "../db/index.js";
+import {
+  purchaseQueue,
+  getPurchaseJobId
+} from "../queues/purchase.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 router.post("/invoices", async (req, res) => {
-
-  console.log("BODY RECEIVED:");
-  console.log(JSON.stringify(req.body, null, 2));
-
   try {
-
     const {
       company,
       invoice_data
     } = req.body;
 
-    if (!company || !invoice_data) {
+    // ─────────────────────────────────────────────────────────────
+    // STEP 1: VALIDATE REQUIRED FIELDS
+    // ─────────────────────────────────────────────────────────────
+
+    if (!company?.trim()) {
       return res.status(400).json({
-        status: "error",
-        message: "company and invoice_data required"
+        error: "Company is required"
       });
     }
 
-    console.log("");
-    console.log("====================================");
-    console.log("🚀 INVOICE API HIT");
-    console.log("====================================");
+    if (!invoice_data) {
+      return res.status(400).json({
+        error: "invoice_data is required"
+      });
+    }
 
-    // ✅ LOOKUP company_id from company_name
+    const { invoice_no, invoice_date, customer_name, gstin } = invoice_data;
+
+    if (!invoice_no?.trim()) {
+      return res.status(400).json({
+        error: "invoice_no is required"
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // STEP 2: GET COMPANY ID ✅
+    // ─────────────────────────────────────────────────────────────
+
+    console.log(`🔍 Looking up company: ${company.trim()}`);
+
     const companyResult = await pool.query(
-      `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1)`,
-      [company]
-    );
-
-    const companyId = companyResult.rows[0]?.id;
-
-    if (!companyId) {
-      return res.status(400).json({
-        status: "error",
-        message: `Company '${company}' not found`
-      });
-    }
-
-    // ✅ Check if invoice already exists for this company
-    const existingInvoice = await pool.query(
       `
       SELECT id
-      FROM ${DB_SCHEMA}.invoice_extractions
-      WHERE company_id = $1
-        AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
+      FROM ${DB_SCHEMA}.companies
+      WHERE TRIM(name) = TRIM($1)
       LIMIT 1
       `,
+      [company.trim()]
+    );
+
+    if (companyResult.rows.length === 0) {
+      return res.status(400).json({
+        status: "error",
+        message: `Company not found: ${company.trim()}`
+      });
+    }
+
+    const companyId = companyResult.rows[0].id;
+    console.log(`✅ Company found: ID ${companyId}`);
+
+    // ─────────────────────────────────────────────────────────────
+    // STEP 3: INSERT INVOICE WITH COMPANY_ID ✅
+    // ─────────────────────────────────────────────────────────────
+
+    console.log(`📝 Creating new purchase invoice: ${invoice_no}`);
+
+    const insertResult = await pool.query(
+      `
+      INSERT INTO ${DB_SCHEMA}.invoice_extractions
+      (
+        company_id,
+        company_name,
+        vendor_name,
+        gstin,
+        invoice_no,
+        invoice_date,
+        raw_json,
+        sync_status,
+        created_at,
+        updated_at
+      )
+      VALUES
+      (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        NOW(),
+        NOW()
+      )
+      RETURNING id
+      `,
       [
-        companyId,
-        (invoice_data.invoice_no || "").trim()
+        companyId,                    // $1 ✅ COMPANY_ID
+        company?.trim(),              // $2
+        customer_name || "",          // $3
+        gstin || "",                  // $4
+        invoice_no?.trim(),           // $5
+        invoice_date || "",           // $6
+        JSON.stringify(invoice_data), // $7 ✅ FULL invoice_data as JSON
+        "pending"                     // $8
       ]
     );
 
-    let invoiceId;
+    const invoiceId = insertResult.rows[0].id;
+    console.log(`✅ Purchase Invoice created: ID ${invoiceId}`);
 
-    if (existingInvoice.rows.length > 0) {
+    // ─────────────────────────────────────────────────────────────
+    // STEP 4: QUEUE THE JOB
+    // ─────────────────────────────────────────────────────────────
 
-      console.log(`Updating existing invoice: ${invoice_data.invoice_no}`);
+    const job = await purchaseQueue.add(
+      "push-invoice",
+      { invoiceId },
+      {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 5000
+        },
+        jobId: getPurchaseJobId(invoiceId)
+      }
+    );
 
-      const updateResult = await pool.query(
-        `
-        UPDATE ${DB_SCHEMA}.invoice_extractions
-        SET
-          vendor_name = $1,
-          gstin = $2,
-          invoice_date = $3,
-          godown_name = $4,
-          raw_json = $5,
-          sync_status = 'pending',
-          error_count = 0,
-          last_error = NULL,
-          error_message = NULL,
-          updated_at = NOW()
-        WHERE id = $6
-        RETURNING id
-        `,
-        [
-          invoice_data.vendor_name || "",
-          invoice_data.gstin || "",
-          invoice_data.invoice_date || "",
-          invoice_data.godown_name || "",
-          invoice_data,
-          existingInvoice.rows[0].id
-        ]
-      );
-
-      invoiceId = updateResult.rows[0].id;
-      console.log(`✅ Invoice updated: ${invoiceId}`);
-
-    } else {
-
-      console.log(`Creating new invoice: ${invoice_data.invoice_no}`);
-
-      const result = await pool.query(
-        `
-        INSERT INTO ${DB_SCHEMA}.invoice_extractions
-        (
-          company_id,
-          company_name,
-          vendor_name,
-          gstin,
-          invoice_no,
-          invoice_date,
-          godown_name,
-          raw_json,
-          sync_status,
-          error_count,
-          last_error,
-          created_at,
-          updated_at
-        )
-        VALUES
-        (
-          $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0, NULL, NOW(), NOW()
-        )
-        RETURNING id
-        `,
-        [
-          companyId,
-          company.trim(),
-          invoice_data.vendor_name || "",
-          invoice_data.gstin || "",
-          invoice_data.invoice_no || "",
-          invoice_data.invoice_date || "",
-          invoice_data.godown_name || "",
-          invoice_data
-        ]
-      );
-
-      invoiceId = result.rows[0].id;
-      console.log(`✅ New invoice created: ${invoiceId}`);
-    }
-
-    console.log(`✅ Invoice set to pending: ${invoiceId} (will be picked up by polling worker)`);
+    console.log(`📤 Purchase Invoice job queued: ${job.id}`);
 
     return res.status(200).json({
       status: "success",
-      message: existingInvoice.rows.length > 0
-        ? "Invoice updated and queued successfully"
-        : "Invoice created and queued successfully",
-      invoice_id: invoiceId,
-      company_id: companyId,
-      sync_status: "pending"
+      message: "Purchase Invoice queued for processing",
+      jobId: job.id,
+      invoiceId,
+      companyId
     });
 
-  } catch (err) {
-
-    console.log("");
-    console.log("====================================");
-    console.log("💥 INVOICE API ERROR");
-    console.log("====================================");
-    console.log(err);
-
+  } catch (error) {
+    console.error("Push invoice error:", error.message);
     return res.status(500).json({
       status: "error",
-      message: err.message
+      error: error.message
     });
-
   }
-
 });
 
 // ✅ GET API FOR INVOICES
