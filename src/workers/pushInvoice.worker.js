@@ -345,13 +345,37 @@ const processInvoiceJobs = async () => {
 
         /*
         ====================================
+        STEP 5.5: SANITIZE LINE ITEMS
+        Inject dynamic ledger mapping — all values come from
+        company_ledger_mappings, zero hardcoding
+        ====================================
+        */
+
+        const sanitizedInvoiceData = {
+          ...invoiceData,
+          purchase_ledger: mapping.invoice_parent_group,
+          cgst_ledger: mapping.cgst_ledger,
+          sgst_ledger: mapping.sgst_ledger,
+          igst_ledger: mapping.igst_ledger || "",
+          tds_ledger: mapping.tds_ledger || "",
+          cess_ledger: mapping.cess_ledger || "",
+          rounded_off_ledger: mapping.rounded_off_ledger,
+          line_items: items.map((item) => ({
+            ...item,
+            item_name: item.item_name?.trim() || item.name?.trim() || "",
+            ledger: mapping.invoice_parent_group,
+          })),
+        };
+
+        /*
+        ====================================
         STEP 6: GENERATE XML (stays in backend) ✅
         ====================================
         */
 
         const xml = await generateXml({
           company,
-          ...invoiceData
+          ...sanitizedInvoiceData
         });
 
         console.log("📤 XML Generated");
