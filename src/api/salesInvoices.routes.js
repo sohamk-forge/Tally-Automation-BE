@@ -11,28 +11,32 @@ import {
 
 const router = express.Router();
 
-router.post("/sales-invoices", async (req, res) => {
-
-console.log("BODY RECEIVED:");
-console.log(JSON.stringify(req.body, null, 2));
-
-try {
-
- const {
-  company,
-  invoice_data,
-  narration
-} = req.body;
-
-if (!company || !invoice_data) {
-  return res.status(400).json({
-    status: "error",
-    message: "company and invoice_data required"
-  });
+function safeNumber(value) {
+  const num = Number(value);
+  return isNaN(num) ? 0 : num;
 }
 
-// ✅ Log only after validation
-console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
+router.post("/sales-invoices", async (req, res) => {
+
+  console.log("BODY RECEIVED:");
+  console.log(JSON.stringify(req.body, null, 2));
+
+  try {
+
+    const {
+      company,
+      invoice_data,
+      narration
+    } = req.body;
+
+    if (!company || !invoice_data) {
+      return res.status(400).json({
+        status: "error",
+        message: "company and invoice_data required"
+      });
+    }
+
+    console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
 
     console.log("");
     console.log("====================================");
@@ -56,72 +60,106 @@ console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
 
     const cleanInvoiceData = JSON.parse(JSON.stringify(invoice_data));
 
-if (narration) {
-  cleanInvoiceData.narration = narration;
-}
+    if (narration) {
+      cleanInvoiceData.narration = narration;
+    }
 
-// ✅ ADD THIS BLOCK HERE
-// Recalculate GST only if GST values are not already present
-// Step 1: Taxable Amount (from frontend)
-const taxableAmount = Number(cleanInvoiceData.taxable_amount || 0);
+    // =========================================
+    // GST CALCULATION - SAME AS BULK SALES WORKER
+    // =========================================
 
-// Step 2: Calculate GST yourself — never trust frontend's grand_total
-const gstPercent = Number(cleanInvoiceData.gst_percent || 18);
-const gstAmount = Number(((taxableAmount * gstPercent) / 100).toFixed(2));
+    // Step 1: Taxable Amount - from line_items (same as bulk sales)
+    const taxableAmount = safeNumber(
+      cleanInvoiceData.taxable_amount ||
+      (cleanInvoiceData.line_items || []).reduce(
+        (sum, item) => sum + safeNumber(item.amount), 0
+      )
+    );
 
-// Step 3: State check
-const gstin =
-  cleanInvoiceData.customer_gstin ||
-  cleanInvoiceData.gstin ||
-  "";
+    // Step 2: GST Percent
+    const gstPercent = safeNumber(cleanInvoiceData.gst_percent || 18);
 
-const stateCode = String(gstin || "").trim().substring(0, 2);
+    // Step 3: Calculate GST Amount
+    const gstAmount = Number(
+      ((taxableAmount * gstPercent) / 100).toFixed(2)
+    );
 
-if (stateCode === "27" || !stateCode) {
-  // Maharashtra OR no GSTIN → local state
-  cleanInvoiceData.cgst_amount = Number((gstAmount / 2).toFixed(2));
-  cleanInvoiceData.sgst_amount = Number(
-    (gstAmount - cleanInvoiceData.cgst_amount).toFixed(2)
-  );
-  cleanInvoiceData.igst_amount = 0;
-} else {
-  cleanInvoiceData.cgst_amount = 0;
-  cleanInvoiceData.sgst_amount = 0;
-  cleanInvoiceData.igst_amount = gstAmount;
-}
+    // Step 4: State check (same logic as bulk sales worker)
+    const gstin = String(
+      cleanInvoiceData.customer_gstin ||
+      cleanInvoiceData.gstin ||
+      ""
+    ).trim();
 
-// Step 4: Subtract TDS
-// Step 4: Subtract TDS
-const tdsAmount = Math.abs(Number(cleanInvoiceData.tds_amount || 0));
-cleanInvoiceData.tds_amount = tdsAmount;
+    const stateCode = gstin.substring(0, 2);
 
-// Step 4.5: Round Off — taken as-is from frontend/user, no flip, no recalculation
-const roundOff = Number(cleanInvoiceData.round_off || 0);
-cleanInvoiceData.round_off = roundOff;
+    if (stateCode === "27") {
+      // Maharashtra → CGST + SGST
+      const halfRate = gstPercent / 2;
+      cleanInvoiceData.cgst_amount = Number(
+        ((taxableAmount * halfRate) / 100).toFixed(2)
+      );
+      cleanInvoiceData.sgst_amount = Number(
+        ((taxableAmount * halfRate) / 100).toFixed(2)
+      );
+      cleanInvoiceData.igst_amount = 0;
 
-// Step 5: Grand Total — calculated, not trusted from frontend
-cleanInvoiceData.grand_total = Number((
-  taxableAmount +
-  cleanInvoiceData.cgst_amount +
-  cleanInvoiceData.sgst_amount +
-  cleanInvoiceData.igst_amount -
-  tdsAmount +
-  roundOff
-).toFixed(2));
+    } else if (stateCode) {
+      // Other state → IGST
+      cleanInvoiceData.cgst_amount = 0;
+      cleanInvoiceData.sgst_amount = 0;
+      cleanInvoiceData.igst_amount = gstAmount;
 
-console.log("GST CALCULATION:", {
-  taxable: taxableAmount,
-  gst_percent: gstPercent,
-  gst: gstAmount,
-  cgst: cleanInvoiceData.cgst_amount,
-  sgst: cleanInvoiceData.sgst_amount,
-  igst: cleanInvoiceData.igst_amount,
-  tds: tdsAmount,
-  round_off: roundOff,
-  grand_total: cleanInvoiceData.grand_total
-});
+    } else {
+      // No GSTIN → default CGST + SGST (same as bulk)
+      const halfRate = gstPercent / 2;
+      cleanInvoiceData.cgst_amount = Number(
+        ((taxableAmount * halfRate) / 100).toFixed(2)
+      );
+      cleanInvoiceData.sgst_amount = Number(
+        ((taxableAmount * halfRate) / 100).toFixed(2)
+      );
+      cleanInvoiceData.igst_amount = 0;
+    }
 
-    // Check if invoice already exists for this company
+    // Step 5: TDS - abs() same as bulk
+    const tdsAmount = Math.abs(safeNumber(cleanInvoiceData.tds_amount || 0));
+    cleanInvoiceData.tds_amount = tdsAmount;
+
+    // Step 6: Round Off - taken as-is from frontend (same as bulk)
+    const roundOff = safeNumber(cleanInvoiceData.round_off || 0);
+    cleanInvoiceData.round_off = roundOff;
+
+    // Step 7: Taxable amount stored
+    cleanInvoiceData.taxable_amount = taxableAmount;
+    cleanInvoiceData.gst_percent = gstPercent;
+
+    // Step 8: Grand Total (same formula as bulk sales worker)
+    cleanInvoiceData.grand_total = Number((
+      taxableAmount +
+      cleanInvoiceData.cgst_amount +
+      cleanInvoiceData.sgst_amount +
+      cleanInvoiceData.igst_amount -
+      tdsAmount +
+      roundOff
+    ).toFixed(2));
+
+    console.log("GST CALCULATION:", {
+      taxable: taxableAmount,
+      gst_percent: gstPercent,
+      gst: gstAmount,
+      cgst: cleanInvoiceData.cgst_amount,
+      sgst: cleanInvoiceData.sgst_amount,
+      igst: cleanInvoiceData.igst_amount,
+      tds: tdsAmount,
+      round_off: roundOff,
+      grand_total: cleanInvoiceData.grand_total
+    });
+
+    // =========================================
+    // CHECK EXISTING OR INSERT NEW
+    // =========================================
+
     const existingInvoice = await pool.query(
       `
       SELECT id
@@ -144,20 +182,20 @@ console.log("GST CALCULATION:", {
 
       const updateResult = await pool.query(
         `
-      UPDATE app_test.sales_invoice_extractions
-SET
-  customer_name = $1,
-  gstin = $2,
-  invoice_date = $3,
-  godown_name = $4,
-  raw_json = $5,
-  sync_status = 'pending',
-  error_count = 0,
-  last_error = NULL,
-  error_message = NULL,
-  gst_details = NULL,
-  updated_at = NOW()
-WHERE id = $6
+        UPDATE app_test.sales_invoice_extractions
+        SET
+          customer_name = $1,
+          gstin = $2,
+          invoice_date = $3,
+          godown_name = $4,
+          raw_json = $5,
+          sync_status = 'pending',
+          error_count = 0,
+          last_error = NULL,
+          error_message = NULL,
+          gst_details = NULL,
+          updated_at = NOW()
+        WHERE id = $6
         RETURNING id
         `,
         [
@@ -208,8 +246,7 @@ WHERE id = $6
           invoice_data.gstin || "",
           invoice_data.invoice_no || "",
           invoice_data.invoice_date || "",
-         invoice_data.godown_name ?? "Main Location",
-
+          invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData
         ]
       );
@@ -218,30 +255,27 @@ WHERE id = $6
       console.log(`✅ New invoice created: ${invoiceId}`);
     }
 
-// ✅ Remove old job first so re-sent invoices always run fresh
-const jobId = getSalesJobId(invoiceId);
-const existingJob = await salesQueue.getJob(jobId);
-if (existingJob) {
-  await existingJob.remove();
-  console.log(`Old job removed: ${jobId}`);
-}
+    // ✅ Remove old job first so re-sent invoices always run fresh
+    const jobId = getSalesJobId(invoiceId);
+    const existingJob = await salesQueue.getJob(jobId);
+    if (existingJob) {
+      await existingJob.remove();
+      console.log(`Old job removed: ${jobId}`);
+    }
 
-const job = await salesQueue.add(
-  "sales-invoice",
-  {
-  salesId: invoiceId
-  
-},
-  { jobId: jobId }
-);
+    const job = await salesQueue.add(
+      "sales-invoice",
+      { salesId: invoiceId },
+      { jobId: jobId }
+    );
 
-console.log("Job ID:", job.id);
-console.log("Job Name:", job.name);
-console.log(`✅ Sales Invoice Queued: ${invoiceId}`);
+    console.log("Job ID:", job.id);
+    console.log("Job Name:", job.name);
+    console.log(`✅ Sales Invoice Queued: ${invoiceId}`);
 
     return res.status(200).json({
       status: "success",
-      message: existingInvoice.rows.length > 0 
+      message: existingInvoice.rows.length > 0
         ? "Sales invoice updated and queued successfully"
         : "Sales invoice created and queued successfully",
       invoice_id: invoiceId,
