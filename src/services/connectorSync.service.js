@@ -10,7 +10,7 @@ import pool from "../db/index.js";
 import { createConnectorJob } from "./connectorJob.service.js";
 
 const POLL_INTERVAL_MS = 500;    // check every 0.5 seconds ✅ FASTER!
-const TIMEOUT_MS = 120000;       // give up after 2 minutes
+const TIMEOUT_MS = 300000;      // give up after 2 minutes
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,30 +27,39 @@ function sleep(ms) {
 export async function sendToTallyViaConnector(
   companyId,
   xml,
-  syncType = "sync"
+  syncType = "sync",
+  userId = null  // ✅ NEW PARAMETER!
 ) {
 
-  // STEP 1: FIND CONNECTOR PAIRING FOR THIS COMPANY
-  const pairingResult = await pool.query(
-    `
-    SELECT cpt.user_id
-    FROM app_test.connector_pairing_tokens cpt
-    WHERE cpt.company_id = $1
-    LIMIT 1
-    `,
-    [companyId]
-  );
+  // STEP 1: GET USER_ID
+  let finalUserId = userId;
 
-  const pairing = pairingResult.rows[0];
-  if (!pairing) {
-    throw new Error(
-      `No connector pairing found for company ${companyId}`
+  if (!finalUserId) {
+    // Fallback: lookup from pairing token
+    const pairingResult = await pool.query(
+      `
+      SELECT cpt.user_id
+      FROM app_test.connector_pairing_tokens cpt
+      WHERE cpt.company_id = $1
+      AND cpt.is_used = true
+      ORDER BY cpt.created_at DESC
+      LIMIT 1
+      `,
+      [companyId]
     );
+
+    const pairing = pairingResult.rows[0];
+    if (!pairing) {
+      throw new Error(
+        `No connector pairing found for company ${companyId}`
+      );
+    }
+    finalUserId = pairing.user_id;
   }
 
   // STEP 2: CREATE CONNECTOR JOB
   const connectorJob = await createConnectorJob({
-    userId: pairing.user_id,
+    userId: finalUserId,  // ✅ Use correct user_id!
     jobType: syncType,
     requestXml: xml,
     payload: {

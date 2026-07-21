@@ -471,7 +471,7 @@ router.get("/health", async (req, res) => {
 
         const xml = getCompaniesXML();
 
-        await sendToTallyViaConnector(companyId, xml, "sync");
+        await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
         return res.status(200).json({
             status: "success",
@@ -606,7 +606,7 @@ for (const [name, item] of uniqueCompanies) {
       if (!companyId) throw new Error("Company not found");
 
       const xml = getLedgersXML(company);
-  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
   console.log("");
   console.log("=================================");
@@ -845,7 +845,7 @@ for (const [name, item] of uniqueCompanies) {
       
       const xml = getGroupSummaryBankXML(company);
     const responseXML =
-    await sendToTallyViaConnector(companyId, xml, "sync");
+    await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
   console.log(
     "RAW TALLY XML:",
@@ -1092,7 +1092,7 @@ for (const [name, item] of uniqueCompanies) {
         BUILD XML & FETCH FROM TALLY
       ===================================== */
       const xml = getLedgerVouchersXML(company, fromDate, toDate);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
 
       /* =====================================
@@ -1593,7 +1593,7 @@ for (const [name, item] of uniqueCompanies) {
       }
       
       const xml = getParentGroupsXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1674,7 +1674,7 @@ for (const [name, item] of uniqueCompanies) {
       
       const getGroupData = async (groupName) => {
         const xml = getGroupBalanceXML(company, groupName);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
         const parsed = await parseXML(responseXML);
         const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
         
@@ -1767,7 +1767,7 @@ for (const [name, item] of uniqueCompanies) {
       }
       
       const xml = getAllParentGroupDetailsXML(company, groupName);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -1899,7 +1899,7 @@ for (const [name, item] of uniqueCompanies) {
       /* =====================================
         SEND TO TALLY
       ===================================== */
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
       console.log("📥 RAW XML RESPONSE:");
       console.log(responseXML.substring(0, 500) + "...");
@@ -2194,7 +2194,7 @@ for (const [name, item] of uniqueCompanies) {
         /* =====================================
           TALLY RESPONSE
         ===================================== */
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
         console.log(responseXML);
 
         /* =====================================
@@ -2534,7 +2534,8 @@ await syncQueue.add(
     jobLogId,
     company,
     fromYear,
-    toYear
+    toYear,
+    userId: req.body.userId || null  // ✅ ADD THIS!
   },
   {
     ...SYNC_JOB_OPTIONS,
@@ -2702,14 +2703,15 @@ router.post(
          ADD TO BULLMQ
       ===================================== */
 
-      await syncQueue.add(
-        "manual-sync",
-        {
-          jobLogId,
-          company: company_name,
-          fromYear: from_year,
-          toYear: to_year
-        },
+  await syncQueue.add(
+  "manual-sync",
+  {
+    jobLogId,
+    company: company_name,
+    fromYear: from_year,
+    toYear: to_year,
+    userId  // ✅ ADD THIS! (already available from req.body)
+  },
         {
           ...SYNC_JOB_OPTIONS,
           jobId: getSyncJobId(jobLogId)
@@ -3025,7 +3027,7 @@ router.post(
       }
       
       const xml = getAllLedgersXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -3325,7 +3327,7 @@ router.post(
         }
 
         const xml = getPurchaseSalesLedgersXML(company);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
         const parsed = await parseXML(responseXML);
         
 
@@ -3527,7 +3529,7 @@ router.post(
       */
 
       const xml         = getGodownsXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed      = await parseXML(responseXML);
 
       console.log("=================================");
