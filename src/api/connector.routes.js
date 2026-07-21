@@ -3,6 +3,9 @@ import crypto from "crypto";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
+import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
+import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -62,7 +65,6 @@ router.post("/generate-key", verifySession(), async (req, res) => {
     });
   }
 });
-
 
 router.get("/current", verifySession(), async (req, res) => {
   try {
@@ -168,6 +170,123 @@ router.get("/api-keys", verifySession(), async (req, res) => {
       message: err.message
     });
 
+  }
+});
+
+/* =========================================
+   CONNECTOR JOB POLLING (API-key auth)
+   The connector polls for pending work and submits results back.
+========================================= */
+
+router.get("/jobs", verifyConnectorApiKey, async (req, res) => {
+  try {
+    const { userId } = req.connectorMachine;
+
+    const jobs = await claimPendingConnectorJobs({ userId });
+
+    return res.status(200).json({
+      status: "success",
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        jobType: job.job_type,
+        requestXml: job.request_xml,
+        payload: job.payload
+      }))
+    });
+
+  } catch (err) {
+    console.error("Claim Connector Jobs Error:", err);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
+router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { userId } = req.connectorMachine;
+    const { jobId, status, responseXml, result } = req.body;
+
+    if (!jobId || !status) {
+      client.release();
+      return res.status(400).json({
+        status: "error",
+        message: "jobId and status are required"
+      });
+    }
+
+    const jobResult = await client.query(
+      `
+      SELECT *
+      FROM ${DB_SCHEMA}.connector_jobs
+      WHERE id = $1
+        AND user_id = $2
+      LIMIT 1
+      `,
+      [jobId, userId]
+    );
+
+    const job = jobResult.rows[0];
+
+    if (!job) {
+      client.release();
+      return res.status(404).json({
+        status: "error",
+        message: "Job not found"
+      });
+    }
+
+    await client.query("BEGIN");
+
+    await processConnectorJobResult(client, {
+      id: job.id,
+      job_type: job.job_type,
+      status,
+      response_xml: responseXml || null,
+      result: result || null,
+      payload: job.payload
+    });
+
+    await client.query(
+      `
+      UPDATE ${DB_SCHEMA}.connector_jobs
+      SET
+        status = $1,
+        response_xml = $2,
+        result = $3,
+        error_message = $4,
+        completed_at = NOW(),
+        updated_at = NOW()
+      WHERE id = $5
+      `,
+      [
+        status,
+        responseXml || null,
+        result || null,
+        status === "failed" ? (result?.error || null) : null,
+        jobId
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      status: "success",
+      message: "Job result recorded"
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Connector Job Result Error:", err);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  } finally {
+    client.release();
   }
 });
 
