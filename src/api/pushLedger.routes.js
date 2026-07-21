@@ -6,6 +6,7 @@ import express from "express";
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import { ledgerQueue }
 from "../queues/ledger.queue.js";
 
@@ -57,7 +58,7 @@ router.post(
 
           `
           SELECT id
-          FROM app_test.companies
+          FROM ${DB_SCHEMA}.companies
           WHERE TRIM(name)=TRIM($1)
           LIMIT 1
           `,
@@ -78,7 +79,7 @@ router.post(
 
           `
           SELECT id
-          FROM app_test.push_ledger
+          FROM ${DB_SCHEMA}.push_ledger
           WHERE
             LOWER(TRIM(company_name))
               = LOWER(TRIM($1))
@@ -125,7 +126,7 @@ router.post(
         await pool.query(
 
           `
-          INSERT INTO app_test.push_ledger
+          INSERT INTO ${DB_SCHEMA}.push_ledger
           (
 
             company_id,

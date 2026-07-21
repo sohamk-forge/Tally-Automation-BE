@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   bulkSalesQueue,
   BULK_SALES_JOB_OPTIONS,
@@ -61,7 +62,7 @@ router.post(
 
       const companyResult = await pool.query(
         `SELECT id
-         FROM app_test.companies
+         FROM ${DB_SCHEMA}.companies
          WHERE TRIM(name) = TRIM($1)
          LIMIT 1`,
         [company]

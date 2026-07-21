@@ -2,6 +2,7 @@ import express from "express";
 import multer from "multer";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   bulkStockItemQueue,
   BULK_STOCK_ITEM_JOB_OPTIONS,
@@ -39,7 +40,7 @@ router.post(
       const companyResult = await pool.query(
         `
         SELECT id
-        FROM app_test.companies
+        FROM ${DB_SCHEMA}.companies
         WHERE TRIM(name)=TRIM($1)
         `,
         [company]

@@ -2,6 +2,7 @@ import "dotenv/config";
 import pool from "../src/db/index.js";
 import UserRoles from "supertokens-node/recipe/userroles/index.js";
 import { initSupertokens } from "../src/config/supertokens.js";
+import { DB_SCHEMA } from "../src/config/db.js";
 
 /**
  * One-off migration: imports every app_test.users row that still has a
@@ -33,7 +34,7 @@ const run = async () => {
   const { rows: users } = await pool.query(
     `
     SELECT id, email, password, role
-    FROM app_test.users
+    FROM ${DB_SCHEMA}.users
     WHERE supertokens_user_id IS NULL
       AND password IS NOT NULL
     ORDER BY id
@@ -63,7 +64,7 @@ const run = async () => {
 
       await pool.query(
         `
-        UPDATE app_test.users
+        UPDATE ${DB_SCHEMA}.users
         SET supertokens_user_id = $1,
             password = NULL
         WHERE id = $2

@@ -1,5 +1,6 @@
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 export async function createAuditLog({
 
   action,
@@ -14,7 +15,7 @@ export async function createAuditLog({
     await pool.query(
 
       `
-      INSERT INTO app_test.audit_logs (
+      INSERT INTO ${DB_SCHEMA}.audit_logs (
 
         action,
         entity,

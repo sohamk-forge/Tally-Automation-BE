@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   import express from "express";
   import pool from "../db/index.js";
   import { sendToTally } from "../services/tallyClient.js";
@@ -55,21 +56,21 @@
 
   const allowedTables = [
 
-    "app_test.companies",
-    "app_test.ledgers",
-    "app_test.sundry_creditors",
-    "app_test.sundry_debtors",
-    "app_test.bank_accounts",
-    "app_test.vouchers",
-    "app_test.parent_groups",
-    "app_test.group_balances",
-    "app_test.all_parent_groups",
-    "app_test.profit_loss",
-    "app_test.stock_group_summary",
-    "app_test.sales_items",
-    "app_test.units",
-    "app_test.all_ledger_details",
-    "app_test.godown_details" 
+    `${DB_SCHEMA}.companies`,
+    `${DB_SCHEMA}.ledgers`,
+    `${DB_SCHEMA}.sundry_creditors`,
+    `${DB_SCHEMA}.sundry_debtors`,
+    `${DB_SCHEMA}.bank_accounts`,
+    `${DB_SCHEMA}.vouchers`,
+    `${DB_SCHEMA}.parent_groups`,
+    `${DB_SCHEMA}.group_balances`,
+    `${DB_SCHEMA}.all_parent_groups`,
+    `${DB_SCHEMA}.profit_loss`,
+    `${DB_SCHEMA}.stock_group_summary`,
+    `${DB_SCHEMA}.sales_items`,
+    `${DB_SCHEMA}.units`,
+    `${DB_SCHEMA}.all_ledger_details`,
+    `${DB_SCHEMA}.godown_details` 
 
   ];
   /* ===================================================
@@ -108,7 +109,7 @@
   async function getCompanyId(company, client = null) {
     const dbClient = client || pool;
     const result = await dbClient.query(
-      `SELECT id FROM app_test.companies WHERE name = $1`,
+      `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
       [company]
     );
     return result.rows[0]?.id || null;
@@ -212,13 +213,13 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   
   // Generate stable fallback GUID if missing
   let finalGuid = guid;
-  if (!finalGuid && tableName !== 'app_test.profit_loss') {
+  if (!finalGuid && tableName !== `${DB_SCHEMA}.profit_loss`) {
     const companyIndex = columns.indexOf('company_name');
     const nameIndex = columns.indexOf('name') !== -1 ? columns.indexOf('name') : 
                       (columns.indexOf('ledger_name') !== -1 ? columns.indexOf('ledger_name') : -1);
     const uniqueValue = nameIndex !== -1 && data[nameIndex] ? data[nameIndex] : 
                       (columns.indexOf('group_name') !== -1 ? data[columns.indexOf('group_name')] : 'unknown');
-    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace('app_test.', ''));
+    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace(`${DB_SCHEMA}.`, ''));
     console.log(`⚠️ Generated stable fallback GUID for ${tableName}: ${finalGuid}`);
   }
   
@@ -552,7 +553,7 @@ for (const [name, item] of uniqueCompanies) {
         const financial_year_end = item?.endingAt ? String(item.endingAt).slice(0, 4) : null;
 
         const result = await upsertRecord(
-          "app_test.companies", guid, masterId, alterId,
+          `${DB_SCHEMA}.companies`, guid, masterId, alterId,
           [name, financial_year_start, financial_year_end],
           ["name", "financial_year_start", "financial_year_end"],
           client
@@ -756,7 +757,7 @@ for (const [name, item] of uniqueCompanies) {
 
           // ✅ Only pass columns your table ACTUALLY has
           const result = await upsertRecord(
-            "app_test.ledgers",
+            `${DB_SCHEMA}.ledgers`,
             guid,
             null,
             null,
@@ -928,7 +929,7 @@ for (const [name, item] of uniqueCompanies) {
       : "Cr";
         
         const result = await upsertRecord(
-          "app_test.bank_accounts", guid, masterId, alterId,
+          `${DB_SCHEMA}.bank_accounts`, guid, masterId, alterId,
           [
             companyId,
             company,
@@ -1197,7 +1198,7 @@ for (const [name, item] of uniqueCompanies) {
             CHECK IF VOUCHER EXISTS (WITHOUT TRANSACTION)
           ================================ */
           const existingVoucher = await client.query(
-            `SELECT id FROM app_test.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
+            `SELECT id FROM ${DB_SCHEMA}.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
             [companyId, voucherNumber, voucherDate]
           );
 
@@ -1205,7 +1206,7 @@ for (const [name, item] of uniqueCompanies) {
 
     await client.query(
       `
-      UPDATE app_test.vouchers
+      UPDATE ${DB_SCHEMA}.vouchers
       SET
         voucher_type = $1,
         party_ledger_name = $2,
@@ -1281,7 +1282,7 @@ for (const [name, item] of uniqueCompanies) {
     await voucherClient.query(
 
       `
-      INSERT INTO app_test.vouchers (
+      INSERT INTO ${DB_SCHEMA}.vouchers (
 
         guid,
         master_id,
@@ -1379,7 +1380,7 @@ for (const [name, item] of uniqueCompanies) {
         await voucherClient.query(
 
           `
-          INSERT INTO app_test.sales_items (
+          INSERT INTO ${DB_SCHEMA}.sales_items (
 
             company_id,
             company_name,
@@ -1617,7 +1618,7 @@ for (const [name, item] of uniqueCompanies) {
         const alterId = group?.ALTERID || group?.$?.ALTERID || null;
         
         const result = await upsertRecord(
-          "app_test.parent_groups", guid, masterId, alterId,
+          `${DB_SCHEMA}.parent_groups`, guid, masterId, alterId,
           [companyId, company, groupName],
           ["company_id", "company_name", "group_name"],
           client
@@ -1698,7 +1699,7 @@ for (const [name, item] of uniqueCompanies) {
       let inserted = 0, updated = 0, ignored = 0;
       
       const debtorsResult = await upsertRecord(
-        "app_test.group_balances", debtors.guid, debtors.masterId, debtors.alterId,
+        `${DB_SCHEMA}.group_balances`, debtors.guid, debtors.masterId, debtors.alterId,
         [companyId, company, debtors.group_name, debtors.parent_group, debtors.opening_balance, debtors.closing_balance],
         ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
         client
@@ -1709,7 +1710,7 @@ for (const [name, item] of uniqueCompanies) {
       else ignored++;
       
       const creditorsResult = await upsertRecord(
-        "app_test.group_balances", creditors.guid, creditors.masterId, creditors.alterId,
+        `${DB_SCHEMA}.group_balances`, creditors.guid, creditors.masterId, creditors.alterId,
         [companyId, company, creditors.group_name, creditors.parent_group, creditors.opening_balance, creditors.closing_balance],
         ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
         client
@@ -1787,7 +1788,7 @@ for (const [name, item] of uniqueCompanies) {
         const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
         
         const result = await upsertRecord(
-          "app_test.all_parent_groups", guid, masterId, alterId,
+          `${DB_SCHEMA}.all_parent_groups`, guid, masterId, alterId,
           [
             companyId,
             company,
@@ -1879,7 +1880,7 @@ for (const [name, item] of uniqueCompanies) {
         GET COMPANY ID
       ===================================== */
       const companyResult = await client.query(
-        `SELECT id FROM app_test.companies WHERE name = $1`,
+        `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
         [company]
       );
 
@@ -2059,7 +2060,7 @@ for (const [name, item] of uniqueCompanies) {
       const alterId = 1;
 
       const result = await upsertRecord(
-        "app_test.profit_loss",
+        `${DB_SCHEMA}.profit_loss`,
         guid,
         null,
         alterId,
@@ -2280,7 +2281,7 @@ for (const [name, item] of uniqueCompanies) {
           const existing = await client.query(
             `
             SELECT id
-            FROM app_test.stock_group_summary
+            FROM ${DB_SCHEMA}.stock_group_summary
             WHERE company_name = $1
             AND item_name = $2
             `,
@@ -2293,7 +2294,7 @@ for (const [name, item] of uniqueCompanies) {
           if (existing.rows.length > 0) {
             await client.query(
               `
-              UPDATE app_test.stock_group_summary
+              UPDATE ${DB_SCHEMA}.stock_group_summary
               SET
                 company_id = $1,
                 group_name = $2,
@@ -2315,7 +2316,7 @@ for (const [name, item] of uniqueCompanies) {
           ================================= */
           await client.query(
             `
-            INSERT INTO app_test.stock_group_summary (
+            INSERT INTO ${DB_SCHEMA}.stock_group_summary (
               company_id,
               company_name,
               group_name,
@@ -2473,7 +2474,7 @@ if (!company) {
           await pool.query(
 
             `
-            INSERT INTO app_test.companies
+            INSERT INTO ${DB_SCHEMA}.companies
             (
               name
             )
@@ -2503,7 +2504,7 @@ if (!company) {
             await pool.query(
 
               `
-              INSERT INTO app_test.job_logs
+              INSERT INTO ${DB_SCHEMA}.job_logs
               (
                 job_type,
                 status,
@@ -2614,7 +2615,7 @@ router.post(
             company_name,
             from_year,
             to_year
-        FROM app_test.connector_machines
+        FROM ${DB_SCHEMA}.connector_machines
         WHERE user_id = $1
           AND tally_connected = true
         ORDER BY updated_at DESC
@@ -2653,7 +2654,7 @@ router.post(
 
       await pool.query(
         `
-        INSERT INTO app_test.companies
+        INSERT INTO ${DB_SCHEMA}.companies
         (
             name
         )
@@ -2679,7 +2680,7 @@ router.post(
 
       const result = await pool.query(
         `
-        INSERT INTO app_test.job_logs
+        INSERT INTO ${DB_SCHEMA}.job_logs
         (
             job_type,
             status,
@@ -2883,7 +2884,7 @@ router.post(
           const result =
             await upsertRecord(
 
-              "app_test.units",
+              `${DB_SCHEMA}.units`,
 
               guid,
 
@@ -3219,7 +3220,7 @@ router.post(
         
         // Use upsertRecord like working APIs
         const result = await upsertRecord(
-          "app_test.all_ledger_details",
+          `${DB_SCHEMA}.all_ledger_details`,
           guid,
           masterId,
           alterId,
@@ -3401,7 +3402,7 @@ router.post(
           const existing = await client.query(
             `
             SELECT id
-            FROM app_test.company_purchase_sales_ledgers
+            FROM ${DB_SCHEMA}.company_purchase_sales_ledgers
             WHERE company_id = $1
             AND ledger_name = $2
             `,
@@ -3415,7 +3416,7 @@ router.post(
 
             await client.query(
               `
-              UPDATE app_test.company_purchase_sales_ledgers
+              UPDATE ${DB_SCHEMA}.company_purchase_sales_ledgers
               SET
                 parent_group = $1,
                 ledger_type  = $2,
@@ -3435,7 +3436,7 @@ router.post(
             ================================ */
             await client.query(
               `
-              INSERT INTO app_test.company_purchase_sales_ledgers
+              INSERT INTO ${DB_SCHEMA}.company_purchase_sales_ledgers
               (
                 company_id,
                 ledger_name,
@@ -3573,7 +3574,7 @@ router.post(
 
         const existing = await client.query(
           `SELECT id
-          FROM app_test.godown_details
+          FROM ${DB_SCHEMA}.godown_details
           WHERE company_id = $1
             AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
           LIMIT 1`,
@@ -3583,7 +3584,7 @@ router.post(
         if (existing.rows.length) {
 
           await client.query(
-            `UPDATE app_test.godown_details
+            `UPDATE ${DB_SCHEMA}.godown_details
             SET updated_at = NOW()
             WHERE id = $1`,
             [existing.rows[0].id]
@@ -3595,7 +3596,7 @@ router.post(
         } else {
 
           await client.query(
-            `INSERT INTO app_test.godown_details
+            `INSERT INTO ${DB_SCHEMA}.godown_details
             (company_id, company_name, godown_name, created_at, updated_at)
             VALUES ($1, $2, $3, NOW(), NOW())`,
             [companyId, company, godownName]
@@ -3673,8 +3674,8 @@ router.get("/job-status", async (req, res) => {
           jl.error_message,
           c.id as company_id,
           c.name as company_name
-      FROM app_test.job_logs jl
-      JOIN app_test.companies c
+      FROM ${DB_SCHEMA}.job_logs jl
+      JOIN ${DB_SCHEMA}.companies c
         ON c.name = jl.payload->>'company'
       WHERE c.id = $1
       ORDER BY jl.id DESC
@@ -3721,7 +3722,7 @@ router.get("/status/:jobId", async (req, res) => {
         error_message,
         started_at,
         completed_at
-      FROM app_test.job_logs
+      FROM ${DB_SCHEMA}.job_logs
       WHERE id = $1
       `,
       [jobId]

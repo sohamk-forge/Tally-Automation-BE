@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   // =========================================
   // src/api/pushBank.routes.js
   // =========================================
@@ -107,7 +108,7 @@
             `
             SELECT id
 
-            FROM app_test.push_bank
+            FROM ${DB_SCHEMA}.push_bank
 
             WHERE LOWER(TRIM(ledger_name))
             = LOWER(TRIM($1))
@@ -147,7 +148,7 @@
         const insertResult = await pool.query(
 
           `
-          INSERT INTO app_test.push_bank
+          INSERT INTO ${DB_SCHEMA}.push_bank
           (
 
             company_name,

@@ -5,6 +5,7 @@ import pool from "../db/index.js";
 
 import { sendToTally } from "../services/tallyClient.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   getStockItemOpeningXML
 } from "../services/pushXmlBuilder.js";
@@ -63,7 +64,7 @@ async function enqueuePendingAlterJobs() {
     await pool.query(
       `
       SELECT id
-      FROM app_test.push_stock_item
+      FROM ${DB_SCHEMA}.push_stock_item
       WHERE
         status = 'success'
         AND (
@@ -136,7 +137,7 @@ const worker = new Worker(
       await pool.query(
         `
         SELECT *
-        FROM app_test.push_stock_item
+        FROM ${DB_SCHEMA}.push_stock_item
         WHERE id = $1
         `,
         [stockItemId]
@@ -243,7 +244,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_stock_item
+        UPDATE ${DB_SCHEMA}.push_stock_item
         SET
           updated_at = NOW()
         WHERE id = $1

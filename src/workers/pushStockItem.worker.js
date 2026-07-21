@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
 import { getStockItemCreateXML } from "../services/pushXmlBuilder.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   stockItemQueue,
   STOCK_ITEM_JOB_OPTIONS,
@@ -49,7 +50,7 @@ function isTemporaryStockItemError(error) {
 async function markStalePendingAsFailed() {
   const result = await pool.query(
     `
-    UPDATE app_test.push_stock_item
+    UPDATE ${DB_SCHEMA}.push_stock_item
     SET
       status = 'failed',
       last_error = 'Upload interrupted / Worker restarted',
@@ -69,7 +70,7 @@ async function enqueuePendingStockItemJobs() {
   const result = await pool.query(
     `
     SELECT id
-    FROM app_test.push_stock_item
+    FROM ${DB_SCHEMA}.push_stock_item
     WHERE status = 'pending'
     ORDER BY id ASC
     `
@@ -116,7 +117,7 @@ const worker = new Worker(
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.push_stock_item
+      FROM ${DB_SCHEMA}.push_stock_item
       WHERE id = $1
       `,
       [stockItemId]
@@ -188,7 +189,7 @@ const worker = new Worker(
 
         await pool.query(
           `
-          UPDATE app_test.push_stock_item
+          UPDATE ${DB_SCHEMA}.push_stock_item
           SET
             status = 'failed',
             tally_response = $1,
@@ -212,7 +213,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_stock_item
+        UPDATE ${DB_SCHEMA}.push_stock_item
         SET
           status = 'success',
           tally_response = $1,
@@ -247,7 +248,7 @@ const worker = new Worker(
       if (isTemporaryStockItemError(error)) {
         await pool.query(
           `
-          UPDATE app_test.push_stock_item
+          UPDATE ${DB_SCHEMA}.push_stock_item
           SET
             status = 'pending',
             error_count = COALESCE(error_count, 0) + 1,
@@ -266,7 +267,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_stock_item
+        UPDATE ${DB_SCHEMA}.push_stock_item
         SET
           status = 'failed',
           error_count = COALESCE(error_count, 0) + 1,
@@ -320,7 +321,7 @@ worker.on("failed", async (job, error) => {
 
     await pool.query(
       `
-      UPDATE app_test.push_stock_item
+      UPDATE ${DB_SCHEMA}.push_stock_item
       SET
         status = 'failed',
         last_error = $1,

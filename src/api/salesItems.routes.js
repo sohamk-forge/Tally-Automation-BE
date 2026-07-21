@@ -2,6 +2,7 @@ import express from "express";
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ===================================================
@@ -65,7 +66,7 @@ router.get(
 
             created_at
 
-        FROM app_test.sales_items
+        FROM ${DB_SCHEMA}.sales_items
 
           WHERE company_name = $1
 

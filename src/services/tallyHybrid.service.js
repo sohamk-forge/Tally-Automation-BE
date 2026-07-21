@@ -3,6 +3,7 @@ import xml2js from "xml2js";
 import pool from "../db/index.js";
 import { redisConnection as redis } from "../config/redis.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const CACHE_TTL = 60;
 
 /**
@@ -31,7 +32,7 @@ export async function getHybridBalance({
     /* ===================== 2. DB ===================== */
     const dbResult = await pool.query(
       `SELECT closing_balance, updated_at
-       FROM app_test.account_closing_balances
+       FROM ${DB_SCHEMA}.account_closing_balances
        WHERE company_name = $1 AND balance_type = $2
        LIMIT 1`,
       [company, type]
@@ -93,7 +94,7 @@ export async function getHybridBalance({
 
     /* ===================== 4. UPSERT DB ===================== */
     await pool.query(
-      `INSERT INTO app_test.account_closing_balances
+      `INSERT INTO ${DB_SCHEMA}.account_closing_balances
        (company_name, balance_type, closing_balance, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (company_name, balance_type)

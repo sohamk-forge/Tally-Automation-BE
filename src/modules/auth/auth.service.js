@@ -3,6 +3,7 @@ import { z } from "zod";
 import pool from "../../db/index.js";
 import jwt from "jsonwebtoken";
 
+import { DB_SCHEMA } from "../../config/db.js";
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
@@ -25,7 +26,7 @@ const register = async (data) => {
  const existingUserResult = await pool.query(
   `
   SELECT id
-  FROM app_test.users
+  FROM ${DB_SCHEMA}.users
   WHERE email = $1
   LIMIT 1
   `,
@@ -43,7 +44,7 @@ const register = async (data) => {
   // Save user
   const insertResult = await pool.query(
     `
-    INSERT INTO app_test.users
+    INSERT INTO ${DB_SCHEMA}.users
     (
       email,
       password,
@@ -95,7 +96,7 @@ const login = async (data) => {
 const userResult = await pool.query(
   `
   SELECT *
-  FROM app_test.users
+  FROM ${DB_SCHEMA}.users
   WHERE email = $1
   LIMIT 1
   `,

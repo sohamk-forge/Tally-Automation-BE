@@ -4,6 +4,7 @@
 
 import express from "express";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   salesQueue,
   getSalesJobId
@@ -41,7 +42,7 @@ console.log("Sales Ledger From Frontend:", invoice_data.sales_ledger);
 
     // ✅ LOOKUP company_id from company_name
     const companyResult = await pool.query(
-      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
+      `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1)`,
       [company]
     );
 
@@ -125,7 +126,7 @@ console.log("GST CALCULATION:", {
     const existingInvoice = await pool.query(
       `
       SELECT id
-      FROM app_test.sales_invoice_extractions
+      FROM ${DB_SCHEMA}.sales_invoice_extractions
       WHERE company_id = $1
         AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
       LIMIT 1
@@ -144,7 +145,7 @@ console.log("GST CALCULATION:", {
 
       const updateResult = await pool.query(
         `
-      UPDATE app_test.sales_invoice_extractions
+      UPDATE ${DB_SCHEMA}.sales_invoice_extractions
 SET
   customer_name = $1,
   gstin = $2,
@@ -179,7 +180,7 @@ WHERE id = $6
 
       const result = await pool.query(
         `
-        INSERT INTO app_test.sales_invoice_extractions
+        INSERT INTO ${DB_SCHEMA}.sales_invoice_extractions
         (
           company_id,
           company_name,
@@ -280,7 +281,7 @@ router.get("/sales-invoices", async (req, res) => {
 
     let query = `
       SELECT *
-      FROM app_test.sales_invoice_extractions
+      FROM ${DB_SCHEMA}.sales_invoice_extractions
       WHERE company_id = $1
     `;
     const params = [company_id];

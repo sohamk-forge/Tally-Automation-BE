@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ===================================================
@@ -36,7 +37,7 @@ router.get(
             ledger_type,
             created_at,
             updated_at
-          FROM app_test.company_purchase_sales_ledgers
+          FROM ${DB_SCHEMA}.company_purchase_sales_ledgers
           WHERE company_id = $1
           ORDER BY ledger_name
           `,

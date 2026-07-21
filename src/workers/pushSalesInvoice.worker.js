@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   import { Worker } from "bullmq";
   import { redisConnection } from "../config/redis.js";
   import { SALES_QUEUE_NAME, getSalesJobId } from "../queues/sales.queue.js";
@@ -41,7 +42,7 @@
   } = job.data;
 
       const result = await pool.query(
-        `SELECT * FROM app_test.sales_invoice_extractions WHERE id = $1`,
+        `SELECT * FROM ${DB_SCHEMA}.sales_invoice_extractions WHERE id = $1`,
         [salesId]
       );
 
@@ -69,7 +70,7 @@
 
   const companyResult = await pool.query(
     `SELECT id
-    FROM app_test.companies
+    FROM ${DB_SCHEMA}.companies
     WHERE TRIM(name) = TRIM($1)
     LIMIT 1`,
     [company]
@@ -88,13 +89,13 @@
         */
 
         const mappingResult = await pool.query(
-          `SELECT * FROM app_test.company_sales_ledger_mappings WHERE company_id = $1 LIMIT 1`,
+          `SELECT * FROM ${DB_SCHEMA}.company_sales_ledger_mappings WHERE company_id = $1 LIMIT 1`,
           [companyId]
         );
 
         if (!mappingResult.rows.length) {
           await pool.query(
-            `UPDATE app_test.sales_invoice_extractions
+            `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
             SET sync_status = 'failed',
                 error_message = 'Sales ledger mapping not configured for this company. Please save mapping first.',
                 updated_at = NOW()
@@ -141,7 +142,7 @@ const salesLedger =
 
         for (const { field, value } of ledgersToValidate) {
           const checkResult = await pool.query(
-            `SELECT 1 FROM app_test.all_ledger_details
+            `SELECT 1 FROM ${DB_SCHEMA}.all_ledger_details
             WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) LIMIT 1`,
             [companyId, value]
           );
@@ -156,7 +157,7 @@ const salesLedger =
 
         if (mappingLedgerMissing) {
           await pool.query(
-            `UPDATE app_test.sales_invoice_extractions
+            `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
             SET sync_status = 'failed', error_message = $1, updated_at = NOW()
             WHERE id = $2`,
             [
@@ -181,13 +182,13 @@ const salesLedger =
   SELECT 1
   FROM (
       SELECT LOWER(TRIM(ledger_name)) AS ledger_name
-      FROM app_test.all_ledger_details
+      FROM ${DB_SCHEMA}.all_ledger_details
       WHERE company_id = $1
 
       UNION
 
       SELECT LOWER(TRIM(ledger_name))
-      FROM app_test.push_ledger
+      FROM ${DB_SCHEMA}.push_ledger
       WHERE company_id = $1
         AND status = 'success'
   ) t
@@ -214,7 +215,7 @@ const salesLedger =
 
           await pool.query(
             `
-            UPDATE app_test.sales_invoice_extractions
+            UPDATE ${DB_SCHEMA}.sales_invoice_extractions
             SET
               sync_status = 'failed',
               error_message = $1,
@@ -260,13 +261,13 @@ const salesLedger =
   SELECT 1
   FROM (
       SELECT LOWER(TRIM(item_name)) AS item_name
-      FROM app_test.stock_group_summary
+      FROM ${DB_SCHEMA}.stock_group_summary
       WHERE company_id = $1
 
       UNION
 
       SELECT LOWER(TRIM(item_name))
-      FROM app_test.push_stock_item
+      FROM ${DB_SCHEMA}.push_stock_item
       WHERE company_id = $1
         AND status = 'success'
   ) t
@@ -294,7 +295,7 @@ const salesLedger =
 const stockMasterResult = await pool.query(
   `
   SELECT *
-  FROM app_test.stock_group_summary
+  FROM ${DB_SCHEMA}.stock_group_summary
   WHERE company_id = $1
     AND LOWER(TRIM(item_name)) = LOWER(TRIM($2))
   LIMIT 1
@@ -305,7 +306,7 @@ const stockDetails =
   stockMasterResult.rows[0] || missingStock;
          await pool.query(
   `
-  UPDATE app_test.sales_invoice_extractions
+  UPDATE ${DB_SCHEMA}.sales_invoice_extractions
   SET
     sync_status = 'failed',
     error_message = $1,
@@ -410,7 +411,7 @@ const stockDetails =
           const errorMessage = lineError || "Tally push failed";
 
           await pool.query(
-            `UPDATE app_test.sales_invoice_extractions
+            `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
             SET sync_status = 'failed', tally_response = $1, error_message = $2, updated_at = NOW()
             WHERE id = $3`,
             [tallyResponse, errorMessage, salesId]
@@ -427,7 +428,7 @@ const stockDetails =
         */
 
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
           SET sync_status = 'completed', tally_response = $1, error_message = NULL, updated_at = NOW(), synced_at = NOW()
           WHERE id = $2`,
           [tallyResponse, salesId]
@@ -442,7 +443,7 @@ const stockDetails =
         // ONLY retry for Tally connection issues
         if (isTemporarySalesError(error)) {
           await pool.query(
-            `UPDATE app_test.sales_invoice_extractions
+            `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
             SET sync_status = 'pending',
                 error_message = NULL,
                 updated_at = NOW()
@@ -454,7 +455,7 @@ const stockDetails =
 
         // Permanent error - mark as failed
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
           SET sync_status = 'failed', error_message = $1, updated_at = NOW()
           WHERE id = $2`,
           [error.message, salesId]
@@ -490,7 +491,7 @@ const stockDetails =
     try {
       const { salesId } = job.data;
       await pool.query(
-        `UPDATE app_test.sales_invoice_extractions
+        `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
         SET sync_status = 'failed', error_message = $1, updated_at = NOW()
         WHERE id = $2`,
         [error.message, salesId]

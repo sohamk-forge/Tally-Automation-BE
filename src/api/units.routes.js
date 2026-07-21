@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ===================================================
@@ -67,7 +68,7 @@ router.get(
 
             updated_at
 
-          FROM app_test.units
+          FROM ${DB_SCHEMA}.units
 
           WHERE company_id = $1
 

@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 router.get("/closing-balance", async (req, res) => {
@@ -16,7 +17,7 @@ router.get("/closing-balance", async (req, res) => {
 
     const result = await pool.query(
       `SELECT closing_balance, closing_balance_type
-         FROM app_test.all_ledger_details
+         FROM ${DB_SCHEMA}.all_ledger_details
         WHERE LOWER(company_name) = LOWER($1)
           AND LOWER(parent_group) LIKE '%stock-in-hand%'`,
       [company]

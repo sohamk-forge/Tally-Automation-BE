@@ -6,6 +6,7 @@ import path from "path";
 import net from "net";
 
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   voucherQueue,
   VOUCHER_QUEUE_NAME,
@@ -256,7 +257,7 @@ on every retry attempt, so they never go stale here.
 
 async function markStalePendingAsFailed() {
   const result = await pool.query(
-    `UPDATE app_test.contra_vouchers
+    `UPDATE ${DB_SCHEMA}.contra_vouchers
      SET
        status = 'FAILED',
        tally_response = 'Upload interrupted / Worker restarted',
@@ -279,7 +280,7 @@ poller whenever Tally transitions from offline → online.
 
 async function enqueuePendingVoucherJobs() {
   const result = await pool.query(
-    `SELECT id FROM app_test.contra_vouchers
+    `SELECT id FROM ${DB_SCHEMA}.contra_vouchers
      WHERE status = 'PENDING'
      ORDER BY id ASC`
   );
@@ -306,7 +307,7 @@ const worker = new Worker(
     const { voucherId } = job.data;
 
     const result = await pool.query(
-      `SELECT * FROM app_test.contra_vouchers WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`,
       [voucherId]
     );
 
@@ -328,7 +329,7 @@ const worker = new Worker(
     const online = await isTallyOnline();
     if (!online) {
       await pool.query(
-        `UPDATE app_test.contra_vouchers
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
          SET status = 'PENDING', tally_response = 'Tally is not open', updated_at = NOW()
          WHERE id = $1`,
         [voucherId]
@@ -362,7 +363,7 @@ const worker = new Worker(
 
       if (success) {
         await pool.query(
-          `UPDATE app_test.contra_vouchers
+          `UPDATE ${DB_SCHEMA}.contra_vouchers
            SET status = 'SUCCESS', tally_response = $1, updated_at = NOW()
            WHERE id = $2`,
           [tallyResponse, voucherId]
@@ -373,7 +374,7 @@ const worker = new Worker(
 
       // Tally rejected (non-retriable business error)
       await pool.query(
-        `UPDATE app_test.contra_vouchers
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
          SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
          WHERE id = $2`,
         [tallyResponse, voucherId]
@@ -384,7 +385,7 @@ const worker = new Worker(
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
         await pool.query(
-          `UPDATE app_test.contra_vouchers
+          `UPDATE ${DB_SCHEMA}.contra_vouchers
            SET status = 'PENDING', tally_response = $1, updated_at = NOW()
            WHERE id = $2`,
           [error.message, voucherId]
@@ -394,7 +395,7 @@ const worker = new Worker(
 
       // Permanent (real) error → fail
       await pool.query(
-        `UPDATE app_test.contra_vouchers
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
          SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
          WHERE id = $2`,
         [error.message, voucherId]
@@ -437,7 +438,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { voucherId } = job.data;
     await pool.query(
-      `UPDATE app_test.contra_vouchers
+      `UPDATE ${DB_SCHEMA}.contra_vouchers
        SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
        WHERE id = $2`,
       [error.message, voucherId]

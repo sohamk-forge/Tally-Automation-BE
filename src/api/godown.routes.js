@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =================================
@@ -17,7 +18,7 @@ router.get("/godowns", async (req, res) => {
 
     const result = await pool.query(
       `SELECT id, godown_name, created_at, updated_at
-       FROM app_test.godown_details
+       FROM ${DB_SCHEMA}.godown_details
        WHERE company_id = $1
        ORDER BY godown_name ASC`,
       [company_id]
@@ -50,7 +51,7 @@ router.get("/godowns/find", async (req, res) => {
 
     const result = await pool.query(
       `SELECT id, godown_name, created_at, updated_at
-       FROM app_test.godown_details
+       FROM ${DB_SCHEMA}.godown_details
        WHERE company_id = $1
          AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
        LIMIT 1`,

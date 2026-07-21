@@ -10,6 +10,7 @@
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +100,7 @@ function computeTotals(computedItems) {
 async function getOrInitSettings(client, companyId) {
   // Try to get existing row with lock
   const settingsRes = await client.query(
-    `SELECT * FROM app_test.challan_settings
+    `SELECT * FROM ${DB_SCHEMA}.challan_settings
      WHERE company_id = $1
      FOR UPDATE`,
     [companyId]
@@ -109,7 +110,7 @@ async function getOrInitSettings(client, companyId) {
     // Settings exist — but check if challans table was cleared
     // If last_number > 0 but no challans exist, reset counter to 0
     const challanCount = await client.query(
-      `SELECT COUNT(*) FROM app_test.challans WHERE company_id = $1`,
+      `SELECT COUNT(*) FROM ${DB_SCHEMA}.challans WHERE company_id = $1`,
       [companyId]
     );
 
@@ -118,7 +119,7 @@ async function getOrInitSettings(client, companyId) {
     if (count === 0 && Number(settingsRes.rows[0].last_number) > 0) {
       // DB was cleared — reset counter back to 0 so next challan = 0001
       const resetRes = await client.query(
-        `UPDATE app_test.challan_settings
+        `UPDATE ${DB_SCHEMA}.challan_settings
          SET last_number = 0, updated_at = NOW()
          WHERE company_id = $1
          RETURNING *`,
@@ -132,7 +133,7 @@ async function getOrInitSettings(client, companyId) {
 
   // No settings row yet — create fresh starting from 0
   const insertRes = await client.query(
-    `INSERT INTO app_test.challan_settings
+    `INSERT INTO ${DB_SCHEMA}.challan_settings
        (company_id, prefix, pad_length, last_number, updated_at)
      VALUES ($1, '', $2, 0, NOW())
      RETURNING *`,
@@ -151,7 +152,7 @@ async function allocateNextChallanNumber(client, companyId) {
   const nextSeq  = Number(settings.last_number) + 1;
 
   await client.query(
-    `UPDATE app_test.challan_settings
+    `UPDATE ${DB_SCHEMA}.challan_settings
      SET last_number = $1, updated_at = NOW()
      WHERE company_id = $2`,
     [nextSeq, companyId]
@@ -170,8 +171,8 @@ export async function peekNextChallanNumber(companyId) {
   const result = await pool.query(
     `SELECT
        cs.last_number,
-       (SELECT COUNT(*) FROM app_test.challans WHERE company_id = $1) AS challan_count
-     FROM app_test.challan_settings cs
+       (SELECT COUNT(*) FROM ${DB_SCHEMA}.challans WHERE company_id = $1) AS challan_count
+     FROM ${DB_SCHEMA}.challan_settings cs
      WHERE cs.company_id = $1`,
     [companyId]
   );
@@ -224,7 +225,7 @@ export async function createChallan(data) {
     // If company_name not sent, fetch from companies table
     if (!company_name) {
       const compRes = await client.query(
-        `SELECT name FROM app_test.companies WHERE id = $1`,
+        `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`,
         [company_id]
       );
       if (compRes.rows.length) company_name = compRes.rows[0].name;
@@ -235,7 +236,7 @@ export async function createChallan(data) {
 
     // Insert challan header
     const challanRes = await client.query(
-      `INSERT INTO app_test.challans (
+      `INSERT INTO ${DB_SCHEMA}.challans (
         company_id, company_name, challan_number, challan_seq,
         challan_date, customer_name, customer_gstin, customer_address,
         sub_total, total_cgst, total_sgst, total_igst, total_tax, grand_total,
@@ -262,7 +263,7 @@ export async function createChallan(data) {
     const insertedItems = [];
     for (const [idx, it] of computedItems.entries()) {
       const itemRes = await client.query(
-        `INSERT INTO app_test.challan_items (
+        `INSERT INTO ${DB_SCHEMA}.challan_items (
           challan_id, item_name, godown_name, hsn_code,
           qty, rate, gst_rate, discount_percent,
           taxable_amount, cgst_amount, sgst_amount, igst_amount,
@@ -326,7 +327,7 @@ export async function getAllChallans(companyId, filters = {}) {
        c.challan_number,
        c.challan_date,
        c.customer_name
-     FROM app_test.challans c
+     FROM ${DB_SCHEMA}.challans c
      WHERE ${conditions.join(" AND ")}
      ORDER BY c.challan_seq DESC`,
     values
@@ -347,8 +348,8 @@ export async function getAllChallans(companyId, filters = {}) {
        ci.gst_rate,
        ci.discount_percent,
        ci.line_total
-     FROM app_test.challan_items ci
-     JOIN app_test.challans c ON c.id = ci.challan_id
+     FROM ${DB_SCHEMA}.challan_items ci
+     JOIN ${DB_SCHEMA}.challans c ON c.id = ci.challan_id
      WHERE c.challan_number = ANY($1)
        AND c.company_id = $2
      ORDER BY c.challan_seq DESC, ci.sort_order ASC`,
@@ -376,13 +377,13 @@ export async function getAllChallans(companyId, filters = {}) {
 
 export async function getChallanById(challanId, companyId) {
   const challanRes = await pool.query(
-    `SELECT * FROM app_test.challans WHERE id = $1 AND company_id = $2`,
+    `SELECT * FROM ${DB_SCHEMA}.challans WHERE id = $1 AND company_id = $2`,
     [challanId, companyId]
   );
   if (!challanRes.rows.length) return null;
 
   const itemsRes = await pool.query(
-    `SELECT * FROM app_test.challan_items
+    `SELECT * FROM ${DB_SCHEMA}.challan_items
      WHERE challan_id = $1
      ORDER BY sort_order ASC, id ASC`,
     [challanId]
@@ -402,7 +403,7 @@ export async function updateChallanStatus(challanId, companyId, status) {
   }
 
   const result = await pool.query(
-    `UPDATE app_test.challans
+    `UPDATE ${DB_SCHEMA}.challans
      SET status = $1, updated_at = NOW()
      WHERE id = $2 AND company_id = $3
      RETURNING *`,

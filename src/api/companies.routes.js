@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
@@ -19,8 +20,8 @@ router.get("/", async (req, res) => {
     // TOTAL COUNT
   const totalResult = await pool.query(`
     SELECT COUNT(*)
-    FROM app_test.companies c
-    INNER JOIN app_test.connector_machines m
+    FROM ${DB_SCHEMA}.companies c
+    INNER JOIN ${DB_SCHEMA}.connector_machines m
         ON c.name = m.company_name
     WHERE m.tally_connected = true
 `);
@@ -40,8 +41,8 @@ router.get("/", async (req, res) => {
         '-',
         c.financial_year_end
     ) AS financial_year
-FROM app_test.companies c
-INNER JOIN app_test.connector_machines m
+FROM ${DB_SCHEMA}.companies c
+INNER JOIN ${DB_SCHEMA}.connector_machines m
     ON c.name = m.company_name
 WHERE m.tally_connected = true
 ORDER BY c.id DESC
@@ -213,7 +214,7 @@ const financial_year_end =
       // INSERT / UPDATE DATABASE
       const result = await pool.query(
         `
-       INSERT INTO app_test.companies (
+       INSERT INTO ${DB_SCHEMA}.companies (
 
           name,
           financial_year_start,

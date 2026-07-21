@@ -2,6 +2,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { sendToTally } from "../services/tallyClient.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   createBankLedgerXML,
   createOdBankXML
@@ -60,7 +61,7 @@ async function enqueuePendingBankJobs() {
   const result = await pool.query(
     `
     SELECT id
-    FROM app_test.push_bank
+    FROM ${DB_SCHEMA}.push_bank
     WHERE sync_status = 'pending'
     ORDER BY id ASC
     `
@@ -112,7 +113,7 @@ const worker = new Worker(
     const { bankId } = job.data;
 
     const result = await pool.query(
-      `SELECT * FROM app_test.push_bank WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.push_bank WHERE id = $1`,
       [bankId]
     );
 
@@ -145,14 +146,14 @@ const worker = new Worker(
       */
 
       const companyResult = await pool.query(
-        `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1) LIMIT 1`,
+        `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1) LIMIT 1`,
         [company]
       );
       const companyId = companyResult.rows[0]?.id;
 
       if (!companyId) {
         await pool.query(
-          `UPDATE app_test.push_bank
+          `UPDATE ${DB_SCHEMA}.push_bank
            SET sync_status = 'failed', error_message = 'Company not found', updated_at = NOW()
            WHERE id = $1`,
           [bankId]
@@ -162,14 +163,14 @@ const worker = new Worker(
       }
 
       const existingLedger = await pool.query(
-        `SELECT 1 FROM app_test.all_ledger_details
+        `SELECT 1 FROM ${DB_SCHEMA}.all_ledger_details
          WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) LIMIT 1`,
         [companyId, row.ledger_name]
       );
 
       if (existingLedger.rows.length > 0) {
         await pool.query(
-          `UPDATE app_test.push_bank
+          `UPDATE ${DB_SCHEMA}.push_bank
            SET sync_status = 'failed', error_message = 'Ledger already exists in Tally', updated_at = NOW()
            WHERE id = $1`,
           [bankId]
@@ -243,7 +244,7 @@ const worker = new Worker(
         const errorMessage = lineError || "Tally push failed";
 
         await pool.query(
-          `UPDATE app_test.push_bank
+          `UPDATE ${DB_SCHEMA}.push_bank
            SET sync_status = 'failed', tally_response = $1, error_message = $2, updated_at = NOW()
            WHERE id = $3`,
           [tallyResponse, errorMessage, bankId]
@@ -260,7 +261,7 @@ const worker = new Worker(
       */
 
       await pool.query(
-        `UPDATE app_test.push_bank
+        `UPDATE ${DB_SCHEMA}.push_bank
          SET sync_status = 'success', tally_response = $1, error_message = NULL, updated_at = NOW(), synced_at = NOW()
          WHERE id = $2`,
         [tallyResponse, bankId]
@@ -274,7 +275,7 @@ const worker = new Worker(
 
       if (isTemporaryBankError(error)) {
         await pool.query(
-          `UPDATE app_test.push_bank
+          `UPDATE ${DB_SCHEMA}.push_bank
            SET sync_status = 'pending', error_message = NULL, updated_at = NOW()
            WHERE id = $1`,
           [bankId]
@@ -283,7 +284,7 @@ const worker = new Worker(
       }
 
       await pool.query(
-        `UPDATE app_test.push_bank
+        `UPDATE ${DB_SCHEMA}.push_bank
          SET sync_status = 'failed', error_message = $1, updated_at = NOW()
          WHERE id = $2`,
         [error.message, bankId]
@@ -318,7 +319,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { bankId } = job.data;
     await pool.query(
-      `UPDATE app_test.push_bank
+      `UPDATE ${DB_SCHEMA}.push_bank
        SET sync_status = 'failed', error_message = $1, updated_at = NOW()
        WHERE id = $2`,
       [error.message, bankId]

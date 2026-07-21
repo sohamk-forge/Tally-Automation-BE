@@ -4,6 +4,7 @@
 
 import express from "express";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   odBankQueue,
   OD_BANK_JOB_OPTIONS,
@@ -77,7 +78,7 @@ router.post(
         `
         SELECT id
 
-        FROM app_test.bank_od_accounts
+        FROM ${DB_SCHEMA}.bank_od_accounts
 
         WHERE LOWER(TRIM(ledger_name))
         = LOWER(TRIM($1))
@@ -114,7 +115,7 @@ router.post(
       const insertResult = await pool.query(
 
         `
-        INSERT INTO app_test.bank_od_accounts
+        INSERT INTO ${DB_SCHEMA}.bank_od_accounts
         (
 
           company_name,

@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   STOCK_ALERT_QUEUE_NAME
 } from "../queues/stockAlert.queue.js";
@@ -84,9 +85,9 @@ new Worker(
       sa.minimum_alert_quantity,
       COALESCE(s.quantity, 0) AS quantity
 
-    FROM app_test.stock_alerts sa
+    FROM ${DB_SCHEMA}.stock_alerts sa
 
-    LEFT JOIN app_test.stock_group_summary s
+    LEFT JOIN ${DB_SCHEMA}.stock_group_summary s
 
     ON
       LOWER(TRIM(sa.item_name))
@@ -161,7 +162,7 @@ new Worker(
         await pool.query(
 
           `
-          UPDATE app_test.stock_alerts
+          UPDATE ${DB_SCHEMA}.stock_alerts
           SET
 
             current_quantity = $1,

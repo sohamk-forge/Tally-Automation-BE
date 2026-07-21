@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ===================================================
@@ -60,7 +61,7 @@ router.get(
           opening_balance,
           closing_balance
 
-        FROM app_test.group_balances
+        FROM ${DB_SCHEMA}.group_balances
 
         WHERE company_id = $1
         `,

@@ -5,6 +5,7 @@ import multer from "multer";
 import FormData from "form-data";
 import fs from "fs";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 const upload = multer({
@@ -56,7 +57,7 @@ async function validateItemsAgainstStock(company, extracted_items) {
   const companyResult = await pool.query(
     `
     SELECT id
-    FROM app_test.companies
+    FROM ${DB_SCHEMA}.companies
     WHERE TRIM(name) = TRIM($1)
     `,
     [company]
@@ -79,7 +80,7 @@ async function validateItemsAgainstStock(company, extracted_items) {
       quantity,
       group_name,
       hsn_code
-    FROM app_test.stock_group_summary
+    FROM ${DB_SCHEMA}.stock_group_summary
     WHERE company_id = $1
     `,
     [companyId]

@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 router.get(
@@ -32,7 +33,7 @@ router.get(
             shortage_quantity,
             is_low_stock
 
-          FROM app_test.stock_alerts
+          FROM ${DB_SCHEMA}.stock_alerts
 
           WHERE
             company_id = $1

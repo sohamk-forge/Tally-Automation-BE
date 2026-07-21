@@ -3,6 +3,7 @@ import crypto from "crypto";
 import pool from "../db/index.js";
 import { hashApiKey } from "../middleware/apiKey.middleware.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 router.post("/pair", async (req, res) => {
@@ -33,7 +34,7 @@ router.post("/pair", async (req, res) => {
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.connector_pairing_tokens
+      FROM ${DB_SCHEMA}.connector_pairing_tokens
       WHERE token = $1
       LIMIT 1
       `,
@@ -67,7 +68,7 @@ router.post("/pair", async (req, res) => {
     const userResult = await pool.query(
       `
       SELECT *
-      FROM app_test.users
+      FROM ${DB_SCHEMA}.users
       WHERE id = $1
       LIMIT 1
       `,
@@ -90,7 +91,7 @@ router.post("/pair", async (req, res) => {
 
     await pool.query(
       `
-      INSERT INTO app_test.connector_api_keys
+      INSERT INTO ${DB_SCHEMA}.connector_api_keys
       (
         user_id,
         machine_id,
@@ -113,7 +114,7 @@ router.post("/pair", async (req, res) => {
     // Mark token as used and verify update succeeded
     const updateResult = await pool.query(
       `
-      UPDATE app_test.connector_pairing_tokens
+      UPDATE ${DB_SCHEMA}.connector_pairing_tokens
       SET
         is_used = TRUE,
         machine_id = $1

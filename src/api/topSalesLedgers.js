@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 const TOP_LEDGERS_LIMIT = 3;
@@ -11,14 +12,14 @@ async function getCompanyInfo(companyId, companyName) {
   if (companyName) {
     result = await pool.query(
       `SELECT id, name, financial_year_start, financial_year_end
-       FROM app_test.companies
+       FROM ${DB_SCHEMA}.companies
        WHERE LOWER(name) = LOWER($1)`,
       [companyName]
     );
   } else {
     result = await pool.query(
       `SELECT id, name, financial_year_start, financial_year_end
-       FROM app_test.companies
+       FROM ${DB_SCHEMA}.companies
        WHERE id = $1`,
       [companyId]
     );
@@ -59,7 +60,7 @@ async function getTopSellingLedgers(companyId, yearStart, yearEnd) {
     `SELECT party_ledger_name,
             SUM(ABS(debit_amount)) AS total_sales,
             COUNT(*) AS voucher_count
-       FROM app_test.vouchers
+       FROM ${DB_SCHEMA}.vouchers
       WHERE company_id = $1
         AND DATE(voucher_date) >= $2
         AND DATE(voucher_date) < $3

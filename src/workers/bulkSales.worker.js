@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   import { Worker } from "bullmq";
   import IORedis from "ioredis";
   import XLSX from "xlsx";
@@ -412,7 +413,7 @@
           const companyResult = await pool.query(
     `
     SELECT id
-    FROM app_test.companies
+    FROM ${DB_SCHEMA}.companies
     WHERE TRIM(name) = TRIM($1)
     LIMIT 1
     `,
@@ -427,7 +428,7 @@
 
     const insertResult = await pool.query(
     `
-    INSERT INTO app_test.sales_invoice_extractions
+    INSERT INTO ${DB_SCHEMA}.sales_invoice_extractions
     (
         company_id, company_name, customer_name, gstin,
         invoice_no, invoice_date, godown_name, raw_json,

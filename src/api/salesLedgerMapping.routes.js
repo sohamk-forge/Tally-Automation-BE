@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /*
@@ -35,7 +36,7 @@ router.post("/sales-ledger-mapping", async (req, res) => {
     const existing = await pool.query(
       `
       SELECT id
-      FROM app_test.company_sales_ledger_mappings
+      FROM ${DB_SCHEMA}.company_sales_ledger_mappings
       WHERE company_id = $1
       LIMIT 1
       `,
@@ -46,7 +47,7 @@ router.post("/sales-ledger-mapping", async (req, res) => {
 
       await pool.query(
         `
-    UPDATE app_test.company_sales_ledger_mappings
+    UPDATE ${DB_SCHEMA}.company_sales_ledger_mappings
 SET
   sales_parent_group = $1,
   sales_ledger = $2,
@@ -81,7 +82,7 @@ WHERE company_id = $9
 
     await pool.query(
       `
-     INSERT INTO app_test.company_sales_ledger_mappings
+     INSERT INTO ${DB_SCHEMA}.company_sales_ledger_mappings
 (
   company_id,
   sales_parent_group,
@@ -144,7 +145,7 @@ router.get("/sales-ledger-mapping/:companyId", async (req, res) => {
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.company_sales_ledger_mappings
+      FROM ${DB_SCHEMA}.company_sales_ledger_mappings
       WHERE company_id = $1
       LIMIT 1
       `,
@@ -182,7 +183,7 @@ router.get("/sales-ledgers/:companyId", async (req, res) => {
     const mapping = await pool.query(
       `
       SELECT sales_parent_group
-      FROM app_test.company_sales_ledger_mappings
+      FROM ${DB_SCHEMA}.company_sales_ledger_mappings
       WHERE company_id = $1
       LIMIT 1
       `,
@@ -201,7 +202,7 @@ router.get("/sales-ledgers/:companyId", async (req, res) => {
     const result = await pool.query(
       `
       SELECT ledger_name
-      FROM app_test.all_ledger_details
+      FROM ${DB_SCHEMA}.all_ledger_details
       WHERE company_id = $1
         AND LOWER(TRIM(parent_group)) = LOWER(TRIM($2))
       ORDER BY ledger_name
@@ -240,7 +241,7 @@ router.patch("/sales-ledger/:companyId", async (req, res) => {
 
     await pool.query(
       `
-      UPDATE app_test.company_sales_ledger_mappings
+      UPDATE ${DB_SCHEMA}.company_sales_ledger_mappings
       SET
         sales_ledger = $1,
         updated_at = NOW()

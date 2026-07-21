@@ -4,6 +4,7 @@ import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* =========================================
@@ -34,7 +35,7 @@ router.post("/generate-key", verifySession(), async (req, res) => {
 
     await pool.query(
       `
-      INSERT INTO app_test.connector_pairing_tokens
+      INSERT INTO ${DB_SCHEMA}.connector_pairing_tokens
       (
         id,
         user_id,
@@ -93,7 +94,7 @@ SELECT
     from_year,
     to_year,
     tally_connected
-FROM app_test.connector_machines
+FROM ${DB_SCHEMA}.connector_machines
 WHERE user_id = $1
   AND tally_connected = true
 ORDER BY updated_at DESC
@@ -151,8 +152,8 @@ router.get("/api-keys", verifySession(), async (req, res) => {
           cm.company_name,
           cak.created_at,
           cak.revoked_at
-      FROM app_test.connector_api_keys cak
-      LEFT JOIN app_test.connector_machines cm
+      FROM ${DB_SCHEMA}.connector_api_keys cak
+      LEFT JOIN ${DB_SCHEMA}.connector_machines cm
         ON cm.machine_id = cak.machine_id
       WHERE cak.user_id = $1
       ORDER BY cak.created_at DESC

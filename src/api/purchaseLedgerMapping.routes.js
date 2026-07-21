@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /*
@@ -34,7 +35,7 @@ router.post("/ledger-mapping", async (req, res) => {
     const existing = await pool.query(
       `
       SELECT id
-      FROM app_test.company_ledger_mappings
+      FROM ${DB_SCHEMA}.company_ledger_mappings
       WHERE company_id = $1
       LIMIT 1
       `,
@@ -45,7 +46,7 @@ router.post("/ledger-mapping", async (req, res) => {
 
       await pool.query(
         `
-        UPDATE app_test.company_ledger_mappings
+        UPDATE ${DB_SCHEMA}.company_ledger_mappings
         SET
           invoice_parent_group = $1,
           cgst_ledger = $2,
@@ -78,7 +79,7 @@ router.post("/ledger-mapping", async (req, res) => {
 
     await pool.query(
       `
-      INSERT INTO app_test.company_ledger_mappings
+      INSERT INTO ${DB_SCHEMA}.company_ledger_mappings
       (
         company_id,
         invoice_parent_group,
@@ -139,7 +140,7 @@ router.get("/ledger-mapping/:companyId", async (req, res) => {
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.company_ledger_mappings
+      FROM ${DB_SCHEMA}.company_ledger_mappings
       WHERE company_id = $1
       LIMIT 1
       `,

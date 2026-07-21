@@ -7,6 +7,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   SYNC_QUEUE_NAME
 } from "../queues/sync.queue.js";
@@ -61,7 +62,7 @@ async function processJob(job) {
     ===================================== */
     await pool.query(
       `
-      UPDATE app_test.job_logs
+      UPDATE ${DB_SCHEMA}.job_logs
       SET
         status = 'running',
         started_at = NOW()
@@ -236,7 +237,7 @@ async function processJob(job) {
     ===================================== */
     await pool.query(
       `
-      UPDATE app_test.job_logs
+      UPDATE ${DB_SCHEMA}.job_logs
       SET
         status = 'completed',
         error_message = NULL,
@@ -258,7 +259,7 @@ async function processJob(job) {
 
     await pool.query(
       `
-      UPDATE app_test.job_logs
+      UPDATE ${DB_SCHEMA}.job_logs
       SET
         status = 'failed',
         error_message = $1,

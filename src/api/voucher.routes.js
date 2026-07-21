@@ -5,6 +5,7 @@ import xlsx from "xlsx";
 import path from "path";
 import { spawn } from "child_process";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   voucherQueue,
   VOUCHER_JOB_OPTIONS,
@@ -146,7 +147,7 @@ router.post("/create", async (req, res) => {
     }
 
     const result = await db.query(
-      `INSERT INTO app_test.contra_vouchers (
+      `INSERT INTO ${DB_SCHEMA}.contra_vouchers (
         company_id, company_name, voucher_type, voucher_number,
         voucher_date, party_ledger, bank_ledger, amount,
         narration, instrument_number, transfer_bank, status
@@ -228,7 +229,7 @@ router.post(
           TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
           TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
           COUNT(*) AS total_rows
-         FROM app_test.contra_vouchers
+         FROM ${DB_SCHEMA}.contra_vouchers
          WHERE company_id = $1
            AND file_name = $2
            AND file_name IS NOT NULL
@@ -328,7 +329,7 @@ router.post(
         // Withdrawal → DEBIT row
         if (withdrawalAmt !== null && withdrawalAmt > 0) {
           const existingDebit = await db.query(
-            `SELECT id, status FROM app_test.contra_vouchers
+            `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
              WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
                AND amount = $4 AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $5`,
             [company_id, bank_ledger, txnDate, withdrawalAmt, narration]
@@ -338,7 +339,7 @@ router.post(
             const ex = existingDebit.rows[0];
             if (ex.status === 'FAILED') {
               const r = await db.query(
-                `UPDATE app_test.contra_vouchers
+                `UPDATE ${DB_SCHEMA}.contra_vouchers
                  SET status = 'WAITING_LEDGER', err_message = NULL,
                      instrument_number = $1, voucher_type = NULL, party_ledger = NULL
                  WHERE id = $2 RETURNING *`,
@@ -350,7 +351,7 @@ router.post(
             }
           } else {
             const r = await db.query(
-              `INSERT INTO app_test.contra_vouchers
+              `INSERT INTO ${DB_SCHEMA}.contra_vouchers
                (company_id, company_name, voucher_date, bank_ledger,
                 amount, narration, instrument_number,
                 debit_credit, voucher_type, party_ledger, status,
@@ -368,7 +369,7 @@ router.post(
         // Deposit → CREDIT row
         if (depositAmt !== null && depositAmt > 0) {
           const existingCredit = await db.query(
-            `SELECT id, status FROM app_test.contra_vouchers
+            `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
              WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
                AND amount = $4 AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $5`,
             [company_id, bank_ledger, txnDate, depositAmt, narration]
@@ -378,7 +379,7 @@ router.post(
             const ex = existingCredit.rows[0];
             if (ex.status === 'FAILED') {
               const r = await db.query(
-                `UPDATE app_test.contra_vouchers
+                `UPDATE ${DB_SCHEMA}.contra_vouchers
                  SET status = 'WAITING_LEDGER', err_message = NULL,
                      instrument_number = $1, voucher_type = NULL, party_ledger = NULL
                  WHERE id = $2 RETURNING *`,
@@ -390,7 +391,7 @@ router.post(
             }
           } else {
             const r = await db.query(
-              `INSERT INTO app_test.contra_vouchers
+              `INSERT INTO ${DB_SCHEMA}.contra_vouchers
                (company_id, company_name, voucher_date, bank_ledger,
                 amount, narration, instrument_number,
                 debit_credit, voucher_type, party_ledger, status,
@@ -467,7 +468,7 @@ router.get("/statement-details", async (req, res) => {
         bank_ledger,
         TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
         TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date
-       FROM app_test.contra_vouchers
+       FROM ${DB_SCHEMA}.contra_vouchers
        WHERE company_id = $1
          AND file_name IS NOT NULL
        GROUP BY file_name, bank_ledger
@@ -532,7 +533,7 @@ router.get("/statement-transactions", async (req, res) => {
     if (!targetFileName) {
       const latest = await db.query(
         `SELECT file_name
-         FROM app_test.contra_vouchers
+         FROM ${DB_SCHEMA}.contra_vouchers
          WHERE company_id = $1
            AND file_name IS NOT NULL
          ORDER BY created_at DESC
@@ -560,7 +561,7 @@ router.get("/statement-transactions", async (req, res) => {
         merchant_name,
         group_key,
         file_name
-       FROM app_test.contra_vouchers
+       FROM ${DB_SCHEMA}.contra_vouchers
        WHERE company_id = $1
          AND file_name = $2
        ORDER BY
@@ -663,7 +664,7 @@ router.get("/waiting-ledger", async (req, res) => {
         voucher_date, bank_ledger, amount, narration,
         instrument_number, debit_credit, status, created_at,
         merchant_name, group_key
-       FROM app_test.contra_vouchers
+       FROM ${DB_SCHEMA}.contra_vouchers
        WHERE status = 'WAITING_LEDGER'
          AND company_id = $1
        ORDER BY voucher_date ASC, id ASC`,
@@ -689,7 +690,7 @@ router.get("/all", async (req, res) => {
   try {
     const { company_id } = req.query;
     const result = await db.query(
-      `SELECT * FROM app_test.contra_vouchers
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
        ${company_id ? "WHERE company_id = $1" : ""}
        ORDER BY id DESC`,
       company_id ? [company_id] : []
@@ -740,7 +741,7 @@ router.get("/filter", async (req, res) => {
         bank_ledger, party_ledger, amount,
         narration, instrument_number, debit_credit,
         status, created_at, merchant_name, group_key
-       FROM app_test.contra_vouchers
+       FROM ${DB_SCHEMA}.contra_vouchers
        WHERE ${conditions.join(" AND ")}
        ORDER BY voucher_date DESC, id DESC`,
       values
@@ -802,7 +803,7 @@ router.put("/bulk-party-ledger", async (req, res) => {
       const isContra = v.voucher_type.toLowerCase() === "contra";
 
       const result = await db.query(
-        `UPDATE app_test.contra_vouchers
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
          SET
            party_ledger  = $1,
            voucher_type  = $2,
@@ -871,7 +872,7 @@ router.put("/:id/party-ledger", async (req, res) => {
     const isContra = voucher_type.toLowerCase() === "contra";
 
     const result = await db.query(
-      `UPDATE app_test.contra_vouchers
+      `UPDATE ${DB_SCHEMA}.contra_vouchers
        SET
          party_ledger  = $1,
          voucher_type  = $2,
@@ -911,7 +912,7 @@ router.put("/:id/party-ledger", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT * FROM app_test.contra_vouchers WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`,
       [req.params.id]
     );
 

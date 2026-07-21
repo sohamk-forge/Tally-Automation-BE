@@ -2,6 +2,7 @@ import express from "express";
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   stockAlertQueue,
   STOCK_ALERT_JOB_OPTIONS,
@@ -56,7 +57,7 @@ router.post(
 
           `
           SELECT id
-          FROM app_test.companies
+          FROM ${DB_SCHEMA}.companies
           WHERE TRIM(name)=TRIM($1)
           LIMIT 1
           `,
@@ -77,7 +78,7 @@ router.post(
 
           `
           SELECT id
-          FROM app_test.stock_alerts
+          FROM ${DB_SCHEMA}.stock_alerts
           WHERE
             LOWER(TRIM(company_name))
               = LOWER(TRIM($1))
@@ -105,7 +106,7 @@ router.post(
         await pool.query(
 
           `
-          UPDATE app_test.stock_alerts
+          UPDATE ${DB_SCHEMA}.stock_alerts
           SET
             minimum_alert_quantity = $1,
             is_active = true,
@@ -171,7 +172,7 @@ router.post(
         await pool.query(
 
           `
-          INSERT INTO app_test.stock_alerts
+          INSERT INTO ${DB_SCHEMA}.stock_alerts
           (
 
             company_id,

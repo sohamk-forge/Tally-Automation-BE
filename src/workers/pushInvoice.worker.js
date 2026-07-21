@@ -2,6 +2,7 @@ import pool from "../db/index.js";
 import { generateXml } from "../services/xmlGenerator.js";
 import { sendToTally } from "../services/tallyClient.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const BASE_URL =
   process.env.BASE_URL ||
   "http://localhost:5000";
@@ -43,7 +44,7 @@ const processInvoiceJobs = async () => {
 
     const result = await pool.query(`
       SELECT *
-      FROM app_test.invoice_extractions
+      FROM ${DB_SCHEMA}.invoice_extractions
       WHERE sync_status = 'pending'
       ORDER BY id ASC
       LIMIT 5
@@ -96,7 +97,7 @@ const processInvoiceJobs = async () => {
         const companyResult = await pool.query(
           `
           SELECT id
-          FROM app_test.companies
+          FROM ${DB_SCHEMA}.companies
           WHERE TRIM(name) = TRIM($1)
           LIMIT 1
           `,
@@ -107,7 +108,7 @@ const processInvoiceJobs = async () => {
         if (!companyId) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status = 'failed',
               error_message = 'Company not found',
@@ -126,14 +127,14 @@ const processInvoiceJobs = async () => {
         ====================================
         STEP 2.5
         FETCH LEDGER MAPPING
-        from app_test.company_ledger_mappings
+        from ${DB_SCHEMA}.company_ledger_mappings
         ====================================
         */
 
         const mappingResult = await pool.query(
           `
           SELECT *
-          FROM app_test.company_ledger_mappings
+          FROM ${DB_SCHEMA}.company_ledger_mappings
           WHERE company_id = $1
           LIMIT 1
           `,
@@ -143,7 +144,7 @@ const processInvoiceJobs = async () => {
         if (!mappingResult.rows.length) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'failed',
               error_message = 'Ledger mapping not configured for this company. Please save mapping first.',
@@ -171,7 +172,7 @@ const processInvoiceJobs = async () => {
         ====================================
         STEP 2.6
         VALIDATE ALL MAPPED LEDGERS EXIST IN TALLY
-        checked against app_test.all_ledger_details
+        checked against ${DB_SCHEMA}.all_ledger_details
         ====================================
         */
 
@@ -195,7 +196,7 @@ const processInvoiceJobs = async () => {
           const checkResult = await pool.query(
             `
             SELECT 1
-            FROM app_test.all_ledger_details
+            FROM ${DB_SCHEMA}.all_ledger_details
             WHERE company_id = $1
             AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
             LIMIT 1
@@ -214,7 +215,7 @@ const processInvoiceJobs = async () => {
         if (mappingLedgerMissing) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'ledger_missing',
               error_message = $1,
@@ -244,13 +245,13 @@ const processInvoiceJobs = async () => {
         SELECT 1
 FROM (
     SELECT LOWER(TRIM(ledger_name)) AS ledger_name
-    FROM app_test.all_ledger_details
+    FROM ${DB_SCHEMA}.all_ledger_details
     WHERE company_id = $1
 
     UNION
 
     SELECT LOWER(TRIM(ledger_name))
-    FROM app_test.push_ledger
+    FROM ${DB_SCHEMA}.push_ledger
     WHERE company_id = $1
       AND status = 'success'
 ) t
@@ -263,7 +264,7 @@ LIMIT 1
         if (!ledgerResult.rows.length) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'ledger_missing',
               error_message = $1,
@@ -321,13 +322,13 @@ LIMIT 1
             SELECT 1
 FROM (
     SELECT LOWER(TRIM(item_name)) AS item_name
-    FROM app_test.stock_group_summary
+    FROM ${DB_SCHEMA}.stock_group_summary
     WHERE company_id = $1
 
     UNION
 
     SELECT LOWER(TRIM(item_name))
-    FROM app_test.push_stock_item
+    FROM ${DB_SCHEMA}.push_stock_item
     WHERE company_id = $1
       AND status = 'success'
 ) t
@@ -347,7 +348,7 @@ LIMIT 1
         if (stockMissing) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'stock_missing',
               error_message = $1,
@@ -444,7 +445,7 @@ LIMIT 1
 
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status    = 'failed',
               tally_response = $1,
@@ -468,7 +469,7 @@ LIMIT 1
 
         await pool.query(
           `
-          UPDATE app_test.invoice_extractions
+          UPDATE ${DB_SCHEMA}.invoice_extractions
           SET
             sync_status    = 'completed',
             tally_response = $1,
@@ -490,7 +491,7 @@ LIMIT 1
         if (isTemporaryInvoiceError(err)) {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'pending',
               error_message = NULL,
@@ -503,7 +504,7 @@ LIMIT 1
         } else {
           await pool.query(
             `
-            UPDATE app_test.invoice_extractions
+            UPDATE ${DB_SCHEMA}.invoice_extractions
             SET
               sync_status   = 'failed',
               error_message = $1,

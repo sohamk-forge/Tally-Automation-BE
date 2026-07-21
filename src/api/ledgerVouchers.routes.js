@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ===================================================
@@ -101,7 +102,7 @@ SELECT
   created_at,
   updated_at
 
-FROM app_test.vouchers
+FROM ${DB_SCHEMA}.vouchers
 
 WHERE
 

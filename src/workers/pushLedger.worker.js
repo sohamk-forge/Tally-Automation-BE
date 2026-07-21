@@ -6,6 +6,7 @@ import { LEDGER_QUEUE_NAME } from "../queues/ledger.queue.js";
 import { sendToTally } from "../services/tallyClient.js";
 import { createLedgerXML } from "../services/pushXmlBuilder.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -47,7 +48,7 @@ const worker = new Worker(
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.push_ledger
+      FROM ${DB_SCHEMA}.push_ledger
       WHERE id = $1
       `,
       [ledgerId]
@@ -61,7 +62,7 @@ const worker = new Worker(
 
     await pool.query(
       `
-      UPDATE app_test.push_ledger
+      UPDATE ${DB_SCHEMA}.push_ledger
       SET
         status = 'processing',
         updated_at = NOW()
@@ -119,7 +120,7 @@ const worker = new Worker(
 
         await pool.query(
           `
-          UPDATE app_test.push_ledger
+          UPDATE ${DB_SCHEMA}.push_ledger
           SET
             status = 'failed',
             tally_response = $1,
@@ -142,7 +143,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_ledger
+        UPDATE ${DB_SCHEMA}.push_ledger
         SET
           status = 'success',
           tally_response = $1,
@@ -171,7 +172,7 @@ const worker = new Worker(
       if (isTemporaryLedgerError(error)) {
         await pool.query(
           `
-          UPDATE app_test.push_ledger
+          UPDATE ${DB_SCHEMA}.push_ledger
           SET
             status = 'pending',
             error_message = $1,
@@ -189,7 +190,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_ledger
+        UPDATE ${DB_SCHEMA}.push_ledger
         SET
           status = 'failed',
           error_message = $1,
@@ -240,7 +241,7 @@ worker.on("failed", async (job, error) => {
 
     await pool.query(
       `
-      UPDATE app_test.push_ledger
+      UPDATE ${DB_SCHEMA}.push_ledger
       SET
         status = 'failed',
         error_message = $1,

@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
     import express from "express";
     import pool from "../db/index.js";
 
@@ -48,7 +49,7 @@ console.log(req.body);
             await pool.query(
             `
             SELECT id
-            FROM app_test.push_stock_item
+            FROM ${DB_SCHEMA}.push_stock_item
             WHERE
                 TRIM(company_name) = TRIM($1)
                 AND TRIM(item_name) = TRIM($2)
@@ -73,7 +74,7 @@ console.log(req.body);
 
       const updateResult = await pool.query(
   `
-  UPDATE app_test.push_stock_item
+  UPDATE ${DB_SCHEMA}.push_stock_item
   SET
     opening_quantity = $1,
     opening_rate = $2,

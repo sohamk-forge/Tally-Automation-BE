@@ -6,6 +6,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import {
   odBankQueue,
   OD_BANK_JOB_OPTIONS,
@@ -53,7 +54,7 @@ async function enqueuePendingOdBankJobs() {
   const result = await pool.query(
     `
     SELECT id
-    FROM app_test.bank_od_accounts
+    FROM ${DB_SCHEMA}.bank_od_accounts
     WHERE sync_status = 'pending'
     ORDER BY id ASC
     `
@@ -100,7 +101,7 @@ const worker = new Worker(
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.bank_od_accounts
+      FROM ${DB_SCHEMA}.bank_od_accounts
       WHERE id = $1
       `,
       [odBankId]
@@ -215,7 +216,7 @@ const worker = new Worker(
 
         await pool.query(
           `
-          UPDATE app_test.bank_od_accounts
+          UPDATE ${DB_SCHEMA}.bank_od_accounts
           SET
             sync_status = 'failed',
             tally_response = $1,
@@ -238,7 +239,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.bank_od_accounts
+        UPDATE ${DB_SCHEMA}.bank_od_accounts
         SET
           sync_status = 'success',
           tally_response = $1,
@@ -270,7 +271,7 @@ const worker = new Worker(
       if (isTemporaryOdBankError(error)) {
         await pool.query(
           `
-          UPDATE app_test.bank_od_accounts
+          UPDATE ${DB_SCHEMA}.bank_od_accounts
           SET
             sync_status = 'pending',
             error_message = $1,
@@ -288,7 +289,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.bank_od_accounts
+        UPDATE ${DB_SCHEMA}.bank_od_accounts
         SET
           sync_status = 'failed',
           error_message = $1,
@@ -342,7 +343,7 @@ worker.on("failed", async (job, error) => {
 
     await pool.query(
       `
-      UPDATE app_test.bank_od_accounts
+      UPDATE ${DB_SCHEMA}.bank_od_accounts
       SET
         sync_status = 'failed',
         error_message = $1,

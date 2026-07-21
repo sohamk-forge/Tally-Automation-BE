@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 /* ==================================================
@@ -107,7 +108,7 @@ router.get("/", async (req, res) => {
 
         updated_at
 
-      FROM app_test.ledgers
+      FROM ${DB_SCHEMA}.ledgers
 
       WHERE
 
@@ -153,7 +154,7 @@ router.get("/", async (req, res) => {
 
       SELECT COUNT(*) AS total
 
-      FROM app_test.ledgers
+      FROM ${DB_SCHEMA}.ledgers
 
       WHERE
 

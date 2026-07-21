@@ -1,6 +1,7 @@
 import UserRoles from "supertokens-node/recipe/userroles/index.js";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 /**
  * app_test.users is the app's profile table (phone, name, and the FK
  * relationships job_logs/connector_* already have to users.id) — SuperTokens
@@ -16,7 +17,7 @@ export const ensureLocalUserProfile = async (supertokensUserId, email, role = "u
 
   const result = await pool.query(
     `
-    INSERT INTO app_test.users
+    INSERT INTO ${DB_SCHEMA}.users
     (
       email,
       supertokens_user_id,

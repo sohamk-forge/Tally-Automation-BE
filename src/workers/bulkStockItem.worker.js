@@ -4,6 +4,7 @@ import XLSX from "xlsx";
 
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 import {
   BULK_STOCK_ITEM_QUEUE_NAME
 } from "../queues/bulkStockItem.queue.js";
@@ -132,7 +133,7 @@ const worker = new Worker(
 
         const insertResult = await pool.query(
           `
-          INSERT INTO app_test.push_stock_item (
+          INSERT INTO ${DB_SCHEMA}.push_stock_item (
             company_id,
             company_name,
             item_name,

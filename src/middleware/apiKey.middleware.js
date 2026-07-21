@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 export const hashApiKey = (rawKey) =>
   crypto.createHash("sha256").update(rawKey).digest("hex");
 
@@ -20,7 +21,7 @@ export const verifyConnectorApiKey = async (req, res, next) => {
     const result = await pool.query(
       `
       SELECT user_id, machine_id
-      FROM app_test.connector_api_keys
+      FROM ${DB_SCHEMA}.connector_api_keys
       WHERE key_hash = $1
         AND revoked_at IS NULL
       LIMIT 1

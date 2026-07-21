@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   import express from "express";
   import pool from "../db/index.js";
   import {
@@ -39,7 +40,7 @@
 
       // Validation 3: Company exists
       const companyResult = await pool.query(
-        `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
+        `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1)`,
         [data.company]
       );
 
@@ -56,7 +57,7 @@
       const existingItem = await pool.query(
         `
         SELECT id
-        FROM app_test.push_stock_item
+        FROM ${DB_SCHEMA}.push_stock_item
         WHERE company_id = $1
           AND TRIM(item_name) = TRIM($2)
         LIMIT 1
@@ -72,7 +73,7 @@
 
         const updateResult = await pool.query(
           `
-          UPDATE app_test.push_stock_item
+          UPDATE ${DB_SCHEMA}.push_stock_item
           SET
             company_name = $1,
             alias_name = $2,
@@ -121,7 +122,7 @@
 
         const insertResult = await pool.query(
           `
-          INSERT INTO app_test.push_stock_item (
+          INSERT INTO ${DB_SCHEMA}.push_stock_item (
             company_id,
             company_name,
             item_name,
@@ -251,7 +252,7 @@ router.get("/push/stock-item/status/:companyId", async (req, res) => {
         tally_response,
         created_at,
         updated_at
-      FROM app_test.push_stock_item
+      FROM ${DB_SCHEMA}.push_stock_item
       WHERE company_id = $1
     `;
     const params = [companyId];

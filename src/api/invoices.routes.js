@@ -5,6 +5,7 @@
 import express from "express";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
 router.post("/invoices", async (req, res) => {
@@ -33,7 +34,7 @@ router.post("/invoices", async (req, res) => {
 
     // ✅ LOOKUP company_id from company_name
     const companyResult = await pool.query(
-      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
+      `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1)`,
       [company]
     );
 
@@ -50,7 +51,7 @@ router.post("/invoices", async (req, res) => {
     const existingInvoice = await pool.query(
       `
       SELECT id
-      FROM app_test.invoice_extractions
+      FROM ${DB_SCHEMA}.invoice_extractions
       WHERE company_id = $1
         AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
       LIMIT 1
@@ -69,7 +70,7 @@ router.post("/invoices", async (req, res) => {
 
       const updateResult = await pool.query(
         `
-        UPDATE app_test.invoice_extractions
+        UPDATE ${DB_SCHEMA}.invoice_extractions
         SET
           vendor_name = $1,
           gstin = $2,
@@ -103,7 +104,7 @@ router.post("/invoices", async (req, res) => {
 
       const result = await pool.query(
         `
-        INSERT INTO app_test.invoice_extractions
+        INSERT INTO ${DB_SCHEMA}.invoice_extractions
         (
           company_id,
           company_name,
@@ -182,7 +183,7 @@ router.get("/invoices", async (req, res) => {
       });
     }
 
-    let query = `SELECT * FROM app_test.invoice_extractions WHERE 1=1`;
+    let query = `SELECT * FROM ${DB_SCHEMA}.invoice_extractions WHERE 1=1`;
     const params = [];
 
     if (company_id) {
