@@ -43,50 +43,41 @@ async function processJob(job) {
   const finalFromDate = `${fromYear}0401`;
   const finalToDate = `${toYear}0331`;
 
-  const results = [];  // ✅ Track all results
+  const results = [];
 
   try {
-    await safeSync("All Ledgers", () =>
-      api.get("/api/sync/all-ledgers-sync", { params: { company } }), results
-    );
-
-    await safeSync("Banks", () =>
-      api.get("/api/sync/group-summary-bank", { params: { company } }), results
-    );
-
-    await safeSync("Stock", () =>
-      api.get("/api/sync/stock-group-summary-sync", { params: { company } }), results
-    );
-
-    await safeSync("Units", () =>
-      api.get("/api/sync/units-sync", { params: { company } }), results
-    );
-
-    await safeSync("Godowns", () =>
-      api.get("/api/sync/godown-sync", { params: { company } }), results
-    );
-
-    await safeSync("Vouchers", () =>
-      api.get("/api/sync/voucher-sync", {
-        params: { company, fromDate: finalFromDate, toDate: finalToDate }
-      }), results
-    );
+    // ✅ PARALLEL - all at same time!
+    await Promise.allSettled([
+      safeSync("All Ledgers", () =>
+        api.get("/api/sync/all-ledgers-sync", { params: { company } }), results),
+      safeSync("Banks", () =>
+        api.get("/api/sync/group-summary-bank", { params: { company } }), results),
+      safeSync("Stock", () =>
+        api.get("/api/sync/stock-group-summary-sync", { params: { company } }), results),
+      safeSync("Units", () =>
+        api.get("/api/sync/units-sync", { params: { company } }), results),
+      safeSync("Godowns", () =>
+        api.get("/api/sync/godown-sync", { params: { company } }), results),
+      safeSync("Vouchers", () =>
+        api.get("/api/sync/voucher-sync", {
+          params: { company, fromDate: finalFromDate, toDate: finalToDate }
+        }), results),
+    ]);
 
     // ✅ SUMMARY REPORT
     console.log(`\n========== SYNC SUMMARY ==========`);
     results.forEach(r => console.log(`${r.status} | ${r.name}`));
-    console.log(`===================================\n`);
-
     const failed = results.filter(r => r.status.includes('FAILED'));
     const success = results.filter(r => r.status.includes('SUCCESS'));
-    console.log(`✅ Passed: ${success.length} | ❌ Failed: ${failed.length}`);
+    console.log(`===================================`);
+    console.log(`✅ Passed: ${success.length} | ❌ Failed: ${failed.length}\n`);
 
     await pool.query(
       `UPDATE app_test.job_logs SET status = 'completed', error_message = NULL, completed_at = NOW() WHERE id = $1`,
       [id]
     );
 
-    console.log(`\n🎉 JOB COMPLETED: ${id}`);
+    console.log(`🎉 JOB COMPLETED: ${id}`);
 
   } catch (err) {
     await pool.query(
@@ -104,4 +95,4 @@ const worker = new Worker(SYNC_QUEUE_NAME, async (job) => {
 worker.on("completed", (job) => console.log(`SYNC JOB COMPLETED: ${job.id}`));
 worker.on("failed", (job, err) => console.error(`SYNC JOB FAILED: ${job?.id}`, err.message));
 
-console.log("SYNC WORKER STARTED (OPTIMIZED)");
+console.log("SYNC WORKER STARTED (OPTIMIZED - PARALLEL)");

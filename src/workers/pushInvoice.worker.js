@@ -123,13 +123,7 @@ const worker = new Worker(
       // STEP 4: GET CONNECTOR PAIRING
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.invoice_extractions ie
-        JOIN app_test.companies c
-          ON ie.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE ie.id = $1
+        SELECT cpt.user_id FROM app_test.connector_pairing_tokens cpt WHERE cpt.company_id = (SELECT company_id FROM app_test.invoice_extractions WHERE id = $1) AND cpt.is_used = true ORDER BY cpt.created_at DESC LIMIT 1
         `,
         [invoiceId]
       );
@@ -228,3 +222,4 @@ worker.on("error", (error) => {
 console.log("✅ Push Purchase Invoice BullMQ worker started (using Connector)");
 
 export default worker;
+

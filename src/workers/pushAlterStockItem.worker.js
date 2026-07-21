@@ -76,13 +76,7 @@ const worker = new Worker(
       // STEP 4: GET CONNECTOR PAIRING ✅
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.push_stock_item psi
-        JOIN app_test.companies c
-          ON psi.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE psi.id = $1
+        SELECT cpt.user_id FROM app_test.connector_pairing_tokens cpt WHERE cpt.company_id = (SELECT company_id FROM app_test.push_stock_item WHERE id = $1) AND cpt.is_used = true ORDER BY cpt.created_at DESC LIMIT 1
         `,
         [stockItemId]
       );
@@ -181,3 +175,4 @@ worker.on("error", (error) => {
 console.log("✅ Push Alter Stock Item BullMQ worker started (using Connector)");
 
 export default worker;
+

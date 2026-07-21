@@ -99,12 +99,7 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.push_ledger pl
-        JOIN app_test.companies c ON pl.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt 
- ON c.id = cpt.company_id
-        WHERE pl.id = $1
+        SELECT cpt.user_id FROM app_test.connector_pairing_tokens cpt WHERE cpt.company_id = (SELECT company_id FROM app_test.push_ledger WHERE id = $1) AND cpt.is_used = true ORDER BY cpt.created_at DESC LIMIT 1
         `,
         [ledgerId]
       );

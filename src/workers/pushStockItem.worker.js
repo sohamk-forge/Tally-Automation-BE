@@ -175,11 +175,7 @@ const worker = new Worker(
 
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.companies c
-        JOIN app_test.connector_pairing_tokens cpt 
-          ON c.id = cpt.company_id
-        WHERE c.id = $1
+        SELECT cpt.user_id FROM app_test.connector_pairing_tokens cpt WHERE cpt.company_id = $1 AND cpt.is_used = true ORDER BY cpt.created_at DESC LIMIT 1
         `,
         [row.company_id]
       );
@@ -348,3 +344,4 @@ console.log(
 );
 
 export default worker;
+

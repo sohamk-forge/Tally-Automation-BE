@@ -84,13 +84,7 @@ const worker = new Worker(
       // STEP 4: GET CONNECTOR PAIRING (same as pushLedger)
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.push_bank pb
-        JOIN app_test.companies c
-          ON pb.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE pb.id = $1
+        SELECT cpt.user_id FROM app_test.connector_pairing_tokens cpt WHERE cpt.company_id = (SELECT company_id FROM app_test.push_bank WHERE id = $1) AND cpt.is_used = true ORDER BY cpt.created_at DESC LIMIT 1
         `,
         [bankId]
       );
@@ -189,3 +183,4 @@ worker.on("error", (error) => {
 console.log("✅ Push Bank BullMQ worker started (using Connector)");
 
 export default worker;
+
