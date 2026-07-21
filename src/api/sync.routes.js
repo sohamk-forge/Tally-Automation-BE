@@ -1,7 +1,7 @@
-import { DB_SCHEMA } from "../config/db.js";
-  import express from "express";
+import express from "express";
   import pool from "../db/index.js";
   import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
+  import authMiddleware from "../middleware/auth.middleware.js";
   import axios from "axios";
   import { getLocalUserId } from "../utils/getLocalUserId.js";
   import {
@@ -75,6 +75,7 @@ const delay = (ms) =>
     if (value === null || value === undefined) return null;
     return String(value)
       .replace(/&#13;&#10;|\r|\n/g, "")
+      .replace(/ /g, "")
       .replace(/ /g, "")
       .trim();
   };
@@ -461,6 +462,7 @@ router.get("/health", async (req, res) => {
     const xml = getCompaniesXML();
 
         await sendToTallyViaConnector(companyId, xml, "sync");
+        await sendToTallyViaConnector(companyId, xml, "sync");
 
     return res.status(200).json({
       status: "success",
@@ -596,6 +598,7 @@ router.get("/ledgers", async (req, res) => {
 
       const xml = getLedgersXML(company);
   const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
 
     console.log("");
     console.log("=================================");
@@ -681,6 +684,7 @@ router.get("/ledgers", async (req, res) => {
         let gstNumber = null;
 
           const detailsXML = getLedgerDetailsXML(company, xmlSafeName);
+          const detailsResponse = await sendToTallyViaConnector(companyId, detailsXML, "sync");
           const detailsResponse = await sendToTallyViaConnector(companyId, detailsXML, "sync");
 
         if (
@@ -833,6 +837,7 @@ router.get("/group-summary-bank", async (req, res) => {
 
     const xml = getGroupSummaryBankXML(company);
     const responseXML =
+    await sendToTallyViaConnector(companyId, xml, "sync");
     await sendToTallyViaConnector(companyId, xml, "sync");
 
     console.log(
@@ -1080,6 +1085,7 @@ router.get("/voucher-sync", async (req, res) => {
         BUILD XML & FETCH FROM TALLY
       ===================================== */
       const xml = getLedgerVouchersXML(company, fromDate, toDate);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const parsed = await parseXML(responseXML);
 
@@ -1571,6 +1577,7 @@ router.get("/voucher-sync", async (req, res) => {
       
       const xml = getParentGroupsXML(company);
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1651,6 +1658,7 @@ router.get("/voucher-sync", async (req, res) => {
       
       const getGroupData = async (groupName) => {
         const xml = getGroupBalanceXML(company, groupName);
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         const parsed = await parseXML(responseXML);
         const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
@@ -1744,6 +1752,7 @@ router.get("/voucher-sync", async (req, res) => {
       }
       
       const xml = getAllParentGroupDetailsXML(company, groupName);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const parsed = await parseXML(responseXML);
       
@@ -1876,6 +1885,7 @@ router.get("/profit-loss-sync", async (req, res) => {
       /* =====================================
         SEND TO TALLY
       ===================================== */
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
 
     console.log("📥 RAW XML RESPONSE:");
@@ -2159,6 +2169,7 @@ router.get(
         /* =====================================
           TALLY RESPONSE
         ===================================== */
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         console.log(responseXML);
 
@@ -2768,6 +2779,10 @@ router.get(
             companyId,
             xml,
             "sync"
+          await sendToTallyViaConnector(
+            companyId,
+            xml,
+            "sync"
           );
 
       const parsed =
@@ -2968,6 +2983,7 @@ router.get(
       }
       
       const xml = getAllLedgersXML(company);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const parsed = await parseXML(responseXML);
       
@@ -3263,6 +3279,7 @@ router.get(
 
         const xml = getPurchaseSalesLedgersXML(company);
         const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
         const parsed = await parseXML(responseXML);
         
 
@@ -3464,6 +3481,7 @@ router.get("/godown-sync", async (req, res) => {
     */
 
       const xml         = getGodownsXML(company);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
       const parsed      = await parseXML(responseXML);
 
