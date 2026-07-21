@@ -14,12 +14,22 @@ const router = express.Router();
 
 router.post("/generate-key", async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const { 
+      user_id,
+      company_id  // ✅ ADD THIS!
+    } = req.body;
 
     if (!user_id) {
       return res.status(400).json({
         status: "error",
         message: "user_id is required"
+      });
+    }
+
+    if (!company_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "company_id is required"
       });
     }
 
@@ -29,10 +39,10 @@ router.post("/generate-key", async (req, res) => {
     await pool.query(
       `
       INSERT INTO app_test.connector_pairing_tokens
-      (id, user_id, token, expires_at)
-      VALUES (gen_random_uuid(), $1, $2, $3)
+      (id, user_id, token, expires_at, company_id)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4)
       `,
-      [user_id, token, expiresAt]
+      [user_id, token, expiresAt, company_id]  // ✅ Save company_id!
     );
 
     return res.status(200).json({

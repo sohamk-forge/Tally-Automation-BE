@@ -9,10 +9,9 @@ router.post("/pair", async (req, res) => {
   try {
 
     const {
-      token,
-      machine_id,
-      company_id   // ✅ NEW! Connector sends company name during pairing
-    } = req.body;
+  token,
+  machine_id
+} = req.body;
 
     // Validate token
     if (!token) {
@@ -84,21 +83,8 @@ router.post("/pair", async (req, res) => {
     const user = userResult.rows[0];
 
     // ✅ NEW: Lookup company_id from company_name
-    let companyId = null;
-
-    if (company_name?.trim()) {
-      const companyResult = await pool.query(
-        `
-        SELECT id
-        FROM app_test.companies
-        WHERE TRIM(name) = TRIM($1)
-        LIMIT 1
-        `,
-        [company_name.trim()]
-      );
-      companyId = companyResult.rows[0]?.id || null;
-      console.log(`✅ Company lookup: ${company_name} → ID ${companyId}`);
-    }
+const companyId = pairingToken.company_id || null;
+console.log(`✅ Company ID from token: ${companyId}`);
 
     // Generate JWT
     const jwtToken = jwt.sign(
