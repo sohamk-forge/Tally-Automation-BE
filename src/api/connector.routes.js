@@ -124,4 +124,63 @@ LIMIT 1
   }
 });
 
+/* =========================================
+   LIST GENERATED API KEYS
+   Dashboard-only view of this user's connector API keys. There's no
+   separate "name" for a key — it's shown by the machine it belongs to
+   (there's a 1:1 relationship between a paired machine and its key).
+========================================= */
+
+router.get("/api-keys", verifySession(), async (req, res) => {
+  try {
+    const user_id = await getLocalUserId(req.session.getUserId());
+
+    if (!user_id) {
+      return res.status(404).json({
+        status: "error",
+        message: "No profile found for this account"
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+          cak.id,
+          cak.machine_id,
+          cm.machine_name,
+          cm.company_name,
+          cak.created_at,
+          cak.revoked_at
+      FROM app_test.connector_api_keys cak
+      LEFT JOIN app_test.connector_machines cm
+        ON cm.machine_id = cak.machine_id
+      WHERE cak.user_id = $1
+      ORDER BY cak.created_at DESC
+      `,
+      [user_id]
+    );
+
+    return res.status(200).json({
+      status: "success",
+      data: result.rows.map((row) => ({
+        id: row.id,
+        keyName: row.machine_name || row.machine_id,
+        company: row.company_name || "—",
+        status: row.revoked_at ? "Revoked" : "Active",
+        createdAt: row.created_at
+      }))
+    });
+
+  } catch (err) {
+
+    console.error("List API Keys Error:", err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+
+  }
+});
+
 export default router;
