@@ -5,11 +5,16 @@ import crypto from "crypto";
 import authMiddleware from "../middleware/auth.middleware.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
+import {
+  syncQueue,
+  getSyncJobId,
+  SYNC_JOB_OPTIONS
+} from "../queues/sync.queue.js";
 
 const router = express.Router();
 
 /* =========================================
-   GENERATE CONNECTOR KEY (NEW)
+   GENERATE CONNECTOR KEY
 ========================================= */
 
 router.post("/generate-key", async (req, res) => {
@@ -51,7 +56,7 @@ router.post("/generate-key", async (req, res) => {
 });
 
 /* =========================================
-   PAIR CONNECTOR
+   PAIR CONNECTOR + AUTO SYNC ✅
 ========================================= */
 
 router.post("/pair", async (req, res) => {
@@ -60,114 +65,151 @@ router.post("/pair", async (req, res) => {
 
     const {
       token,
-      machine_id
+      company,    // ✅ company name
+      fromYear,   // ✅ from year e.g. "2026"
+      toYear      // ✅ to year e.g. "2027"
     } = req.body;
 
+    // Validate
     if (!token) {
-      return res.status(400).json({
-        status: "error",
-        message: "token is required"
-      });
+      return res.status(400).json({ status: "error", message: "token is required" });
     }
 
-    if (!machine_id) {
-      return res.status(400).json({
-        status: "error",
-        message: "machine_id is required"
-      });
+    if (!company?.trim()) {
+      return res.status(400).json({ status: "error", message: "company is required" });
     }
 
+    if (!fromYear || !toYear) {
+      return res.status(400).json({ status: "error", message: "fromYear and toYear are required" });
+    }
+
+    // Validate token
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.connector_pairing_tokens
-      WHERE token = $1
-      LIMIT 1
-      `,
+      `SELECT * FROM app_test.connector_pairing_tokens WHERE token = $1 LIMIT 1`,
       [token]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({
-        status: "error",
-        message: "Invalid token"
-      });
+      return res.status(404).json({ status: "error", message: "Invalid token" });
     }
 
     const pairingToken = result.rows[0];
 
     if (pairingToken.is_used) {
-      return res.status(400).json({
-        status: "error",
-        message: "Token already used"
-      });
+      return res.status(400).json({ status: "error", message: "Token already used" });
     }
 
     if (new Date(pairingToken.expires_at) < new Date()) {
-      return res.status(400).json({
-        status: "error",
-        message: "Token expired"
-      });
+      return res.status(400).json({ status: "error", message: "Token expired" });
     }
 
+    // Fetch user
     const userResult = await pool.query(
-      `
-      SELECT *
-      FROM app_test.users
-      WHERE id = $1
-      LIMIT 1
-      `,
+      `SELECT * FROM app_test.users WHERE id = $1 LIMIT 1`,
       [pairingToken.user_id]
     );
 
     if (userResult.rows.length === 0) {
-      return res.status(404).json({
-        status: "error",
-        message: "User not found"
-      });
+      return res.status(404).json({ status: "error", message: "User not found" });
     }
 
     const user = userResult.rows[0];
 
+    // ✅ Lookup company_id (company already exists - synced from Tally)
+    const companyResult = await pool.query(
+      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1) LIMIT 1`,
+      [company.trim()]
+    );
+
+    const companyId = companyResult.rows[0]?.id || null;
+
+    if (!companyId) {
+      return res.status(400).json({
+        status: "error",
+        message: `Company not found: ${company}`
+      });
+    }
+
+    console.log(`✅ Company: ${company} → ID ${companyId}`);
+
+    // Generate JWT
     const jwtToken = jwt.sign(
       {
         id: user.id,
         email: user.email,
-        role: user.role,
-        machine_id
+        role: user.role
       },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "30d"
-      }
+      { expiresIn: "30d" }
     );
 
+    // ✅ Mark token as used + save company_id
     const updateResult = await pool.query(
       `
       UPDATE app_test.connector_pairing_tokens
       SET
         is_used = TRUE,
-        machine_id = $1
+        company_id = $1
       WHERE id = $2
       RETURNING id
       `,
-      [
-        machine_id,
-        pairingToken.id
-      ]
+      [companyId, pairingToken.id]
     );
 
     if (updateResult.rows.length === 0) {
-      return res.status(500).json({
-        status: "error",
-        message: "Failed to update pairing token"
-      });
+      return res.status(500).json({ status: "error", message: "Failed to update pairing token" });
+    }
+
+    // ✅ AUTO-TRIGGER SYNC!
+    let syncJobId = null;
+    try {
+      const jobLogResult = await pool.query(
+        `
+        INSERT INTO app_test.job_logs (job_type, status, payload)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        `,
+        [
+          "auto_sync",
+          "pending",
+          JSON.stringify({
+            company: company.trim(),
+            fromYear,
+            toYear
+          })
+        ]
+      );
+
+      const jobLogId = jobLogResult.rows[0].id;
+      syncJobId = jobLogId;
+
+      await syncQueue.add(
+        "auto-sync",
+        {
+          jobLogId,
+          company: company.trim(),
+          fromYear,
+          toYear
+        },
+        {
+          ...SYNC_JOB_OPTIONS,
+          jobId: getSyncJobId(jobLogId)
+        }
+      );
+
+      console.log(`✅ Auto sync triggered: ${company} (${fromYear}-${toYear})`);
+
+    } catch (syncErr) {
+      console.error(`⚠️ Auto sync trigger failed: ${syncErr.message}`);
     }
 
     return res.status(200).json({
       status: "success",
-      message: "Connector paired successfully",
+      message: "Connector paired successfully. Sync started!",
       jwt_token: jwtToken,
+      company_id: companyId,
+      sync_started: true,
+      sync_job_id: syncJobId,
       user: {
         id: user.id,
         email: user.email,
@@ -179,10 +221,7 @@ router.post("/pair", async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
+    return res.status(500).json({ status: "error", message: err.message });
   }
 
 });
@@ -194,6 +233,10 @@ router.post("/pair", async (req, res) => {
 router.get("/jobs", authMiddleware, async (req, res) => {
   try {
     const userId = req.user?.id;
+    console.log("================================");
+console.log("JWT User:", req.user);
+console.log("User ID:", userId);
+console.log("================================");
 
     if (!userId) {
       return res.status(401).json({
