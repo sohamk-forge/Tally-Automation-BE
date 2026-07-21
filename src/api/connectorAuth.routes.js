@@ -10,7 +10,8 @@ router.post("/pair", async (req, res) => {
 
     const {
       token,
-      machine_id
+      machine_id,
+      company_id   // ✅ NEW! Connector sends company name during pairing
     } = req.body;
 
     // Validate token
@@ -82,32 +83,51 @@ router.post("/pair", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Generate JWT
-   const jwtToken = jwt.sign(
-  {
-    id: user.id,
-    email: user.email,
-    role: user.role,
-    machine_id
-  },
-  process.env.JWT_SECRET,
-  {
-     expiresIn: "30d"
-  }
-);
+    // ✅ NEW: Lookup company_id from company_name
+    let companyId = null;
 
-    // Mark token as used and verify update succeeded
+    if (company_name?.trim()) {
+      const companyResult = await pool.query(
+        `
+        SELECT id
+        FROM app_test.companies
+        WHERE TRIM(name) = TRIM($1)
+        LIMIT 1
+        `,
+        [company_name.trim()]
+      );
+      companyId = companyResult.rows[0]?.id || null;
+      console.log(`✅ Company lookup: ${company_name} → ID ${companyId}`);
+    }
+
+    // Generate JWT
+    const jwtToken = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        machine_id
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "30d"
+      }
+    );
+
+    // ✅ UPDATED: Mark token as used and save company_id
     const updateResult = await pool.query(
       `
       UPDATE app_test.connector_pairing_tokens
       SET
         is_used = TRUE,
-        machine_id = $1
-      WHERE id = $2
+        machine_id = $1,
+        company_id = $2
+      WHERE id = $3
       RETURNING id
       `,
       [
         machine_id,
+        companyId,  // ✅ Save company_id!
         pairingToken.id
       ]
     );
@@ -124,6 +144,7 @@ router.post("/pair", async (req, res) => {
       status: "success",
       message: "Connector paired successfully",
       jwt_token: jwtToken,
+      company_id: companyId,  // ✅ Return company_id too
       user: {
         id: user.id,
         email: user.email,
