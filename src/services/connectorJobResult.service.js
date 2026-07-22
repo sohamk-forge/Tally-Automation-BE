@@ -41,34 +41,53 @@ export async function processConnectorJobResult(client, job) {
         console.log(`✅ Ledger ${payload.ledger_id} marked ${status}`);
         break;
 
-      case "sales_invoice":
-        await client.query(
-          `
-          UPDATE app_test.sales_invoice_extractions
-          SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
-            tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
-            updated_at = NOW()
-          WHERE id = $4
-          `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.invoice_id
-          ]
-        );
+   case "sales_invoice":
+  // Parse Tally response to check if invoice was actually created
+  let salesStatus = status;
+  let salesError = null;
 
-        console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${status}`);
-        break;
+  try {
+    const responseXml = response_xml || "";
+
+    const createdMatch = responseXml.match(/<CREATED>(\d+)<\/CREATED>/);
+    const exceptionsMatch = responseXml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+    const errorMatch = responseXml.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
+
+    const created = parseInt(createdMatch?.[1] || 0);
+    const exceptions = parseInt(exceptionsMatch?.[1] || 0);
+
+    if (created > 0 && exceptions === 0) {
+      salesStatus = "success";
+    } else {
+      salesStatus = "failed";
+      salesError = errorMatch?.[1] || "Tally import failed";
+    }
+  } catch (e) {
+    console.error("Error parsing Tally response:", e.message);
+    salesStatus = "failed";
+    salesError = e.message;
+  }
+
+  await client.query(
+    `
+    UPDATE app_test.sales_invoice_extractions
+    SET
+      sync_status = $1,
+      tally_response = $2,
+      error_message = $3,
+      updated_at = NOW()
+    WHERE id = $4
+    `,
+    [
+      salesStatus,
+      response_xml || null,
+      salesError,
+      payload.invoice_id
+    ]
+  );
+
+  console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${salesStatus}`);
+  break;
 
       case "purchase_invoice":
         // Parse Tally response to check if actually created
