@@ -125,6 +125,17 @@ console.log(`✅ Company ID from token: ${companyId}`);
       });
     }
 
+    // ✅ AUTO-INSERT user_companies when pairing!
+if (companyId) {
+  await pool.query(
+    `INSERT INTO app_test.user_companies (user_id, company_id)
+     VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [user.id, companyId]
+  );
+  console.log(`✅ user_companies: user ${user.id} → company ${companyId}`);
+}
+
     // Return JWT with full user details
     return res.status(200).json({
       status: "success",
