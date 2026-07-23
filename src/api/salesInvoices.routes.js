@@ -1,13 +1,8 @@
-// =========================================
-// src/api/salesInvoices.routes.js
-// =========================================
-
 import express from "express";
 import pool from "../db/index.js";
-import {
-  salesQueue,
-  getSalesJobId
-} from "../queues/sales.queue.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
+import { salesQueue, getSalesJobId } from "../queues/sales.queue.js";
 
 const router = express.Router();
 
@@ -16,12 +11,14 @@ function safeNumber(value) {
   return isNaN(num) ? 0 : num;
 }
 
-router.post("/sales-invoices", async (req, res) => {
+router.post("/sales-invoices", authMiddleware, async (req, res) => {
 
   console.log("BODY RECEIVED:");
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
+
+    const userId = req.user.id;
 
     const {
       company,
@@ -43,7 +40,6 @@ router.post("/sales-invoices", async (req, res) => {
     console.log("SALES INVOICE API HIT");
     console.log("====================================");
 
-    // ✅ LOOKUP company_id from company_name
     const companyResult = await pool.query(
       `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
       [company]
@@ -55,6 +51,14 @@ router.post("/sales-invoices", async (req, res) => {
       return res.status(400).json({
         status: "error",
         message: `Company '${company}' not found`
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 
@@ -255,7 +259,6 @@ router.post("/sales-invoices", async (req, res) => {
       console.log(`✅ New invoice created: ${invoiceId}`);
     }
 
-    // ✅ Remove old job first so re-sent invoices always run fresh
     const jobId = getSalesJobId(invoiceId);
     const existingJob = await salesQueue.getJob(jobId);
     if (existingJob) {
@@ -265,7 +268,7 @@ router.post("/sales-invoices", async (req, res) => {
 
     const job = await salesQueue.add(
       "sales-invoice",
-      { salesId: invoiceId },
+      { salesId: invoiceId, userId },
       { jobId: jobId }
     );
 
@@ -300,15 +303,24 @@ router.post("/sales-invoices", async (req, res) => {
 
 });
 
-// ✅ GET API FOR SALES INVOICES
-router.get("/sales-invoices", async (req, res) => {
+router.get("/sales-invoices", authMiddleware, async (req, res) => {
   try {
-    const { company_id, sync_status, invoice_no, error_only } = req.query;
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.query.company_id);
+    const { sync_status, invoice_no, error_only } = req.query;
 
-    if (!company_id) {
+    if (!companyId) {
       return res.status(400).json({
         status: "error",
         message: "company_id query parameter required"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 
@@ -317,7 +329,7 @@ router.get("/sales-invoices", async (req, res) => {
       FROM app_test.sales_invoice_extractions
       WHERE company_id = $1
     `;
-    const params = [company_id];
+    const params = [companyId];
 
     if (sync_status) {
       query += ` AND sync_status = $${params.length + 1}`;
@@ -339,6 +351,7 @@ router.get("/sales-invoices", async (req, res) => {
 
     return res.status(200).json({
       status: "success",
+      company_id: companyId,
       count: result.rows.length,
       data: result.rows
     });

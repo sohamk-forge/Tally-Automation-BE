@@ -1,17 +1,13 @@
 import express from "express";
 import pool from "../db/index.js";
-import authMiddleware from "../middleware/auth.middleware.js"; // ✅ Import auth middleware
+import authMiddleware from "../middleware/auth.middleware.js";
+import { validateCompanyId } from "../utils/companyAccess.js";
 
 const router = express.Router();
 
-/* =========================================
-   GET ALL COMPANIES (USER-SCOPED)
-   GET /api/companies
-   Only returns companies assigned to logged-in user
-========================================= */
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const userId = req.user.id; // ✅ Get user_id from JWT/pairing token
+    const userId = req.user.id;
 
     if (!userId) {
       return res.status(401).json({
@@ -24,7 +20,6 @@ router.get("/", authMiddleware, async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
 
-    // COUNT TOTAL - Only companies this user has access to
     const totalResult = await pool.query(
       `SELECT COUNT(*) FROM app_test.user_companies uc
        WHERE uc.user_id = $1`,
@@ -33,7 +28,6 @@ router.get("/", authMiddleware, async (req, res) => {
 
     const total = parseInt(totalResult.rows[0].count);
 
-    // FETCH ALL COMPANIES - Only assigned to this user ✅
     const result = await pool.query(
       `SELECT 
          c.id, 
@@ -59,7 +53,7 @@ router.get("/", authMiddleware, async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ COMPANY GET ERROR:", err);
+    console.error("❌ COMPANY GET ERROR:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -67,15 +61,9 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-/* =========================================
-   GET ALL COMPANIES (SIMPLE LIST - USER-SCOPED)
-   GET /api/companies/all/list
-   ✅ MUST BE BEFORE /:id (specific routes first!)
-   Returns simple list of user's companies
-========================================= */
 router.get("/all/list", authMiddleware, async (req, res) => {
   try {
-    const userId = req.user.id; // ✅ Get user_id from JWT/pairing token
+    const userId = req.user.id;
 
     if (!userId) {
       return res.status(401).json({
@@ -84,7 +72,6 @@ router.get("/all/list", authMiddleware, async (req, res) => {
       });
     }
 
-    // ✅ Only companies assigned to this user
     const result = await pool.query(
       `SELECT 
          c.id, 
@@ -105,7 +92,7 @@ router.get("/all/list", authMiddleware, async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ COMPANY LIST ERROR:", err);
+    console.error("❌ COMPANY LIST ERROR:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -113,16 +100,10 @@ router.get("/all/list", authMiddleware, async (req, res) => {
   }
 });
 
-/* =========================================
-   GET SINGLE COMPANY BY ID (USER-SCOPED)
-   GET /api/companies/:id
-   ✅ AFTER /all/list (dynamic routes last!)
-   Only if user has access to this company
-========================================= */
 router.get("/:id", authMiddleware, async (req, res) => {
   try {
-    const userId = req.user.id; // ✅ Get user_id from JWT/pairing token
-    const { id } = req.params;
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.params.id);
 
     if (!userId) {
       return res.status(401).json({
@@ -131,7 +112,13 @@ router.get("/:id", authMiddleware, async (req, res) => {
       });
     }
 
-    // ✅ Check: Does this user have access to this company?
+    if (!companyId) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid company_id required"
+      });
+    }
+
     const result = await pool.query(
       `SELECT 
          c.id, 
@@ -141,7 +128,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
        FROM app_test.user_companies uc
        JOIN app_test.companies c ON uc.company_id = c.id
        WHERE uc.user_id = $1 AND c.id = $2`,
-      [userId, id]
+      [userId, companyId]
     );
 
     if (result.rows.length === 0) {
@@ -157,7 +144,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ COMPANY GET BY ID ERROR:", err);
+    console.error("❌ COMPANY GET BY ID ERROR:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message

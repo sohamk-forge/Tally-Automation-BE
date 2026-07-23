@@ -3,20 +3,18 @@ import pool from "../db/index.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess } from "../utils/companyAccess.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
 
 const router = express.Router();
 
-/* =========================================
-   GENERATE CONNECTOR KEY (NEW)
-========================================= */
-
-router.post("/generate-key", async (req, res) => {
+router.post("/generate-key", authMiddleware, async (req, res) => {
   try {
+    const authenticatedUserId = req.user.id;
     const { 
       user_id,
-      company_id  // ✅ ADD THIS!
+      company_id
     } = req.body;
 
     if (!user_id) {
@@ -33,16 +31,29 @@ router.post("/generate-key", async (req, res) => {
       });
     }
 
+    if (authenticatedUserId !== Number(user_id)) {
+      return res.status(403).json({
+        status: "error",
+        message: "You can only generate keys for your own user"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(authenticatedUserId, company_id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
+      });
+    }
+
     const token = "PAIR-" + crypto.randomBytes(4).toString("hex").toUpperCase();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query(
-      `
-      INSERT INTO app_test.connector_pairing_tokens
-      (id, user_id, token, expires_at, company_id)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4)
-      `,
-      [user_id, token, expiresAt, company_id]  // ✅ Save company_id!
+      `INSERT INTO app_test.connector_pairing_tokens
+       (id, user_id, token, expires_at, company_id)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4)`,
+      [user_id, token, expiresAt, company_id]
     );
 
     return res.status(200).json({
@@ -52,17 +63,13 @@ router.post("/generate-key", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Generate Key Error:", err);
+    console.error("❌ Generate Key Error:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
     });
   }
 });
-
-/* =========================================
-   PAIR CONNECTOR
-========================================= */
 
 router.post("/pair", async (req, res) => {
 
@@ -88,12 +95,10 @@ router.post("/pair", async (req, res) => {
     }
 
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.connector_pairing_tokens
-      WHERE token = $1
-      LIMIT 1
-      `,
+      `SELECT *
+       FROM app_test.connector_pairing_tokens
+       WHERE token = $1
+       LIMIT 1`,
       [token]
     );
 
@@ -121,12 +126,10 @@ router.post("/pair", async (req, res) => {
     }
 
     const userResult = await pool.query(
-      `
-      SELECT *
-      FROM app_test.users
-      WHERE id = $1
-      LIMIT 1
-      `,
+      `SELECT *
+       FROM app_test.users
+       WHERE id = $1
+       LIMIT 1`,
       [pairingToken.user_id]
     );
 
@@ -153,14 +156,12 @@ router.post("/pair", async (req, res) => {
     );
 
     const updateResult = await pool.query(
-      `
-      UPDATE app_test.connector_pairing_tokens
-      SET
-        is_used = TRUE,
-        machine_id = $1
-      WHERE id = $2
-      RETURNING id
-      `,
+      `UPDATE app_test.connector_pairing_tokens
+       SET
+         is_used = TRUE,
+         machine_id = $1
+       WHERE id = $2
+       RETURNING id`,
       [
         machine_id,
         pairingToken.id
@@ -188,7 +189,7 @@ router.post("/pair", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("❌ Pair error:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -196,10 +197,6 @@ router.post("/pair", async (req, res) => {
   }
 
 });
-
-/* =========================================
-   CONNECTOR POLLS FOR JOBS
-========================================= */
 
 router.get("/jobs", authMiddleware, async (req, res) => {
   try {
@@ -240,10 +237,6 @@ router.get("/jobs", authMiddleware, async (req, res) => {
   }
 });
 
-/* =========================================
-   CONNECTOR SUBMITS JOB RESULT
-========================================= */
-
 router.post("/jobs/result", authMiddleware, async (req, res) => {
   const client = await pool.connect();
 
@@ -262,16 +255,14 @@ router.post("/jobs/result", authMiddleware, async (req, res) => {
     await client.query("BEGIN");
 
     const jobResult = await client.query(
-      `
-      UPDATE app_test.connector_jobs
-      SET
-        status = $1,
-        response_xml = $2,
-        result = $3,
-        updated_at = NOW()
-      WHERE id = $4
-      RETURNING *
-      `,
+      `UPDATE app_test.connector_jobs
+       SET
+         status = $1,
+         response_xml = $2,
+         result = $3,
+         updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
       [status, response_xml || null, result ? JSON.stringify(result) : null, job_id]
     );
 

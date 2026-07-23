@@ -1,11 +1,10 @@
 import express from "express";
 import pool from "../db/index.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 
 const router = express.Router();
 
-/* ===================================================
-   GET COMPANY NAME + FINANCIAL YEAR FROM DB
-=================================================== */
 async function getCompanyInfo(companyId, companyName) {
   let result;
 
@@ -52,9 +51,6 @@ async function getCompanyInfo(companyId, companyName) {
   };
 }
 
-/* ===================================================
-   FETCH VOUCHERS FROM DB
-=================================================== */
 async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
   const result = await pool.query(
     `SELECT id, voucher_date, voucher_type, voucher_number,
@@ -66,14 +62,10 @@ async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
     [companyId, yearStart, yearEnd]
   );
 
-  console.log(`=== [MonthlySalesTrend] VOUCHERS FETCHED FROM DB: ${result.rows.length} ===`);
-
+  console.log(`📊 Monthly Sales: ${result.rows.length} vouchers fetched`);
   return result.rows;
 }
 
-/* ===================================================
-   COMPUTE VOUCHER AMOUNT
-=================================================== */
 function getVoucherAmount(v) {
   const debit = Math.abs(Number(v.debit_amount) || 0);
   if (debit > 0) return debit;
@@ -89,9 +81,6 @@ function getVoucherAmount(v) {
   return amount / 2;
 }
 
-/* ===================================================
-   VOUCHER TYPE CHECK
-=================================================== */
 function isRealSalesVoucher(voucherTypeRaw) {
   const type = (voucherTypeRaw || "").toString().toLowerCase();
   if (!type.includes("sales")) return false;
@@ -106,9 +95,6 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December"
 ];
 
-/* ===================================================
-   BUILD MONTHLY SALES TREND
-=================================================== */
 function getMonthlySalesTrend(vouchers, yearStart, yearEnd) {
   const buckets = {};
 
@@ -152,19 +138,16 @@ function getMonthlySalesTrend(vouchers, yearStart, yearEnd) {
     .sort((a, b) => new Date(a.period_start) - new Date(b.period_start));
 }
 
-/* ===================================================
-   ROUTE
-   GET /api/v1/monthly-sales-trend?company_id=1
-=================================================== */
-router.get("/monthly-sales-trend", async (req, res) => {
+router.get("/monthly-sales-trend", authMiddleware, async (req, res) => {
   try {
-    const companyId = req.query.company_id;
-    const companyName = req.query.company;
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.query.company_id);
+    const companyName = req.query.company?.trim();
 
     if (!companyId && !companyName) {
       return res.status(400).json({
         status: "error",
-        message: "company_id or company query parameter is required"
+        message: "Valid company_id or company query parameter is required"
       });
     }
 
@@ -174,6 +157,14 @@ router.get("/monthly-sales-trend", async (req, res) => {
       return res.status(404).json({
         status: "error",
         message: "Company not found"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(userId, companyInfo.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 

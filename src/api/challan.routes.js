@@ -1,39 +1,6 @@
-/**
- * src/api/challan.routes.js
- *
- * Register in app.js:
- *   import challanRoutes from "./api/challan.routes.js";
- *   app.use("/api/v1/challan", challanRoutes);
- *
- * ─────────────────────────────────────────────
- * ENDPOINTS
- * ─────────────────────────────────────────────
- *
- *   GET  /api/v1/challan/next-number?company_id=1
- *        → READ-ONLY preview of what the next challan number will be.
- *          Call this when the create-challan form loads. Does not create
- *          anything or touch the counter. Safe to call repeatedly.
- *
- *   POST /api/v1/challan   { action: "create", ... }
- *        → Actually creates the challan and atomically claims the number.
- *
- *   POST /api/v1/challan   { action: "list", ... }
- *        → Returns all challans for a company (with optional filters).
- *
- *   POST /api/v1/challan   { action: "get", ... }
- *        → Returns a single challan (with items) by challan_id.
- *
- *   POST /api/v1/challan   { action: "update_status", ... }
- *        → Updates status of a challan (DRAFT / CONFIRMED / CANCELLED).
- *
- *   GET  /api/v1/challan/all?company_id=1
- *        → Plain GET list view, same data as action:"list".
- *
- *   GET  /api/v1/challan/:id?company_id=1
- *        → Plain GET detail view, same data as action:"get".
- */
-
 import express from "express";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 import {
   createChallan,
   getAllChallans,
@@ -44,10 +11,6 @@ import {
 
 const router = express.Router();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 function ok(res, status, payload) {
   return res.status(status).json({ success: true, ...payload });
 }
@@ -55,24 +18,22 @@ function ok(res, status, payload) {
 function errRes(res, status, message, details) {
   return res.status(status).json({
     success: false,
-    error:   message,
+    error: message,
     ...(details ? { details } : {}),
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/v1/challan/next-number?company_id=1
-//
-// Dedicated, separate API — purely for the frontend to display the upcoming
-// challan number BEFORE the user saves. No side effects.
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.get("/next-number", async (req, res) => {
+router.get("/next-number", authMiddleware, async (req, res) => {
   try {
-    const { company_id } = req.query;
-    if (!company_id) return errRes(res, 400, "company_id is required");
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.query.company_id);
+    
+    if (!companyId) return errRes(res, 400, "company_id is required");
 
-    const preview = await peekNextChallanNumber(Number(company_id));
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
+
+    const preview = await peekNextChallanNumber(companyId);
     return ok(res, 200, { data: preview });
   } catch (err) {
     console.error("[Challan] next-number:", err.message);
@@ -80,54 +41,28 @@ router.get("/next-number", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// action = "create"
-//
-// Body:
-// {
-//   "action": "create",
-//   "company_id":       1,
-//   "company_name":     "Sai Computech",
-//   "challan_date":     "2026-07-01",
-//   "customer_name":    "ABC Traders",
-//   "customer_gstin":   "27AABCE9378F5ZG",     ← optional
-//   "customer_address": "Mumbai",               ← optional
-//   "narration":        "Goods delivered",      ← optional
-//   "supply_type":      "intrastate",           ← "intrastate" | "interstate"
-//   "items": [
-//     {
-//       "item_name":         "Item A",
-//       "godown_name":       "Main Store",      ← optional
-//       "hsn_code":          "8471",            ← optional
-//       "qty":               10,
-//       "rate":              500,
-//       "gst_rate":          "18%",
-//       "discount_percent":  5,                 ← optional, default 0
-//       "sort_order":        0                  ← optional
-//     }
-//   ]
-// }
-//
-// Note: challan_number is NEVER sent by the frontend — it's always
-// auto-allocated by the backend inside this call.
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function handleCreate(req, res) {
+async function handleCreate(userId, req, res) {
   const {
     company_id, company_name,
     challan_date, customer_name, customer_gstin, customer_address,
     narration, supply_type, items,
   } = req.body;
 
-  if (!company_id)   return errRes(res, 400, "company_id is required");
+  if (!company_id) return errRes(res, 400, "company_id is required");
   if (!challan_date) return errRes(res, 400, "challan_date is required");
   if (!Array.isArray(items) || items.length === 0) {
     return errRes(res, 400, "items[] array with at least one item is required");
   }
 
+  const companyId = validateCompanyId(company_id);
+  if (!companyId) return errRes(res, 400, "Valid company_id required");
+
+  const hasAccess = await checkCompanyAccess(userId, companyId);
+  if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
+
   try {
     const challan = await createChallan({
-      company_id: Number(company_id),
+      company_id: companyId,
       company_name,
       challan_date,
       customer_name,
@@ -140,7 +75,7 @@ async function handleCreate(req, res) {
 
     return ok(res, 201, {
       message: `Challan ${challan.challan_number} created successfully`,
-      data:    challan,
+      data: challan,
     });
   } catch (err) {
     console.error("[Challan] create:", err.message);
@@ -148,17 +83,19 @@ async function handleCreate(req, res) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// action = "list"
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function handleList(req, res) {
+async function handleList(userId, req, res) {
   const { company_id, status, from_date, to_date, customer_name } = req.body;
 
   if (!company_id) return errRes(res, 400, "company_id is required");
 
+  const companyId = validateCompanyId(company_id);
+  if (!companyId) return errRes(res, 400, "Valid company_id required");
+
+  const hasAccess = await checkCompanyAccess(userId, companyId);
+  if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
+
   try {
-    const challans = await getAllChallans(Number(company_id), {
+    const challans = await getAllChallans(companyId, {
       status,
       from_date,
       to_date,
@@ -172,18 +109,20 @@ async function handleList(req, res) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// action = "get"
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function handleGet(req, res) {
+async function handleGet(userId, req, res) {
   const { company_id, challan_id } = req.body;
 
-  if (!company_id)  return errRes(res, 400, "company_id is required");
-  if (!challan_id)  return errRes(res, 400, "challan_id is required");
+  if (!company_id) return errRes(res, 400, "company_id is required");
+  if (!challan_id) return errRes(res, 400, "challan_id is required");
+
+  const companyId = validateCompanyId(company_id);
+  if (!companyId) return errRes(res, 400, "Valid company_id required");
+
+  const hasAccess = await checkCompanyAccess(userId, companyId);
+  if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
 
   try {
-    const challan = await getChallanById(Number(challan_id), Number(company_id));
+    const challan = await getChallanById(Number(challan_id), companyId);
     if (!challan) return errRes(res, 404, "Challan not found");
 
     return ok(res, 200, { data: challan });
@@ -193,21 +132,23 @@ async function handleGet(req, res) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// action = "update_status"
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function handleUpdateStatus(req, res) {
+async function handleUpdateStatus(userId, req, res) {
   const { company_id, challan_id, status } = req.body;
 
   if (!company_id) return errRes(res, 400, "company_id is required");
   if (!challan_id) return errRes(res, 400, "challan_id is required");
-  if (!status)     return errRes(res, 400, "status is required");
+  if (!status) return errRes(res, 400, "status is required");
+
+  const companyId = validateCompanyId(company_id);
+  if (!companyId) return errRes(res, 400, "Valid company_id required");
+
+  const hasAccess = await checkCompanyAccess(userId, companyId);
+  if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
 
   try {
     const updated = await updateChallanStatus(
       Number(challan_id),
-      Number(company_id),
+      companyId,
       String(status).toUpperCase()
     );
 
@@ -215,7 +156,7 @@ async function handleUpdateStatus(req, res) {
 
     return ok(res, 200, {
       message: `Challan status updated to ${updated.status}`,
-      data:    updated,
+      data: updated,
     });
   } catch (err) {
     console.error("[Challan] update_status:", err.message);
@@ -223,22 +164,19 @@ async function handleUpdateStatus(req, res) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SINGLE ENTRY POINT — POST /api/v1/challan
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.post("/", async (req, res) => {
+router.post("/", authMiddleware, async (req, res) => {
+  const userId = req.user.id;
   const { action } = req.body;
 
   switch (action) {
     case "create":
-      return handleCreate(req, res);
+      return handleCreate(userId, req, res);
     case "list":
-      return handleList(req, res);
+      return handleList(userId, req, res);
     case "get":
-      return handleGet(req, res);
+      return handleGet(userId, req, res);
     case "update_status":
-      return handleUpdateStatus(req, res);
+      return handleUpdateStatus(userId, req, res);
     default:
       return errRes(
         res, 400,
@@ -247,16 +185,18 @@ router.post("/", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/v1/challan/all?company_id=1
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.get("/all", async (req, res) => {
+router.get("/all", authMiddleware, async (req, res) => {
   try {
-    const { company_id, status, from_date, to_date, customer_name } = req.query;
-    if (!company_id) return errRes(res, 400, "company_id is required");
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.query.company_id);
+    
+    if (!companyId) return errRes(res, 400, "company_id is required");
 
-    const challans = await getAllChallans(Number(company_id), {
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
+
+    const { status, from_date, to_date, customer_name } = req.query;
+    const challans = await getAllChallans(companyId, {
       status,
       from_date,
       to_date,
@@ -270,16 +210,17 @@ router.get("/all", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/v1/challan/:id?company_id=1
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.get("/:id", async (req, res) => {
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
-    const { company_id } = req.query;
-    if (!company_id) return errRes(res, 400, "company_id is required");
+    const userId = req.user.id;
+    const companyId = validateCompanyId(req.query.company_id);
+    
+    if (!companyId) return errRes(res, 400, "company_id is required");
 
-    const challan = await getChallanById(Number(req.params.id), Number(company_id));
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) return errRes(res, 403, "You don't have access to this company");
+
+    const challan = await getChallanById(Number(req.params.id), companyId);
     if (!challan) return errRes(res, 404, "Challan not found");
 
     return ok(res, 200, { data: challan });

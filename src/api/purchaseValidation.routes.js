@@ -1,5 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess } from "../utils/companyAccess.js";
 import axios from "axios";
 import multer from "multer";
 import FormData from "form-data";
@@ -11,11 +13,6 @@ const upload = multer({
   dest: "uploads/"
 });
 
-/*
-=========================================
-NORMALIZE ITEM NAME
-=========================================
-*/
 function normalizeItemName(name) {
   return String(name)
     .toLowerCase()
@@ -24,19 +21,7 @@ function normalizeItemName(name) {
     .replace(/\s+/g, " ");
 }
 
-/*
-=========================================
-SHARED VALIDATION LOGIC
-Used by both /validate and /upload
-
-Buckets:
-  - missing_items  -> item is NOT in the DB at all (not available in DB)
-  - not_available  -> item IS in the DB, but current stock quantity is 0
-  - quantity_less  -> item IS in the DB with some stock, but less than required
-  - matched_items  -> item IS in the DB with enough stock to cover what's required
-=========================================
-*/
-async function validateItemsAgainstStock(company, extracted_items) {
+async function validateItemsAgainstStock(company, extracted_items, userId) {
 
   if (!company) {
     return {
@@ -52,13 +37,9 @@ async function validateItemsAgainstStock(company, extracted_items) {
     };
   }
 
-  // Find company
   const companyResult = await pool.query(
-    `
-    SELECT id
-    FROM app_test.companies
-    WHERE TRIM(name) = TRIM($1)
-    `,
+    `SELECT id FROM app_test.companies
+     WHERE TRIM(name) = TRIM($1)`,
     [company]
   );
 
@@ -71,17 +52,22 @@ async function validateItemsAgainstStock(company, extracted_items) {
     };
   }
 
-  // Fetch stock items
+  const hasAccess = await checkCompanyAccess(userId, companyId);
+  if (!hasAccess) {
+    return {
+      httpStatus: 403,
+      body: { status: "error", message: "You don't have access to this company" }
+    };
+  }
+
   const stockResult = await pool.query(
-    `
-    SELECT
-      item_name,
-      quantity,
-      group_name,
-      hsn_code
-    FROM app_test.stock_group_summary
-    WHERE company_id = $1
-    `,
+    `SELECT
+       item_name,
+       quantity,
+       group_name,
+       hsn_code
+     FROM app_test.stock_group_summary
+     WHERE company_id = $1`,
     [companyId]
   );
 
@@ -149,6 +135,7 @@ async function validateItemsAgainstStock(company, extracted_items) {
     httpStatus: 200,
     body: {
       status: "success",
+      company_id: companyId,
       summary: {
         total_extracted_items: extracted_items.length,
         matched: matched_items.length,
@@ -166,21 +153,16 @@ async function validateItemsAgainstStock(company, extracted_items) {
   };
 }
 
-/*
-=========================================
-POST /upload
-Receives PDF, sends to OCR service,
-converts items, and validates against stock
-=========================================
-*/
 router.post(
   "/upload",
+  authMiddleware,
   upload.single("file"),
   async (req, res) => {
 
     let tempFilePath = null;
 
     try {
+      const userId = req.user.id;
       const { company } = req.body;
 
       if (!company) {
@@ -199,7 +181,6 @@ router.post(
 
       tempFilePath = req.file.path;
 
-      // Send PDF to OCR service
       const form = new FormData();
       form.append(
         "file",
@@ -223,14 +204,16 @@ router.post(
         });
       }
 
-      // Convert OCR items -> validation format
       const extracted_items = ocrData.items.map(item => ({
         item_name: item.description,
         quantity: Number(item.quantity)
       }));
 
-      // Run shared validation logic
-      const result = await validateItemsAgainstStock(company, extracted_items);
+      const result = await validateItemsAgainstStock(company, extracted_items, userId);
+
+      if (result.httpStatus !== 200) {
+        return res.status(result.httpStatus).json(result.body);
+      }
 
       return res.status(result.httpStatus).json({
         ...result.body,
@@ -239,7 +222,7 @@ router.post(
 
     } catch (error) {
 
-      console.error("Upload/OCR Error:", error.response?.data || error.message);
+      console.error("❌ Upload/OCR Error:", error.response?.data || error.message);
 
       return res.status(500).json({
         status: "error",
@@ -247,7 +230,6 @@ router.post(
       });
 
     } finally {
-      // Clean up temp uploaded file
       if (tempFilePath) {
         fs.unlink(tempFilePath, (err) => {
           if (err) console.error("Failed to delete temp file:", err);
@@ -257,23 +239,18 @@ router.post(
   }
 );
 
-/*
-=========================================
-POST /validate
-Direct validation (unchanged behavior)
-=========================================
-*/
-router.post("/validate", async (req, res) => {
+router.post("/validate", authMiddleware, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { company, extracted_items } = req.body;
 
-    const result = await validateItemsAgainstStock(company, extracted_items);
+    const result = await validateItemsAgainstStock(company, extracted_items, userId);
 
     return res.status(result.httpStatus).json(result.body);
 
   } catch (error) {
 
-    console.error("Validation Error:", error);
+    console.error("❌ Validation Error:", error.message);
 
     return res.status(500).json({
       status: "error",

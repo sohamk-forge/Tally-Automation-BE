@@ -1,5 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 
 const router = express.Router();
 
@@ -128,9 +130,10 @@ function bucketVouchers(vouchers, period) {
     .sort((a, b) => new Date(a.period_start) - new Date(b.period_start));
 }
 
-router.get("/sales-purchase", async (req, res) => {
+router.get("/sales-purchase", authMiddleware, async (req, res) => {
   try {
-    const companyId = req.query.company_id;
+    const userId = req.user.id;
+    const companyId = req.query.company_id ? validateCompanyId(req.query.company_id) : null;
     const companyName = req.query.company;
 
     if (!companyId && !companyName) {
@@ -146,6 +149,14 @@ router.get("/sales-purchase", async (req, res) => {
       return res.status(404).json({
         status: "error",
         message: "Company not found"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(userId, companyInfo.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 

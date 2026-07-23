@@ -1,5 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 
 const router = express.Router();
 
@@ -51,9 +53,6 @@ async function getCompanyInfo(companyId, companyName) {
   };
 }
 
-/* ===================================================
-   TOP SALES LEDGERS — using party_ledger_name + debit_amount
-=================================================== */
 async function getTopSellingLedgers(companyId, yearStart, yearEnd) {
   const result = await pool.query(
     `SELECT party_ledger_name,
@@ -102,9 +101,10 @@ async function getTopSellingLedgers(companyId, yearStart, yearEnd) {
   };
 }
 
-router.get("/top-sales-ledgers", async (req, res) => {
+router.get("/top-sales-ledgers", authMiddleware, async (req, res) => {
   try {
-    const companyId = req.query.company_id;
+    const userId = req.user.id;
+    let companyId = validateCompanyId(req.query.company_id);
     const companyName = req.query.company;
 
     if (!companyId && !companyName) {
@@ -120,6 +120,14 @@ router.get("/top-sales-ledgers", async (req, res) => {
       return res.status(404).json({
         status: "error",
         message: "Company not found"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(userId, companyInfo.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 

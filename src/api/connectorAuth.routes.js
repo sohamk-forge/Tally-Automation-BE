@@ -9,11 +9,10 @@ router.post("/pair", async (req, res) => {
   try {
 
     const {
-  token,
-  machine_id
-} = req.body;
+      token,
+      machine_id
+    } = req.body;
 
-    // Validate token
     if (!token) {
       return res.status(400).json({
         status: "error",
@@ -21,7 +20,6 @@ router.post("/pair", async (req, res) => {
       });
     }
 
-    // Validate machine_id
     if (!machine_id) {
       return res.status(400).json({
         status: "error",
@@ -30,12 +28,10 @@ router.post("/pair", async (req, res) => {
     }
 
     const result = await pool.query(
-      `
-      SELECT *
-      FROM app_test.connector_pairing_tokens
-      WHERE token = $1
-      LIMIT 1
-      `,
+      `SELECT *
+       FROM app_test.connector_pairing_tokens
+       WHERE token = $1
+       LIMIT 1`,
       [token]
     );
 
@@ -62,14 +58,11 @@ router.post("/pair", async (req, res) => {
       });
     }
 
-    // Fetch user
     const userResult = await pool.query(
-      `
-      SELECT *
-      FROM app_test.users
-      WHERE id = $1
-      LIMIT 1
-      `,
+      `SELECT *
+       FROM app_test.users
+       WHERE id = $1
+       LIMIT 1`,
       [pairingToken.user_id]
     );
 
@@ -82,11 +75,9 @@ router.post("/pair", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // ✅ NEW: Lookup company_id from company_name
-const companyId = pairingToken.company_id || null;
-console.log(`✅ Company ID from token: ${companyId}`);
+    const companyId = pairingToken.company_id || null;
+    console.log(`✅ Company ID from token: ${companyId}`);
 
-    // Generate JWT
     const jwtToken = jwt.sign(
       {
         id: user.id,
@@ -100,20 +91,17 @@ console.log(`✅ Company ID from token: ${companyId}`);
       }
     );
 
-    // ✅ UPDATED: Mark token as used and save company_id
     const updateResult = await pool.query(
-      `
-      UPDATE app_test.connector_pairing_tokens
-      SET
-        is_used = TRUE,
-        machine_id = $1,
-        company_id = $2
-      WHERE id = $3
-      RETURNING id
-      `,
+      `UPDATE app_test.connector_pairing_tokens
+       SET
+         is_used = TRUE,
+         machine_id = $1,
+         company_id = $2
+       WHERE id = $3
+       RETURNING id`,
       [
         machine_id,
-        companyId,  // ✅ Save company_id!
+        companyId,
         pairingToken.id
       ]
     );
@@ -125,23 +113,21 @@ console.log(`✅ Company ID from token: ${companyId}`);
       });
     }
 
-    // ✅ AUTO-INSERT user_companies when pairing!
-if (companyId) {
-  await pool.query(
-    `INSERT INTO app_test.user_companies (user_id, company_id)
-     VALUES ($1, $2)
-     ON CONFLICT DO NOTHING`,
-    [user.id, companyId]
-  );
-  console.log(`✅ user_companies: user ${user.id} → company ${companyId}`);
-}
+    if (companyId) {
+      await pool.query(
+        `INSERT INTO app_test.user_companies (user_id, company_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [user.id, companyId]
+      );
+      console.log(`✅ user_companies: user ${user.id} → company ${companyId}`);
+    }
 
-    // Return JWT with full user details
     return res.status(200).json({
       status: "success",
       message: "Connector paired successfully",
       jwt_token: jwtToken,
-      company_id: companyId,  // ✅ Return company_id too
+      company_id: companyId,
       user: {
         id: user.id,
         email: user.email,
@@ -152,14 +138,11 @@ if (companyId) {
     });
 
   } catch (err) {
-
-    console.error(err);
-
+    console.error("❌ Pair error:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
     });
-
   }
 
 });

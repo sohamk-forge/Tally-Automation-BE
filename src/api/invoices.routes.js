@@ -1,22 +1,15 @@
 import express from "express";
 import pool from "../db/index.js";
-import {
-  purchaseQueue,
-  getPurchaseJobId
-} from "../queues/purchase.queue.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess } from "../utils/companyAccess.js";
+import { purchaseQueue, getPurchaseJobId } from "../queues/purchase.queue.js";
 
 const router = express.Router();
 
-router.post("/invoices", async (req, res) => {
+router.post("/invoices", authMiddleware, async (req, res) => {
   try {
-    const {
-      company,
-      invoice_data
-    } = req.body;
-
-    // ─────────────────────────────────────────────────────────────
-    // STEP 1: VALIDATE REQUIRED FIELDS
-    // ─────────────────────────────────────────────────────────────
+    const userId = req.user.id;
+    const { company, invoice_data } = req.body;
 
     if (!company?.trim()) {
       return res.status(400).json({
@@ -38,23 +31,15 @@ router.post("/invoices", async (req, res) => {
       });
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 2: GET COMPANY ID ✅
-    // ─────────────────────────────────────────────────────────────
-
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
     const companyResult = await pool.query(
-      `
-      SELECT id
-      FROM app_test.companies
-      WHERE name = $1
-      LIMIT 1
-      `,
+      `SELECT id FROM app_test.companies
+       WHERE name = $1 LIMIT 1`,
       [company.trim()]
     );
 
-    if (companyResult.rows.length === 0) {
+    if (!companyResult.rows.length) {
       return res.status(400).json({
         status: "error",
         message: `Company not found: ${company.trim()}`
@@ -64,64 +49,56 @@ router.post("/invoices", async (req, res) => {
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 3: INSERT INVOICE WITH COMPANY_ID ✅
-    // ─────────────────────────────────────────────────────────────
+    const hasAccess = await checkCompanyAccess(userId, companyId);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
+      });
+    }
+
+    console.log(`✅ User ${userId} has access to company ${companyId}`);
 
     console.log(`📝 Creating new purchase invoice: ${invoice_no}`);
 
     const insertResult = await pool.query(
-      `
-      INSERT INTO app_test.invoice_extractions
-      (
-        company_id,
-        company_name,
-        vendor_name,
-        gstin,
-        invoice_no,
-        invoice_date,
-        raw_json,
-        sync_status,
-        created_at,
-        updated_at
-      )
-      VALUES
-      (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        $7,
-        $8,
-        NOW(),
-        NOW()
-      )
-      RETURNING id
-      `,
+      `INSERT INTO app_test.invoice_extractions
+       (
+         company_id,
+         company_name,
+         vendor_name,
+         gstin,
+         invoice_no,
+         invoice_date,
+         raw_json,
+         sync_status,
+         created_at,
+         updated_at
+       )
+       VALUES
+       ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+       RETURNING id`,
       [
-        companyId,                    // $1 ✅ COMPANY_ID
-        company?.trim(),              // $2
-        customer_name || "",          // $3
-        gstin || "",                  // $4
-        invoice_no?.trim(),           // $5
-        invoice_date || "",           // $6
-        JSON.stringify(invoice_data), // $7 ✅ FULL invoice_data as JSON
-        "pending"                     // $8
+        companyId,
+        company?.trim(),
+        customer_name || "",
+        gstin || "",
+        invoice_no?.trim(),
+        invoice_date || "",
+        JSON.stringify(invoice_data),
+        "pending"
       ]
     );
 
     const invoiceId = insertResult.rows[0].id;
     console.log(`✅ Purchase Invoice created: ID ${invoiceId}`);
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 4: QUEUE THE JOB
-    // ─────────────────────────────────────────────────────────────
-
     const job = await purchaseQueue.add(
       "push-invoice",
-      { invoiceId },
+      {
+        invoiceId,
+        userId
+      },
       {
         attempts: 3,
         backoff: {
@@ -143,7 +120,7 @@ router.post("/invoices", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Push invoice error:", error.message);
+    console.error("❌ Push invoice error:", error.message);
     return res.status(500).json({
       error: error.message
     });
