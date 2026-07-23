@@ -388,7 +388,7 @@ app.use(
 );
 
 app.use(
-  "/api",
+  "/api/godowns",
   godownRoutes
 );
 
