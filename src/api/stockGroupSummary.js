@@ -40,6 +40,9 @@ router.get(
           quantity,
           stock_value,
           gst_rate,
+          cgst_rate,
+          sgst_rate,
+          igst_rate,
           rate,
           created_at
 
@@ -66,22 +69,31 @@ router.get(
       }
 
       /* ================================================
-         ⬇️ PASTE THE NEW CODE RIGHT HERE ⬇️
-         (this replaces whatever your old success
-          response block looked like)
+         ⬇️ CGST / SGST / IGST NOW COME DIRECTLY FROM DB ⬇️
+         (populated by the stock-group-summary-sync route
+          from Tally's RATEDETAILS.LIST, no on-the-fly split)
       ================================================ */
 
       const data = result.rows.map((row) => {
         const stockValue = Math.abs(Number(row.stock_value) || 0);
-        const gstRate = Number(row.gst_rate) || 0;
-        const cgst = Number(
-          ((stockValue * (gstRate / 2)) / 100).toFixed(2)
-        );
-        const sgst = cgst;
+        const taxableAmount = Number(row.rate) || stockValue;
+
+        const cgstRate = Number(row.cgst_rate) || 0;
+        const sgstRate = Number(row.sgst_rate) || 0;
+        const igstRate = Number(row.igst_rate) || 0;
+
+        const cgst = Number(((taxableAmount * cgstRate) / 100).toFixed(2));
+        const sgst = Number(((taxableAmount * sgstRate) / 100).toFixed(2));
+        const igst = Number(((taxableAmount * igstRate) / 100).toFixed(2));
+
         return {
           ...row,
+          cgst_rate: cgstRate,
+          sgst_rate: sgstRate,
+          igst_rate: igstRate,
           cgst,
-          sgst
+          sgst,
+          igst
         };
       });
 
