@@ -385,38 +385,39 @@ router.get("/statement-details", async (req, res) => {
   }
 });
 
+
 /* ===========================
    GET WAITING LEDGER VOUCHERS
-   GET /api/v1/voucher/waiting-ledger?company_id=1
+   Each row now carries suggested_party_ledger, computed automatically
+   from that row's group_key against app_test.ledger_embeddings.
+   Only rows with a group_key get a lookup; embedding calls are
+   batched once per request (one python spawn for all distinct
+   group_keys), not once per row.
 =========================== */
 
-router.get("/waiting-ledger", async (req, res) => {
+router.get("/suggest-ledger-by-group-key", async (req, res) => {
   try {
-    const { company_id } = req.query;
+    const { company_name, group_key } = req.query;
 
-    if (!company_id) {
-      return res.status(400).json({ success: false, message: "company_id is required" });
+    if (!company_name || !group_key) {
+      return res.status(400).json({
+        success: false,
+        message: "company_name and group_key are required"
+      });
     }
 
-    const result = await db.query(
-      `SELECT
-        id, company_id, company_name, voucher_type, voucher_number,
-        voucher_date, bank_ledger, amount, narration,
-        instrument_number, debit_credit, status, created_at
-       FROM app_test.contra_vouchers
-       WHERE status = 'WAITING_LEDGER'
-         AND company_id = $1
-       ORDER BY voucher_date ASC, id ASC`,
-      [company_id]
-    );
+    const suggestionMap = await suggestLedgersForGroupKeys(company_name, [group_key]);
+    const suggestion = suggestionMap.get(group_key);
 
     return res.status(200).json({
       success: true,
-      count: result.rowCount,
-      data: result.rows
+      suggested: !!suggestion?.suggested,
+      suggested_party_ledger: suggestion?.suggested ? suggestion.ledger_name : null,
+      similarity: suggestion?.similarity ?? null
     });
 
   } catch (err) {
+    console.error("suggest-ledger-by-group-key error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 });

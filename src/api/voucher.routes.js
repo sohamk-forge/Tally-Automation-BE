@@ -13,6 +13,7 @@ import {
 } from "../queues/voucher.queue.js";
 
 import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
+import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
 
 const router = express.Router();
 
@@ -945,6 +946,44 @@ router.get("/suggest-party-ledger", async (req, res) => {
 });
 
 /* ===========================
+   SUGGEST PARTY LEDGER BY GROUP KEY (embedding similarity)
+
+   Separate from /suggest-party-ledger on purpose — that route does
+   pure SQL (exact/ILIKE narration matching) against contra_vouchers
+   + vouchers (14M rows). This one spawns a Python process per call
+   to embed the incoming group_key, so it's kept as its own endpoint
+   rather than adding that latency to the existing route.
+
+   Only returns a suggestion when similarity >= 0.8 (SIMILARITY_THRESHOLD
+   in ledgerEmbedding.js). Below that, suggested: false — frontend
+   should leave the ledger field for manual selection, same as today.
+=========================== */
+
+router.get("/suggest-ledger-by-group-key", async (req, res) => {
+  try {
+    const { company_name, group_key } = req.query;
+
+    if (!company_name || !group_key) {
+      return res.status(400).json({
+        success: false,
+        message: "company_name and group_key are required"
+      });
+    }
+
+    const result = await suggestLedgerByGroupKey({ companyName: company_name, groupKey: group_key });
+
+    return res.status(200).json({
+      success: true,
+      ...result
+    });
+
+  } catch (err) {
+    console.error("suggest-ledger-by-group-key error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* ===========================
    GET WAITING LEDGER VOUCHERS
 =========================== */
 
@@ -969,10 +1008,28 @@ router.get("/waiting-ledger", async (req, res) => {
       [company_id]
     );
 
+    const rows = result.rows;
+    const companyName = rows[0]?.company_name;
+
+    let suggestionMap = new Map();
+    if (companyName) {
+      const groupKeys = rows.map((r) => r.group_key);
+      suggestionMap = await suggestLedgersForGroupKeys(companyName, groupKeys);
+    }
+
+    const data = rows.map((r) => {
+      const suggestion = r.group_key ? suggestionMap.get(r.group_key) : null;
+      return {
+        ...r,
+        suggested_party_ledger: suggestion?.suggested ? suggestion.ledger_name : null,
+        suggestion_similarity: suggestion?.suggested ? suggestion.similarity : null
+      };
+    });
+
     return res.status(200).json({
       success: true,
-      count: result.rowCount,
-      data: result.rows
+      count: data.length,
+      data
     });
 
   } catch (err) {
