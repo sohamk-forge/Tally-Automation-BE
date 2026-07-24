@@ -23,6 +23,8 @@ import {
   checkDuplicateFromDb
 } from "../api/voucher.js";
 
+import { storeLedgerEmbedding } from "../services/ledgerEmbedding.js";
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -248,6 +250,20 @@ const worker = new Worker(
           [tallyResponse, voucherId]
         );
         console.log(`✅ Voucher Success: ${voucherId}`);
+
+        // Learn from this confirmed voucher — fire-and-forget by design.
+        // storeLedgerEmbedding() catches its own errors internally and
+        // never throws, so an embedding-service hiccup can never fail
+        // this job or roll back the SUCCESS status already committed above.
+        const embedResult = await storeLedgerEmbedding({
+          companyName: voucher.company_name,
+          groupKey: voucher.group_key,
+          ledgerName: voucher.party_ledger
+        });
+        if (!embedResult.stored) {
+          console.log(`ℹ️ Embedding not stored for voucher ${voucherId}: ${embedResult.reason}`);
+        }
+
         return { voucherId, status: "success" };
       }
 
