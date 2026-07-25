@@ -187,9 +187,20 @@ const app = express();
    GLOBAL MIDDLEWARE
 ================================= */
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://100.117.199.124:5173",   // add every Tailscale IP you test from
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL,
+    origin: (origin, callback) => {
+      // allow non-browser requests (curl, server-to-server) with no Origin header
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
     allowedHeaders: ["content-type", ...supertokens.getAllCORSHeaders()],
     credentials: true,
   })
