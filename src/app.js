@@ -183,7 +183,16 @@ const app = express();
    GLOBAL MIDDLEWARE
 ================================= */
 
-app.use(cors({ origin: '*' }));
+app.use(
+  cors({
+    origin: [
+      "http://100.117.199.124:5173", // Friend's frontend
+      "http://localhost:5173",
+      "http://localhost:3000"
+    ],
+    credentials: true,
+  })
+);
 
 app.use(express.json());
 
