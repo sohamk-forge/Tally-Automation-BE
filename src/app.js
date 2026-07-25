@@ -210,6 +210,10 @@ app.use(
       return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
     allowedHeaders: ["content-type", ...supertokens.getAllCORSHeaders()],
+    // Required for header-based session tokens: without this, the browser
+    // hides SuperTokens' response headers (st-access-token, etc.) from the
+    // frontend SDK even though they're present at the HTTP level.
+    exposedHeaders: supertokens.getAllCORSHeaders(),
     credentials: true,
   })
 );
