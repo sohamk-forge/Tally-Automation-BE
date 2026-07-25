@@ -64,6 +64,38 @@ async function processJob(job) {
         }), results),
     ]);
 
+    // ✅ ADD 5 REMAINING APIS
+    await safeSync("Purchase/Sales Ledgers", () =>
+      api.get("/api/sync/purchase-sales-ledgers-sync", { params: { company } }), results);
+
+    await safeSync("Payable/Debtors", () =>
+      api.get("/api/sync/payable-debtors", { params: { company } }), results);
+
+    let parentGroups = [];
+    try {
+      const pgResponse = await api.get("/api/sync/parent-groups", { params: { company } });
+      parentGroups = pgResponse?.data?.data || [];
+      console.log(`✅ Parent Groups Synced (${parentGroups.length} groups)`);
+      results.push({ name: "Parent Groups", status: '✅ SUCCESS' });
+    } catch (err) {
+      console.error(`❌ Parent Groups Failed: ${err.message}`);
+      results.push({ name: "Parent Groups", status: `❌ FAILED: ${err.message}` });
+    }
+
+    for (const group of parentGroups) {
+      const groupName = group?.group_name;
+      if (!groupName) continue;
+      await safeSync(`Parent Group: ${groupName}`, () =>
+        api.get("/api/sync/all-parent-groups", {
+          params: { company, groupName }
+        }), results);
+    }
+
+    await safeSync("Profit Loss", () =>
+      api.get("/api/sync/profit-loss-sync", {
+        params: { company, fromDate: finalFromDate, toDate: finalToDate }
+      }), results);
+
     // ✅ SUMMARY REPORT
     console.log(`\n========== SYNC SUMMARY ==========`);
     results.forEach(r => console.log(`${r.status} | ${r.name}`));
