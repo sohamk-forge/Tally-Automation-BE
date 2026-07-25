@@ -57,7 +57,7 @@ export const initSupertokens = () => {
       }),
       UserRoles.init(),
       Dashboard.init(),
-      Session.init(),
+      Session.init({ tokenTransferMethod: "header" }),
     ],
   });
 };
