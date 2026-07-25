@@ -36,6 +36,7 @@ export async function sendToTallyViaConnector(
     SELECT cpt.user_id
     FROM app_test.connector_pairing_tokens cpt
     WHERE cpt.company_id = $1
+    ORDER BY cpt.created_at DESC
     LIMIT 1
     `,
     [companyId]

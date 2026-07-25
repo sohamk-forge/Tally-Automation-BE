@@ -36,7 +36,7 @@ cron.schedule(
 
         await axios.post(
 
-          "http://localhost:5000/api/sync/manual"
+          `http://localhost:${process.env.PORT || 5001}/api/sync/manual`
 
         );
 

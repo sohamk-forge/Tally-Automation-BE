@@ -5,7 +5,7 @@ import { STOCK_ITEM_QUEUE_NAME } from "../queues/stockItem.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { getStockItemCreateXML } from "../services/pushXmlBuilder.js";
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:5000";
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`;
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",

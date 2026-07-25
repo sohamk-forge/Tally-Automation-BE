@@ -1,7 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
-import authMiddleware from "../middleware/auth.middleware.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { salesQueue, getSalesJobId } from "../queues/sales.queue.js";
 
 const router = express.Router();
@@ -11,14 +11,23 @@ function safeNumber(value) {
   return isNaN(num) ? 0 : num;
 }
 
-router.post("/sales-invoices", authMiddleware, async (req, res) => {
+router.post("/sales-invoices", async (req, res) => {
 
   console.log("BODY RECEIVED:");
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
 
-    const userId = req.user.id;
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        status: "error",
+        message: "Unauthenticated"
+      });
+    }
 
     const {
       company,
@@ -303,9 +312,18 @@ router.post("/sales-invoices", authMiddleware, async (req, res) => {
 
 });
 
-router.get("/sales-invoices", authMiddleware, async (req, res) => {
+router.get("/sales-invoices", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        status: "error",
+        message: "Unauthenticated"
+      });
+    }
     const companyId = validateCompanyId(req.query.company_id);
     const { sync_status, invoice_no, error_only } = req.query;
 

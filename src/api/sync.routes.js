@@ -1,7 +1,7 @@
 import express from "express";
   import pool from "../db/index.js";
   import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
-  import authMiddleware from "../middleware/auth.middleware.js";
+  import { getLocalUserId } from "../utils/getLocalUserId.js";
   import axios from "axios";
   import {
     getCompaniesXML,
@@ -469,10 +469,6 @@ router.get("/health", async (req, res) => {
 
     try {
 
-        const xml = getCompaniesXML();
-
-        await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
-
         return res.status(200).json({
             status: "success",
             message: "Sync service healthy",
@@ -518,7 +514,7 @@ router.get(
       /* =====================================
         CONNECTOR URL (LOCAL DEV — NO DB LOOKUP)
       ===================================== */
-      const connectorUrl = "http://localhost:5001";
+      const connectorUrl = "http://localhost:5002";
 
       /* =====================================
         FETCH COMPANIES FROM CONNECTOR (JSON, NOT XML)
@@ -2592,12 +2588,16 @@ router.post(
 
     try {
 
-      const { user_id: userId } = req.body;
+      // Derived from the authenticated request, not a client-supplied
+      // body field — a dashboard session or the connector's own API key.
+      const userId = req.session
+        ? await getLocalUserId(req.session.getUserId())
+        : req.connectorMachine?.userId;
 
       if (!userId) {
-        return res.status(400).json({
+        return res.status(401).json({
           status: "error",
-          message: "user_id is required"
+          message: "Unauthenticated"
         });
       }
 
@@ -2648,7 +2648,7 @@ router.post(
          STORE COMPANY
       ===================================== */
 
-      await pool.query(
+      const companyUpsertResult = await pool.query(
         `
         INSERT INTO app_test.companies
         (
@@ -2659,9 +2659,26 @@ router.post(
             $1
         )
         ON CONFLICT (name)
-        DO NOTHING
+        DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
         `,
         [company_name]
+      );
+
+      const syncCompanyId = companyUpsertResult.rows[0].id;
+
+      // Backfill company_id on this user's most recent used pairing token —
+      // sendToTallyViaConnector() looks up the connector by company_id, but
+      // pairing itself only ever knows the company by name, so this is the
+      // one place that link gets closed.
+      await pool.query(
+        `
+        UPDATE app_test.connector_pairing_tokens
+        SET company_id = $1
+        WHERE user_id = $2
+          AND is_used = TRUE
+        `,
+        [syncCompanyId, userId]
       );
 
       /* =====================================

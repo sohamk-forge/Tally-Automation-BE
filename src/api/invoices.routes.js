@@ -1,14 +1,25 @@
 import express from "express";
 import pool from "../db/index.js";
-import authMiddleware from "../middleware/auth.middleware.js";
 import { checkCompanyAccess } from "../utils/companyAccess.js";
 import { purchaseQueue, getPurchaseJobId } from "../queues/purchase.queue.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { DB_SCHEMA } from "../config/db.js";
 
 const router = express.Router();
 
-router.post("/invoices", authMiddleware, async (req, res) => {
+router.post("/invoices", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        status: "error",
+        message: "Unauthenticated"
+      });
+    }
+
     const { company, invoice_data } = req.body;
 
     if (!company?.trim()) {
@@ -34,7 +45,7 @@ router.post("/invoices", authMiddleware, async (req, res) => {
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
     const companyResult = await pool.query(
-      `SELECT id FROM app_test.companies
+      `SELECT id FROM ${DB_SCHEMA}.companies
        WHERE name = $1 LIMIT 1`,
       [company.trim()]
     );
@@ -62,7 +73,7 @@ router.post("/invoices", authMiddleware, async (req, res) => {
     console.log(`📝 Creating new purchase invoice: ${invoice_no}`);
 
     const insertResult = await pool.query(
-      `INSERT INTO app_test.invoice_extractions
+      `INSERT INTO ${DB_SCHEMA}.invoice_extractions
        (
          company_id,
          company_name,
