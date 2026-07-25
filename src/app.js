@@ -192,6 +192,14 @@ const allowedOrigins = [
   "http://100.117.199.124:5173",   // add every Tailscale IP you test from
 ];
 
+// Logs every incoming request before anything else touches it — including
+// /auth/* routes, which supertokensMiddleware() handles internally and
+// never passes through to loggerMiddleware() further down the chain.
+app.use((req, res, next) => {
+  console.log(`➡️  ${req.method} ${req.originalUrl} from origin=${req.headers.origin || "none"}`);
+  next();
+});
+
 app.use(
   cors({
     origin: (origin, callback) => {
