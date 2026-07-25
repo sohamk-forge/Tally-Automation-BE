@@ -4,7 +4,6 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { LEDGER_QUEUE_NAME } from "../queues/ledger.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
-import { createConnectorJob } from "../services/connectorJob.service.js";
 import { createLedgerXML } from "../services/pushXmlBuilder.js";
 
 import { DB_SCHEMA } from "../config/db.js";
