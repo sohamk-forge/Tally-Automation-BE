@@ -3,7 +3,6 @@ import express from "express";
   import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
   import authMiddleware from "../middleware/auth.middleware.js";
   import axios from "axios";
-  import { getLocalUserId } from "../utils/getLocalUserId.js";
   import {
     getCompaniesXML,
       getUnitsXML,
@@ -26,45 +25,51 @@ import express from "express";
     createAuditLog
   } from "../utils/createAuditLog.js";
 
-import {
-  syncQueue,
-  getSyncJobId,
-  SYNC_JOB_OPTIONS
-} from "../queues/sync.queue.js";
+  import {
+    syncQueue,
+    getSyncJobId,
+    SYNC_JOB_OPTIONS
+  } from "../queues/sync.queue.js";
 
-const router = express.Router();
 
-/* ===================================================
-  DELAY UTILITY
-=================================================== */
 
-const delay = (ms) =>
-  new Promise(
-    (resolve) =>
-      setTimeout(resolve, ms)
-  );
+  const router = express.Router();
 
-/* ===================================================
-  ALLOWED TABLES (SQL INJECTION PROTECTION)
-=================================================== */
+  /* ===================================================
+    DELAY UTILITY
+  =================================================== */
+
+  const delay = (ms) =>
+
+    new Promise(
+
+      (resolve) =>
+
+        setTimeout(resolve, ms)
+
+    );
+
+  /* ===================================================
+    ALLOWED TABLES (SQL INJECTION PROTECTION)
+  =================================================== */
 
   const allowedTables = [
 
-    `${DB_SCHEMA}.companies`,
-    `${DB_SCHEMA}.ledgers`,
-    `${DB_SCHEMA}.sundry_creditors`,
-    `${DB_SCHEMA}.sundry_debtors`,
-    `${DB_SCHEMA}.bank_accounts`,
-    `${DB_SCHEMA}.vouchers`,
-    `${DB_SCHEMA}.parent_groups`,
-    `${DB_SCHEMA}.group_balances`,
-    `${DB_SCHEMA}.all_parent_groups`,
-    `${DB_SCHEMA}.profit_loss`,
-    `${DB_SCHEMA}.stock_group_summary`,
-    `${DB_SCHEMA}.sales_items`,
-    `${DB_SCHEMA}.units`,
-    `${DB_SCHEMA}.all_ledger_details`,
-    `${DB_SCHEMA}.godown_details` 
+    "app_test.companies",
+    "app_test.ledgers",
+    "app_test.sundry_creditors",
+    "app_test.sundry_debtors",
+    "app_test.bank_accounts",
+    "app_test.vouchers",
+    "app_test.parent_groups",
+    "app_test.group_balances",
+    "app_test.all_parent_groups",
+    "app_test.profit_loss",
+    "app_test.stock_group_summary",
+    "app_test.sales_items",
+    "app_test.units",
+    "app_test.all_ledger_details",
+    "app_test.godown_details" 
 
   ];
   /* ===================================================
@@ -76,124 +81,123 @@ const delay = (ms) =>
     return String(value)
       .replace(/&#13;&#10;|\r|\n/g, "")
       .replace(/ /g, "")
-      .replace(/ /g, "")
       .trim();
   };
 
-const cleanBalance = (value) => {
-  if (!value) return 0;
-  const cleaned = String(value)
-    .replace(/[^\d.-]/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
-  return cleaned.length ? Number(cleaned[cleaned.length - 1]) : 0;
-};
+  const cleanBalance = (value) => {
+    if (!value) return 0;
+    const cleaned = String(value)
+      .replace(/[^\d.-]/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean);
+    return cleaned.length ? Number(cleaned[cleaned.length - 1]) : 0;
+  };
 
-const parseAmount = (value) => {
-  if (!value) return 0;
-  const matches = String(value).replace(/,/g, "").match(/-?\d+(\.\d+)?/g);
-  if (!matches?.length) return 0;
-  return Number(matches[matches.length - 1]);
-};
+  const parseAmount = (value) => {
+    if (!value) return 0;
+    const matches = String(value).replace(/,/g, "").match(/-?\d+(\.\d+)?/g);
+    if (!matches?.length) return 0;
+    return Number(matches[matches.length - 1]);
+  };
 
-/* ===================================================
-  COMPANY ID HELPER (DRY - NO REPEATED LOOKUPS)
-=================================================== */
+  /* ===================================================
+    COMPANY ID HELPER (DRY - NO REPEATED LOOKUPS)
+  =================================================== */
 
   async function getCompanyId(company, client = null) {
     const dbClient = client || pool;
     const result = await dbClient.query(
-      `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
+      `SELECT id FROM app_test.companies WHERE name = $1`,
       [company]
     );
     return result.rows[0]?.id || null;
   }
 
-/* ===================================================
-  CRITICAL FIX: STABLE FALLBACK GUID (NO Date.now())
-=================================================== */
+  /* ===================================================
+    CRITICAL FIX: STABLE FALLBACK GUID (NO Date.now())
+  =================================================== */
 
-const generateFallbackGuid = (company, uniqueValue, type) => {
-  return `${type}_${company}_${uniqueValue}`
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_-]/g, "")
-    .toLowerCase()
-    .slice(0, 250);
-};
+  const generateFallbackGuid = (company, uniqueValue, type) => {
+    return `${type}_${company}_${uniqueValue}`
+      .replace(/\s+/g, "_")
+      .replace(/[^a-zA-Z0-9_-]/g, "")
+      .toLowerCase()
+      .slice(0, 250);
+  };
 
-/* ===================================================
-  PROPER XML PARSING FOR PROFIT LOSS
-=================================================== */
+  /* ===================================================
+    PROPER XML PARSING FOR PROFIT LOSS
+  =================================================== */
 
-const parseProfitLossFromXML = (xmlString, company, fromDate, toDate) => {
-  try {
-    const content = typeof xmlString === 'string' ? xmlString : JSON.stringify(xmlString);
-
-    let totalSales = 0;
-    let totalPurchase = 0;
-    let stockValue = 0;
-    let indirectIncome = 0;
-    let indirectExpenses = 0;
-
-    // Extract Sales Accounts
-    const salesPattern = /<DSPDISPNAME>Sales Accounts?<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
-    const salesMatch = content.match(salesPattern);
-    if (salesMatch && !salesMatch[0].includes("Total")) {
-      totalSales = Math.abs(Number(salesMatch[1].replace(/,/g, '')) || 0);
+  const parseProfitLossFromXML = (xmlString, company, fromDate, toDate) => {
+    try {
+      const content = typeof xmlString === 'string' ? xmlString : JSON.stringify(xmlString);
+      
+      let totalSales = 0;
+      let totalPurchase = 0;
+      let stockValue = 0;
+      let indirectIncome = 0;
+      let indirectExpenses = 0;
+      
+      // Extract Sales Accounts
+      const salesPattern = /<DSPDISPNAME>Sales Accounts?<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
+      const salesMatch = content.match(salesPattern);
+      if (salesMatch && !salesMatch[0].includes("Total")) {
+        totalSales = Math.abs(Number(salesMatch[1].replace(/,/g, '')) || 0);
+      }
+      
+      // Extract Purchase Accounts
+      const purchasePattern = /<DSPDISPNAME>Purchase Accounts?<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
+      const purchaseMatch = content.match(purchasePattern);
+      if (purchaseMatch && !purchaseMatch[0].includes("Total")) {
+        totalPurchase = Math.abs(Number(purchaseMatch[1].replace(/,/g, '')) || 0);
+      }
+      
+      // Extract Closing Stock
+      const stockPattern = /<DSPDISPNAME>Closing Stock<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
+      const stockMatch = content.match(stockPattern);
+      if (stockMatch && !stockMatch[0].includes("Total")) {
+        stockValue = Math.abs(Number(stockMatch[1].replace(/,/g, '')) || 0);
+      }
+      
+      // Extract Indirect Incomes
+      const incomePattern = /<DSPDISPNAME>Indirect Incomes<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
+      const incomeMatch = content.match(incomePattern);
+      if (incomeMatch && !incomeMatch[0].includes("Total")) {
+        indirectIncome = Math.abs(Number(incomeMatch[1].replace(/,/g, '')) || 0);
+      }
+      
+      // Extract Indirect Expenses
+      const expensePattern = /<DSPDISPNAME>Indirect Expenses<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
+      const expenseMatch = content.match(expensePattern);
+      if (expenseMatch && !expenseMatch[0].includes("Total")) {
+        indirectExpenses = Math.abs(Number(expenseMatch[1].replace(/,/g, '')) || 0);
+      }
+      
+      const grossProfit = totalSales - totalPurchase;
+      const netProfit = grossProfit + indirectIncome - indirectExpenses;
+      const profitMargin = totalSales > 0 ? Number(((netProfit / totalSales) * 100).toFixed(2)) : 0;
+      
+      return {
+        totalSales,
+        totalPurchase,
+        stockValue,
+        indirectIncome,
+        indirectExpenses,
+        grossProfit: Number(grossProfit.toFixed(2)),
+        netProfit: Number(netProfit.toFixed(2)),
+        profitMargin
+      };
+    } catch (error) {
+      console.log("⚠️ Profit Loss parsing error:", error.message);
+      return null;
     }
+  };
 
-    // Extract Purchase Accounts
-    const purchasePattern = /<DSPDISPNAME>Purchase Accounts?<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
-    const purchaseMatch = content.match(purchasePattern);
-    if (purchaseMatch && !purchaseMatch[0].includes("Total")) {
-      totalPurchase = Math.abs(Number(purchaseMatch[1].replace(/,/g, '')) || 0);
-    }
-
-    // Extract Closing Stock
-    const stockPattern = /<DSPDISPNAME>Closing Stock<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
-    const stockMatch = content.match(stockPattern);
-    if (stockMatch && !stockMatch[0].includes("Total")) {
-      stockValue = Math.abs(Number(stockMatch[1].replace(/,/g, '')) || 0);
-    }
-
-    // Extract Indirect Incomes
-    const incomePattern = /<DSPDISPNAME>Indirect Incomes<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
-    const incomeMatch = content.match(incomePattern);
-    if (incomeMatch && !incomeMatch[0].includes("Total")) {
-      indirectIncome = Math.abs(Number(incomeMatch[1].replace(/,/g, '')) || 0);
-    }
-
-    // Extract Indirect Expenses
-    const expensePattern = /<DSPDISPNAME>Indirect Expenses<\/DSPDISPNAME>[\s\S]*?<BSMAINAMT>([\d,.-]+)<\/BSMAINAMT>/i;
-    const expenseMatch = content.match(expensePattern);
-    if (expenseMatch && !expenseMatch[0].includes("Total")) {
-      indirectExpenses = Math.abs(Number(expenseMatch[1].replace(/,/g, '')) || 0);
-    }
-
-    const grossProfit = totalSales - totalPurchase;
-    const netProfit = grossProfit + indirectIncome - indirectExpenses;
-    const profitMargin = totalSales > 0 ? Number(((netProfit / totalSales) * 100).toFixed(2)) : 0;
-
-    return {
-      totalSales,
-      totalPurchase,
-      stockValue,
-      indirectIncome,
-      indirectExpenses,
-      grossProfit: Number(grossProfit.toFixed(2)),
-      netProfit: Number(netProfit.toFixed(2)),
-      profitMargin
-    };
-  } catch (error) {
-    console.log("⚠️ Profit Loss parsing error:", error.message);
-    return null;
-  }
-};
-
-/* ===================================================
-  UPSERT FUNCTION (PRODUCTION-SAFE)
-=================================================== */
+  /* ===================================================
+    UPSERT FUNCTION (PRODUCTION-SAFE)
+  =================================================== */
 
 // Add counters at the top of your file for monitoring
 let ignoredSameGuid = 0;
@@ -205,27 +209,27 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   if (!allowedTables.includes(tableName)) {
     throw new Error(`Invalid table name: ${tableName}`);
   }
-
+  
   // Generate stable fallback GUID if missing
   let finalGuid = guid;
-  if (!finalGuid && tableName !== `${DB_SCHEMA}.profit_loss`) {
+  if (!finalGuid && tableName !== 'app_test.profit_loss') {
     const companyIndex = columns.indexOf('company_name');
-    const nameIndex = columns.indexOf('name') !== -1 ? columns.indexOf('name') :
+    const nameIndex = columns.indexOf('name') !== -1 ? columns.indexOf('name') : 
                       (columns.indexOf('ledger_name') !== -1 ? columns.indexOf('ledger_name') : -1);
-    const uniqueValue = nameIndex !== -1 && data[nameIndex] ? data[nameIndex] :
+    const uniqueValue = nameIndex !== -1 && data[nameIndex] ? data[nameIndex] : 
                       (columns.indexOf('group_name') !== -1 ? data[columns.indexOf('group_name')] : 'unknown');
-    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace(`${DB_SCHEMA}.`, ''));
+    finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace('app_test.', ''));
     console.log(`⚠️ Generated stable fallback GUID for ${tableName}: ${finalGuid}`);
   }
-
+  
   if (!finalGuid) {
     console.log(`⚠️ Missing GUID for ${tableName}`);
     return { action: "skipped", reason: "no_guid" };
   }
-
+  
   const dbClient = client || pool;
-
-  const companyIdIndex = columns.indexOf("company_id");
+  
+const companyIdIndex = columns.indexOf("company_id");
   const hasCompanyIdColumn = companyIdIndex !== -1;
 
   const companyId =
@@ -282,6 +286,7 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     );
   }
 
+
   // INSERT NEW RECORD
   if (existing.rows.length === 0) {
     const totalColumns = 3 + columns.length;
@@ -296,26 +301,26 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     await dbClient.query(query, values);
     return { action: "inserted" };
   }
-
+  
   // EXISTING RECORD FOUND - CHECK UPDATE CONDITIONS
   const dbGuid = existing.rows[0]?.guid;
   const dbMasterId = existing.rows[0]?.master_id;
   const dbAlterId = Number(existing.rows[0]?.alter_id || 0);
   const newAlterId = Number(alterId || 0);
-
+  
   const isSameMaster = String(masterId || "") === String(dbMasterId || "");
   const guidChanged = dbGuid !== finalGuid;
-
+  
   // DEBUG LOGGING
   const ledgerName =
-    columns.includes("ledger_name")
-      ? data[columns.indexOf("ledger_name")]
-      : (
-          columns.includes("name")
-            ? data[columns.indexOf("name")]
-            : "unknown"
-        );
-
+  columns.includes("ledger_name")
+    ? data[columns.indexOf("ledger_name")]
+    : (
+        columns.includes("name")
+          ? data[columns.indexOf("name")]
+          : "unknown"
+      );
+  
   console.log("🔍 UPDATE CHECK:", {
     table: tableName,
     ledger: ledgerName,
@@ -328,50 +333,51 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     dbAlterId,
     newAlterId
   });
-
+  
   // PRODUCTION-SAFE UPDATE LOGIC
-
+  
   // Case 1: Same master_id but GUID changed (different Tally source)
-  if (isSameMaster && guidChanged) {
+ // Case 1: Same master_id but GUID changed
+if (isSameMaster && guidChanged) {
 
-    console.log("⚠️ GUID SOURCE CHANGED", {
+  console.log("⚠️ GUID SOURCE CHANGED", {
+    table: tableName,
+    ledger: ledgerName,
+    masterId,
+    oldGuid: dbGuid,
+    newGuid: finalGuid,
+    oldAlterId: dbAlterId,
+    newAlterId
+  });
+
+  guidSourceChanged++;
+
+  // Production Safety:
+  // Don't overwrite newer data with older alter_id
+
+  if (newAlterId < dbAlterId) {
+
+    console.log("🚨 IGNORED RECORD", {
       table: tableName,
       ledger: ledgerName,
-      masterId,
-      oldGuid: dbGuid,
-      newGuid: finalGuid,
-      oldAlterId: dbAlterId,
+      reason: "guid_changed_old_alterid",
+      dbAlterId,
       newAlterId
     });
 
-    guidSourceChanged++;
+    ignoredDifferentGuid++;
 
-    // Production Safety:
-    // Don't overwrite newer data with older alter_id
-
-    if (newAlterId < dbAlterId) {
-
-      console.log("🚨 IGNORED RECORD", {
-        table: tableName,
-        ledger: ledgerName,
-        reason: "guid_changed_old_alterid",
-        dbAlterId,
-        newAlterId
-      });
-
-      ignoredDifferentGuid++;
-
-      return {
-        action: "ignored",
-        reason: "guid_changed_old_alterid"
-      };
-    }
+    return {
+      action: "ignored",
+      reason: "guid_changed_old_alterid"
+    };
   }
+}
   // Case 2: Normal alter_id comparison (same GUID or different master_id)
-  else if (newAlterId <= dbAlterId) {
+ else if (newAlterId <= dbAlterId) {
     // LOG IGNORED RECORDS FOR DEBUGGING
     const ignoreReason = guidChanged ? "guid_changed_but_different_master" : "alter_id_not_newer";
-
+    
     console.log("🚨 IGNORED RECORD", {
       table: tableName,
       ledger: ledgerName,
@@ -383,13 +389,13 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
       newAlterId,
       reason: ignoreReason
     });
-
+    
     if (dbGuid === finalGuid) {
       ignoredSameGuid++;
     } else {
       ignoredDifferentGuid++;
     }
-
+    
     return {
       action: "ignored",
       reason: ignoreReason,
@@ -397,12 +403,12 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
       newAlterId
     };
   }
-
+  
   // PERFORM UPDATE (reached only if conditions are met)
   const setClause = columns
     .map((col, i) => `${col} = $${i + 1}`)
     .join(", ");
-
+  
   const updateValues = [
     ...data,
     finalGuid,
@@ -410,7 +416,7 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     newAlterId,
     existing.rows[0].id
   ];
-
+  
   await dbClient.query(
     `
     UPDATE ${tableName}
@@ -424,7 +430,7 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     `,
     updateValues
   );
-
+  
   console.log("✅ UPDATED:", {
     table: tableName,
     ledger: ledgerName,
@@ -434,7 +440,7 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     guidChanged: guidChanged,
     alterIdChanged: newAlterId !== dbAlterId
   });
-
+  
   return {
     action: "updated",
     oldAlterId: dbAlterId,
@@ -451,49 +457,52 @@ function logUpsertSummary() {
   console.log(`  - Ignored (different GUID, different master): ${ignoredDifferentGuid}`);
 }
 
+  /* ===================================================
+    HEALTH API
+  =================================================== */
+
 /* ===================================================
    HEALTH API
 =================================================== */
 
 router.get("/health", async (req, res) => {
 
-  try {
+    try {
 
-    const xml = getCompaniesXML();
+        const xml = getCompaniesXML();
 
-        await sendToTallyViaConnector(companyId, xml, "sync");
-        await sendToTallyViaConnector(companyId, xml, "sync");
+        await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
-    return res.status(200).json({
-      status: "success",
-      message: "Sync service healthy",
-      services: {
-        api: "running",
-        tally: "connected"
-      },
-      timestamp: new Date()
-    });
+        return res.status(200).json({
+            status: "success",
+            message: "Sync service healthy",
+            services: {
+                api: "running",
+                tally: "connected"
+            },
+            timestamp: new Date()
+        });
 
-  } catch (err) {
+    } catch (err) {
 
-    return res.status(503).json({
-      status: "error",
-      message: "Tally is not reachable",
-      services: {
-        api: "running",
-        tally: "disconnected"
-      },
-      error: err.message,
-      timestamp: new Date()
-    });
+        return res.status(503).json({
+            status: "error",
+            message: "Tally is not reachable",
+            services: {
+                api: "running",
+                tally: "disconnected"
+            },
+            error: err.message,
+            timestamp: new Date()
+        });
 
-  }
+    }
 
 });
 
-/* ===================================================
-  COMPANY SYNC (FIXED - HANDLES DUPLICATES)
-=================================================== */
+  /* ===================================================
+    COMPANY SYNC (FIXED - HANDLES DUPLICATES)
+  =================================================== */
 router.get(
   "/companies",
   async (req, res) => {
@@ -535,7 +544,7 @@ router.get(
         }
       }
 
-      for (const [name, item] of uniqueCompanies) {
+for (const [name, item] of uniqueCompanies) {
         const guid = item?.guid || generateFallbackGuid(name, name, 'company');
         const masterId = item?.masterId || null;
         const alterId = item?.alterId || null;
@@ -543,7 +552,7 @@ router.get(
         const financial_year_end = item?.endingAt ? String(item.endingAt).slice(0, 4) : null;
 
         const result = await upsertRecord(
-          `${DB_SCHEMA}.companies`, guid, masterId, alterId,
+          "app_test.companies", guid, masterId, alterId,
           [name, financial_year_start, financial_year_end],
           ["name", "financial_year_start", "financial_year_end"],
           client
@@ -583,172 +592,171 @@ router.get(
   }
 );
 
-router.get("/ledgers", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({ status: "error", message: "company query parameter required" });
-  }
+  router.get("/ledgers", async (req, res) => {
+    const company = req.query.company;
+    if (!company) {
+      return res.status(400).json({ status: "error", message: "company query parameter required" });
+    }
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
-    if (!companyId) throw new Error("Company not found");
+      const companyId = await getCompanyId(company, client);
+      if (!companyId) throw new Error("Company not found");
 
       const xml = getLedgersXML(company);
-  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+  const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
-    console.log("");
-    console.log("=================================");
-    console.log("RAW XML RESPONSE");
-    console.log("=================================");
-    console.log(responseXML);
+  console.log("");
+  console.log("=================================");
+  console.log("RAW XML RESPONSE");
+  console.log("=================================");
+  console.log(responseXML);
 
-    const parsed = await parseXML(responseXML);
+  const parsed = await parseXML(responseXML);
 
-    console.log("");
-    console.log("=================================");
-    console.log("PARSED RESPONSE");
-    console.log("=================================");
-    console.log(JSON.stringify(parsed, null, 2));
+  console.log("");
+  console.log("=================================");
+  console.log("PARSED RESPONSE");
+  console.log("=================================");
+  console.log(JSON.stringify(parsed, null, 2));
 
-    const collection =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+  const collection =
+    parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION;
 
-    console.log("");
-    console.log("=================================");
-    console.log("COLLECTION");
-    console.log("=================================");
-    console.log(collection);
+  console.log("");
+  console.log("=================================");
+  console.log("COLLECTION");
+  console.log("=================================");
+  console.log(collection);
 
-    if (!collection) {
-      throw new Error("No ledger collection found");
-    }
+  if (!collection) {
+    throw new Error("No ledger collection found");
+  }
+      if (!collection) throw new Error("No ledger collection found");
 
-    const ledgerNames = [];
+      const ledgerNames = [];
 
-    function cleanLedgerName(name) {
-      return String(name)
-        .replace(/&#13;&#10;/g, ' ').replace(/&#13;/g, ' ').replace(/&#10;/g, ' ')
-        .replace(/\r\n/g, ' ').replace(/\r/g, ' ').replace(/\n/g, ' ')
-        .replace(/\u200B/g, '').replace(/\u200C/g, '').replace(/\u200D/g, '')
-        .replace(/\u00A0/g, ' ').replace(/\uFEFF/g, '')
-        .replace(/\u2028/g, ' ').replace(/\u2029/g, ' ')
-        .replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
-        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-        .replace(/\s+/g, ' ').replace(/\s+,/g, ',').trim();
-    }
-
-    function extractNames(obj) {
-      if (!obj) return;
-      if (Array.isArray(obj)) { obj.forEach(extractNames); return; }
-      if (typeof obj === "object") {
-        if (obj.NAME) {
-          let ledgerName = typeof obj.NAME === "object"
-            ? obj.NAME?._ || null
-            : String(obj.NAME).trim();
-          if (ledgerName && ledgerName !== "[object Object]") {
-            ledgerName = cleanLedgerName(ledgerName);
-            if (ledgerName) ledgerNames.push(ledgerName);
-          }
-        }
-        Object.values(obj).forEach(extractNames);
+      function cleanLedgerName(name) {
+        return String(name)
+          .replace(/&#13;&#10;/g, ' ').replace(/&#13;/g, ' ').replace(/&#10;/g, ' ')
+          .replace(/\r\n/g, ' ').replace(/\r/g, ' ').replace(/\n/g, ' ')
+          .replace(/\u200B/g, '').replace(/\u200C/g, '').replace(/\u200D/g, '')
+          .replace(/\u00A0/g, ' ').replace(/\uFEFF/g, '')
+          .replace(/\u2028/g, ' ').replace(/\u2029/g, ' ')
+          .replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+          .replace(/\s+/g, ' ').replace(/\s+,/g, ',').trim();
       }
-    }
 
-    extractNames(collection);
-    const uniqueLedgers = [...new Set(ledgerNames)];
-    console.log(`📊 Total ledgers found: ${uniqueLedgers.length}`);
+      function extractNames(obj) {
+        if (!obj) return;
+        if (Array.isArray(obj)) { obj.forEach(extractNames); return; }
+        if (typeof obj === "object") {
+          if (obj.NAME) {
+            let ledgerName = typeof obj.NAME === "object"
+              ? obj.NAME?._ || null
+              : String(obj.NAME).trim();
+            if (ledgerName && ledgerName !== "[object Object]") {
+              ledgerName = cleanLedgerName(ledgerName);
+              if (ledgerName) ledgerNames.push(ledgerName);
+            }
+          }
+          Object.values(obj).forEach(extractNames);
+        }
+      }
 
-    let inserted = 0, updated = 0;
-    const failedLedgers = [];
+      extractNames(collection);
+      const uniqueLedgers = [...new Set(ledgerNames)];
+      console.log(`📊 Total ledgers found: ${uniqueLedgers.length}`);
 
-    for (let i = 0; i < uniqueLedgers.length; i++) {
-      const ledgerName = uniqueLedgers[i];
-      const savepointName = `sp_ledger_${i}`;
+      let inserted = 0, updated = 0;
+      const failedLedgers = [];
 
-      // ✅ SAVEPOINT per ledger — one failure won't kill the whole transaction
-      await client.query(`SAVEPOINT ${savepointName}`);
+      for (let i = 0; i < uniqueLedgers.length; i++) {
+        const ledgerName = uniqueLedgers[i];
+        const savepointName = `sp_ledger_${i}`;
 
-      try {
-        console.log(`[${i + 1}/${uniqueLedgers.length}] Processing: ${ledgerName}`);
+        // ✅ SAVEPOINT per ledger — one failure won't kill the whole transaction
+        await client.query(`SAVEPOINT ${savepointName}`);
 
-        const xmlSafeName = ledgerName
-          .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+        try {
+          console.log(`[${i + 1}/${uniqueLedgers.length}] Processing: ${ledgerName}`);
 
-        let guid = null;
-        let gstNumber = null;
+          const xmlSafeName = ledgerName
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+          let guid = null;
+          let gstNumber = null;
 
           const detailsXML = getLedgerDetailsXML(company, xmlSafeName);
           const detailsResponse = await sendToTallyViaConnector(companyId, detailsXML, "sync");
-          const detailsResponse = await sendToTallyViaConnector(companyId, detailsXML, "sync");
 
-        if (
-          detailsResponse &&
-          !detailsResponse.includes("<ERRORMSG>") &&
-          !detailsResponse.includes("Unknown Request") &&
-          !detailsResponse.includes("<STATUS>0</STATUS>")
-        ) {
-          const detailsParsed = await parseXML(detailsResponse);
+          if (
+            detailsResponse &&
+            !detailsResponse.includes("<ERRORMSG>") &&
+            !detailsResponse.includes("Unknown Request") &&
+            !detailsResponse.includes("<STATUS>0</STATUS>")
+          ) {
+            const detailsParsed = await parseXML(detailsResponse);
 
-          let ledger =
-            detailsParsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER ||
-            detailsParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER ||
-            detailsParsed?.ENVELOPE?.BODY?.DATA?.LEDGER;
+            let ledger =
+              detailsParsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER ||
+              detailsParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER ||
+              detailsParsed?.ENVELOPE?.BODY?.DATA?.LEDGER;
 
           if (Array.isArray(ledger)) {
-            ledger = ledger[0];
+    ledger = ledger[0];
+  }
+
+  if (ledger?.GUID) {
+
+    guid = typeof ledger.GUID === "object"
+      ? ledger.GUID?._ || null
+      : String(ledger.GUID).trim();
+
+    gstNumber =
+      ledger?.PARTYGSTIN
+        ? (
+            typeof ledger.PARTYGSTIN === "object"
+              ? ledger.PARTYGSTIN?._ || null
+              : String(ledger.PARTYGSTIN).trim()
+          )
+        : null;
+
+    if (!gstNumber) {
+
+      console.log(
+        "GST DETAILS:",
+        JSON.stringify(
+          ledger?.["LEDGSTREGDETAILS.LIST"],
+          null,
+          2
+        )
+      );
+
+      gstNumber =
+        ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTIN ||
+        ledger?.["LEDGSTREGDETAILS.LIST"]?.REGISTRATIONNUMBER ||
+        ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTREGISTRATIONNUMBER ||
+        null;
+    }
+  }
           }
 
-          if (ledger?.GUID) {
-
-            guid = typeof ledger.GUID === "object"
-              ? ledger.GUID?._ || null
-              : String(ledger.GUID).trim();
-
-            gstNumber =
-              ledger?.PARTYGSTIN
-                ? (
-                    typeof ledger.PARTYGSTIN === "object"
-                      ? ledger.PARTYGSTIN?._ || null
-                      : String(ledger.PARTYGSTIN).trim()
-                  )
-                : null;
-
-            if (!gstNumber) {
-
-              console.log(
-                "GST DETAILS:",
-                JSON.stringify(
-                  ledger?.["LEDGSTREGDETAILS.LIST"],
-                  null,
-                  2
-                )
-              );
-
-              gstNumber =
-                ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTIN ||
-                ledger?.["LEDGSTREGDETAILS.LIST"]?.REGISTRATIONNUMBER ||
-                ledger?.["LEDGSTREGDETAILS.LIST"]?.GSTREGISTRATIONNUMBER ||
-                null;
-            }
+          if (!guid) {
+            console.log(`❌ No GUID from Tally, skipping: ${ledgerName}`);
+            await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+            failedLedgers.push({ name: ledgerName, reason: "No GUID returned from Tally" });
+            continue;
           }
-        }
-
-        if (!guid) {
-          console.log(`❌ No GUID from Tally, skipping: ${ledgerName}`);
-          await client.query(`RELEASE SAVEPOINT ${savepointName}`);
-          failedLedgers.push({ name: ledgerName, reason: "No GUID returned from Tally" });
-          continue;
-        }
 
           // ✅ Only pass columns your table ACTUALLY has
           const result = await upsertRecord(
-            `${DB_SCHEMA}.ledgers`,
+            "app_test.ledgers",
             guid,
             null,
             null,
@@ -757,163 +765,162 @@ router.get("/ledgers", async (req, res) => {
             client
           );
 
-        await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+          await client.query(`RELEASE SAVEPOINT ${savepointName}`);
 
-        if (result.action === "inserted") { inserted++; console.log(`✅ INSERTED: ${ledgerName}`); }
-        else if (result.action === "updated") { updated++; console.log(`🔄 UPDATED: ${ledgerName}`); }
+          if (result.action === "inserted") { inserted++; console.log(`✅ INSERTED: ${ledgerName}`); }
+          else if (result.action === "updated") { updated++; console.log(`🔄 UPDATED: ${ledgerName}`); }
 
-      } catch (err) {
-        // ✅ Roll back only THIS ledger, transaction stays alive
-        await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
-        await client.query(`RELEASE SAVEPOINT ${savepointName}`);
+        } catch (err) {
+          // ✅ Roll back only THIS ledger, transaction stays alive
+          await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+          await client.query(`RELEASE SAVEPOINT ${savepointName}`);
 
-        console.log(`❌ FAILED: ${ledgerName}`);
-        console.log(`   ERROR: ${err.message}`);          // <-- this will show the REAL first error
-        console.log(`   CODE:  ${err.code}`);             // e.g. 42703 = undefined_column
-        console.log(`   DETAIL: ${err.detail || ''}`);
+          console.log(`❌ FAILED: ${ledgerName}`);
+          console.log(`   ERROR: ${err.message}`);          // <-- this will show the REAL first error
+          console.log(`   CODE:  ${err.code}`);             // e.g. 42703 = undefined_column
+          console.log(`   DETAIL: ${err.detail || ''}`);
 
-        failedLedgers.push({ name: ledgerName, reason: err.message, code: err.code });
+          failedLedgers.push({ name: ledgerName, reason: err.message, code: err.code });
+        }
       }
+
+      await client.query("COMMIT");
+
+      if (failedLedgers.length > 0) {
+        console.log("=== FAILED LEDGERS ===");
+        failedLedgers.slice(0, 20).forEach((l, idx) => {
+          console.log(`${idx + 1}. "${l.name}" | code: ${l.code} | reason: ${l.reason}`);
+        });
+      }
+
+      console.log("=================================");
+      console.log(`Total   : ${uniqueLedgers.length}`);
+      console.log(`Inserted: ${inserted} | Updated: ${updated} | Failed: ${failedLedgers.length}`);
+      console.log("=================================");
+
+      return res.status(200).json({
+        status: "success",
+        company,
+        summary: {
+          total_found: uniqueLedgers.length,
+          inserted,
+          updated,
+          failed: failedLedgers.length,
+          // First failed ledger shown to help debug
+          first_failure: failedLedgers[0] || null
+        }
+      });
+
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.log("❌ LEDGER SYNC ERROR:", err.message);
+      return res.status(500).json({ status: "error", message: err.message });
+    } finally {
+      client.release();
     }
+  });
 
-    await client.query("COMMIT");
+  /* ===================================================
+    BANK ACCOUNTS SYNC (UPDATED WITH company_id & IMPROVED TALLY COMPATIBILITY)
+  =================================================== */
 
-    if (failedLedgers.length > 0) {
-      console.log("=== FAILED LEDGERS ===");
-      failedLedgers.slice(0, 20).forEach((l, idx) => {
-        console.log(`${idx + 1}. "${l.name}" | code: ${l.code} | reason: ${l.reason}`);
+  router.get("/group-summary-bank", async (req, res) => {
+    const company = req.query.company;
+    if (!company) {
+      return res.status(400).json({
+        status: "error",
+        message: "company query parameter required"
       });
     }
-
-    console.log("=================================");
-    console.log(`Total   : ${uniqueLedgers.length}`);
-    console.log(`Inserted: ${inserted} | Updated: ${updated} | Failed: ${failedLedgers.length}`);
-    console.log("=================================");
-
-    return res.status(200).json({
-      status: "success",
-      company,
-      summary: {
-        total_found: uniqueLedgers.length,
-        inserted,
-        updated,
-        failed: failedLedgers.length,
-        // First failed ledger shown to help debug
-        first_failure: failedLedgers[0] || null
+    
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      
+      // Get company_id using helper
+      const companyId = await getCompanyId(company, client);
+      if (!companyId) {
+        throw new Error("Company not found");
       }
-    });
-
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ LEDGER SYNC ERROR:", err.message);
-    return res.status(500).json({ status: "error", message: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-/* ===================================================
-  BANK ACCOUNTS SYNC (UPDATED WITH company_id & IMPROVED TALLY COMPATIBILITY)
-=================================================== */
-
-router.get("/group-summary-bank", async (req, res) => {
-  const company = req.query.company;
-  if (!company) {
-    return res.status(400).json({
-      status: "error",
-      message: "company query parameter required"
-    });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // Get company_id using helper
-    const companyId = await getCompanyId(company, client);
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
-
-    const xml = getGroupSummaryBankXML(company);
+      
+      const xml = getGroupSummaryBankXML(company);
     const responseXML =
-    await sendToTallyViaConnector(companyId, xml, "sync");
-    await sendToTallyViaConnector(companyId, xml, "sync");
+    await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
-    console.log(
-      "RAW TALLY XML:",
-      responseXML
-    );
-    const parsed = await parseXML(responseXML);
-
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
-    console.log("TOTAL TALLY RECORDS:", list.length);
-
-    let inserted = 0, updated = 0, ignored = 0;
-
+  console.log(
+    "RAW TALLY XML:",
+    responseXML
+  );
+      const parsed = await parseXML(responseXML);
+      
+      const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+      const list = Array.isArray(collection) ? collection : [collection];
+      console.log("TOTAL TALLY RECORDS:", list.length);
+      
+      let inserted = 0, updated = 0, ignored = 0;
+      
     for (const ledger of list) {
 
-      const ledgerName = clean(
-        ledger?.$?.NAME ||
-        ledger?.["@NAME"] ||
-        ledger?.NAME ||
-        ledger?.MAILINGNAME ||
-        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
-      );
-      if (!ledgerName) {
-
-        console.log(
-          "SKIPPED RECORD:",
-          JSON.stringify(ledger, null, 2)
-        );
-
-        continue;
-      }
+    const ledgerName = clean(
+    ledger?.$?.NAME ||
+    ledger?.["@NAME"] ||
+    ledger?.NAME ||
+    ledger?.MAILINGNAME ||
+    ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
+  );
+    if (!ledgerName) {
 
       console.log(
-        "PROCESSING:",
-        ledgerName
+        "SKIPPED RECORD:",
+        JSON.stringify(ledger, null, 2)
       );
 
-      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'bank');
-      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
-      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+      continue;
+    }
+
+    console.log(
+      "PROCESSING:",
+      ledgerName
+    );
+        
+        const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+        const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'bank');
+        const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+        const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
 
       const openingBalance = cleanBalance(
-        ledger?.OPENINGBALANCE
-      );
+    ledger?.OPENINGBALANCE
+  );
 
-      const closingBalance = cleanBalance(
-        ledger?.CLOSINGBALANCE
-      );
+  const closingBalance = cleanBalance(
+    ledger?.CLOSINGBALANCE
+  );
 
-      const email = clean(
-        ledger?.EMAIL ||
-        ledger?.LEDGEREMAIL
-      );
+  const email = clean(
+    ledger?.EMAIL ||
+    ledger?.LEDGEREMAIL
+  );
 
-      const phoneNumber = clean(
-        ledger?.PHONE ||
-        ledger?.PHONENUMBER ||
-        ledger?.LEDGERPHONE
-      );
+  const phoneNumber = clean(
+    ledger?.PHONE ||
+    ledger?.PHONENUMBER ||
+    ledger?.LEDGERPHONE
+  );
 
-      const primaryPhoneNumber = clean(
-        ledger?.MOBILE ||
-        ledger?.MOBILENUMBER ||
-        ledger?.LEDGERMOBILE
-      );
+  const primaryPhoneNumber = clean(
+    ledger?.MOBILE ||
+    ledger?.MOBILENUMBER ||
+    ledger?.LEDGERMOBILE
+  );
 
-      const gstNumber = clean(
-        ledger?.PARTYGSTIN ||
-        ledger?.GSTIN
-      );
-      const openingBalanceType =
-        Number(openingBalance) < 0
-          ? "Dr"
-          : "Cr";
+  const gstNumber = clean(
+    ledger?.PARTYGSTIN ||
+    ledger?.GSTIN
+  );
+  const openingBalanceType =
+    Number(openingBalance) < 0
+      ? "Dr"
+      : "Cr";
 
   const closingBalanceType =
     Number(closingBalance) < 0
@@ -921,7 +928,7 @@ router.get("/group-summary-bank", async (req, res) => {
       : "Cr";
         
         const result = await upsertRecord(
-          `${DB_SCHEMA}.bank_accounts`, guid, masterId, alterId,
+          "app_test.bank_accounts", guid, masterId, alterId,
           [
             companyId,
             company,
@@ -944,133 +951,133 @@ router.get("/group-summary-bank", async (req, res) => {
             ),
             clean(ledger?.SWIFTCODE),
 
-          clean(
-            ledger?.BANKNAME
-          ),
+  clean(
+    ledger?.BANKNAME
+  ),
 
-          clean(
-            ledger?.BANKBRANCHNAME ||
-            ledger?.BRANCHNAME
-          ),
-          Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-            ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-            : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
-          clean(ledger?.STATENAME || ledger?.LEDSTATENAME || ledger?.STATE),
-          clean(ledger?.COUNTRYNAME),
+  clean(
+    ledger?.BANKBRANCHNAME ||
+    ledger?.BRANCHNAME
+  ),
+            Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+              ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+              : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
+            clean(ledger?.STATENAME || ledger?.LEDSTATENAME || ledger?.STATE),
+            clean(ledger?.COUNTRYNAME),
           clean(ledger?.PINCODE),
 
-          gstNumber,
+  gstNumber,
 
-          openingBalance,
-          closingBalance,
-          openingBalanceType,
-          closingBalanceType,
+  openingBalance,
+  closingBalance,
+  openingBalanceType,
+  closingBalanceType,
 
-          email,
+  email,
 
-          phoneNumber,
+  phoneNumber,
 
-          primaryPhoneNumber
-        ],
+  primaryPhoneNumber
+          ],
         [
-          "company_id",
-          "company_name",
-          "ledger_name",
-          "parent_group",
+    "company_id",
+    "company_name",
+    "ledger_name",
+    "parent_group",
 
-          "account_holder_name",
-          "account_number",
+    "account_holder_name",
+    "account_number",
 
-          "ifsc_code",
-          "swift_code",
+    "ifsc_code",
+    "swift_code",
 
-          "bank_name",
-          "branch",
+    "bank_name",
+    "branch",
 
-          "address",
-          "state",
-          "country",
-          "pincode",
+    "address",
+    "state",
+    "country",
+    "pincode",
 
-          "gst_number",
+    "gst_number",
 
-          "opening_balance",
-          "closing_balance",
+    "opening_balance",
+    "closing_balance",
 
-          "opening_balance_type",
-          "closing_balance_type",
+    "opening_balance_type",
+    "closing_balance_type",
 
-          "email",
-          "phone_number",
-          "primary_phone_number"
-        ],
-        client
-      );
-
-      if (result.action === "inserted") inserted++;
-      else if (result.action === "updated") updated++;
-      else ignored++;
+    "email",
+    "phone_number",
+    "primary_phone_number"
+  ],
+          client
+        );
+        
+        if (result.action === "inserted") inserted++;
+        else if (result.action === "updated") updated++;
+        else ignored++;
+      }
+      
+      await client.query("COMMIT");
+      
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Bank accounts synced successfully",
+        company,
+        summary: { inserted, updated, ignored, total: list.length }
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.log("❌ BANK ACCOUNTS ERROR:", err.message);
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+    } finally {
+      client.release();
     }
-
-    await client.query("COMMIT");
-
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Bank accounts synced successfully",
-      company,
-      summary: { inserted, updated, ignored, total: list.length }
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ BANK ACCOUNTS ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  } finally {
-    client.release();
-  }
-});
-
-/* ===================================================
-  VOUCHER SYNC (FIXED - PROPER TRANSACTION HANDLING)
-=================================================== */
-
-router.get("/voucher-sync", async (req, res) => {
-  const startTime = Date.now();
-  const company = req.query.company;
-  const fromDate = req.query.fromDate;
-  const toDate = req.query.toDate;
-  const voucherType = req.query.voucherType;
-  const party = req.query.party;
-
-  /* =========================================
-    VALIDATION
-  ========================================= */
-  if (!company || !fromDate || !toDate) {
-    await createAuditLog({
-      action: "SYNC_VALIDATION_FAILED",
-      entity: "voucher-sync",
-      metadata: { company, fromDate, toDate },
-      logType: "ERROR"
-    });
-    return res.status(400).json({
-      status: "error",
-      message: "company, fromDate and toDate required"
-    });
-  }
-
-  /* =========================================
-    SYNC START LOG
-  ========================================= */
-  await createAuditLog({
-    action: "SYNC_START",
-    entity: "voucher-sync",
-    metadata: { company, fromDate, toDate, voucherType, party }
   });
 
-  const client = await pool.connect();
+  /* ===================================================
+    VOUCHER SYNC (FIXED - PROPER TRANSACTION HANDLING)
+  =================================================== */
+
+  router.get("/voucher-sync", async (req, res) => {
+    const startTime = Date.now();
+    const company = req.query.company;
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
+    const voucherType = req.query.voucherType;
+    const party = req.query.party;
+
+    /* =========================================
+      VALIDATION
+    ========================================= */
+    if (!company || !fromDate || !toDate) {
+      await createAuditLog({
+        action: "SYNC_VALIDATION_FAILED",
+        entity: "voucher-sync",
+        metadata: { company, fromDate, toDate },
+        logType: "ERROR"
+      });
+      return res.status(400).json({
+        status: "error",
+        message: "company, fromDate and toDate required"
+      });
+    }
+
+    /* =========================================
+      SYNC START LOG
+    ========================================= */
+    await createAuditLog({
+      action: "SYNC_START",
+      entity: "voucher-sync",
+      metadata: { company, fromDate, toDate, voucherType, party }
+    });
+
+    const client = await pool.connect();
 
     try {
       /* =====================================
@@ -1085,119 +1092,120 @@ router.get("/voucher-sync", async (req, res) => {
         BUILD XML & FETCH FROM TALLY
       ===================================== */
       const xml = getLedgerVouchersXML(company, fromDate, toDate);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
 
-    /* =====================================
-      COLLECTION
-    ===================================== */
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
+      /* =====================================
+        COLLECTION
+      ===================================== */
+      const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
+      const list = Array.isArray(collection) ? collection : [collection];
 
-    /* =====================================
-      TALLY RESPONSE LOG
-    ===================================== */
-    await createAuditLog({
-      action: "TALLY_RESPONSE",
-      entity: "voucher-sync",
-      metadata: { company, totalRecords: list.length }
-    });
+      /* =====================================
+        TALLY RESPONSE LOG
+      ===================================== */
+      await createAuditLog({
+        action: "TALLY_RESPONSE",
+        entity: "voucher-sync",
+        metadata: { company, totalRecords: list.length }
+      });
 
-    /* =====================================
-      COUNTERS
-    ===================================== */
-    let inserted = 0;
-    let updated = 0;
-    let ignored = 0;
-    let failed = 0;
+      /* =====================================
+        COUNTERS
+      ===================================== */
+      let inserted = 0;
+      let updated = 0;
+      let ignored = 0;
+      let failed = 0;
 
-    /* =====================================
-      PROCESS EACH VOUCHER IN SEPARATE TRANSACTION
-      (To prevent one failure from breaking everything)
-    ===================================== */
-    for (const voucher of list) {
-      try {
-        const voucherNumber = clean(voucher?.VOUCHERNUMBER);
-        if (!voucherNumber) {
-          failed++;
-          continue;
-        }
-
-        /* =================================
-          LEDGER ENTRIES
-        ================================= */
-        const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
-        const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
-
-        /* ================================
-          BASIC VALUES
-        ================================= */
-        const originalGuid = voucher?.GUID || null;
-        const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
-        const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
-        const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
-
-        /* =================================
-          AMOUNTS
-        ================================= */
-        let debitAmount = 0;
-        let creditAmount = 0;
-
-        const partyEntry = normalized.find(
-          entry =>
-            clean(entry?.LEDGERNAME) === partyLedgerName
-        );
-
-        if (partyEntry) {
-
-          const amount = Number(
-            partyEntry?.AMOUNT || 0
-          );
-
-          if (amount < 0) {
-            debitAmount = Math.abs(amount);
-          } else {
-            creditAmount = amount;
+      /* =====================================
+        PROCESS EACH VOUCHER IN SEPARATE TRANSACTION
+        (To prevent one failure from breaking everything)
+      ===================================== */
+      for (const voucher of list) {
+        try {
+          const voucherNumber = clean(voucher?.VOUCHERNUMBER);
+          if (!voucherNumber) {
+            failed++;
+            continue;
           }
 
-        }
+          /* =================================
+            LEDGER ENTRIES
+          ================================= */
+          const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
+          const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+          
 
-        const balance = debitAmount - creditAmount;
+            /* ================================
+            BASIC VALUES
+          ================================= */
+          const originalGuid = voucher?.GUID || null;
+          const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+          const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
+          const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
 
-        console.log("VOUCHER DEBUG");
-        console.log({
-          voucherNumber,
-          debitAmount,
-          creditAmount,
-          balance
-        });
+          /* =================================
+            AMOUNTS
+          ================================= */
+      let debitAmount = 0;
+  let creditAmount = 0;
 
-        /* ================================
-          FILTERS
-        ================================= */
-        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
-          ignored++;
-          continue;
-        }
-        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
-          ignored++;
-          continue;
-        }
+  const partyEntry = normalized.find(
+    entry =>
+      clean(entry?.LEDGERNAME) === partyLedgerName
+  );
+
+  if (partyEntry) {
+
+    const amount = Number(
+      partyEntry?.AMOUNT || 0
+    );
+
+    if (amount < 0) {
+      debitAmount = Math.abs(amount);
+    } else {
+      creditAmount = amount;
+    }
+
+  }
+
+          const balance = debitAmount - creditAmount;
+
+  console.log("VOUCHER DEBUG");
+  console.log({
+    voucherNumber,
+    debitAmount,
+    creditAmount,
+    balance
+  });
+
+      
+          /* ================================
+            FILTERS
+          ================================= */
+          if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
+            ignored++;
+            continue;
+          }
+          if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
+            ignored++;
+            continue;
+          }
 
           /* ================================
             CHECK IF VOUCHER EXISTS (WITHOUT TRANSACTION)
           ================================ */
           const existingVoucher = await client.query(
-            `SELECT id FROM ${DB_SCHEMA}.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
+            `SELECT id FROM app_test.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
             [companyId, voucherNumber, voucherDate]
           );
 
-        if (existingVoucher.rows.length > 0) {
+          if (existingVoucher.rows.length > 0) {
 
     await client.query(
       `
-      UPDATE ${DB_SCHEMA}.vouchers
+      UPDATE app_test.vouchers
       SET
         voucher_type = $1,
         party_ledger_name = $2,
@@ -1225,336 +1233,345 @@ router.get("/voucher-sync", async (req, res) => {
       ]
     );
 
-          updated++;
-          continue;
-        }
+    updated++;
+    continue;
+  }
 
-        /* ================================
-          START A NEW TRANSACTION FOR THIS VOUCHER
-        ================================ */
+    /* ================================
+    START A NEW TRANSACTION FOR THIS VOUCHER
+  ================================ */
 
-        const voucherClient =
-          await pool.connect();
+  /* ================================
+    START TRANSACTION
+  ================================ */
 
-        try {
+  const voucherClient =
+    await pool.connect();
 
-          await voucherClient.query(
-            "BEGIN"
-          );
+  try {
 
-          /* ================================
-            INSERT VOUCHER
-          ================================ */
+    await voucherClient.query(
+      "BEGIN"
+    );
 
-          const guid =
+    /* ================================
+      INSERT VOUCHER
+    ================================ */
 
-            originalGuid ||
+    const guid =
 
-            generateFallbackGuid(
+      originalGuid ||
 
-              company,
+      generateFallbackGuid(
 
-              `${voucherDate}_${voucherTypeName}_${voucherNumber}`,
+        company,
 
-              "voucher"
+        `${voucherDate}_${voucherTypeName}_${voucherNumber}`,
 
-            );
+        "voucher"
 
-          const masterId =
-            voucher?.MASTERID || null;
+      );
 
-          const alterId =
-            voucher?.ALTERID || 0;
+    const masterId =
+      voucher?.MASTERID || null;
 
-          await voucherClient.query(
+    const alterId =
+      voucher?.ALTERID || 0;
+
+    await voucherClient.query(
 
       `
-      INSERT INTO ${DB_SCHEMA}.vouchers (
+      INSERT INTO app_test.vouchers (
 
-              guid,
-              master_id,
-              alter_id,
-              company_id,
-              company_name,
-              voucher_date,
-              voucher_type,
-              voucher_number,
-              party_ledger_name,
-              narration,
-              ledger_entries,
-              debit_amount,
-              credit_amount,
-              balance,
-              created_at,
-              updated_at
+        guid,
+        master_id,
+        alter_id,
+        company_id,
+        company_name,
+        voucher_date,
+        voucher_type,
+        voucher_number,
+        party_ledger_name,
+        narration,
+        ledger_entries,
+        debit_amount,
+        credit_amount,
+        balance,
+        created_at,
+        updated_at
 
-            )
+      )
 
-            VALUES (
+      VALUES (
 
-              $1, $2, $3, $4, $5,
-              $6, $7, $8, $9, $10,
-              $11, $12, $13, $14,
-              NOW(), NOW()
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10,
+        $11, $12, $13, $14,
+        NOW(), NOW()
 
-            )
-            `,
+      )
+      `,
 
-            [
+      [
 
-              guid,
-              masterId,
-              alterId,
-              companyId,
-              company,
+        guid,
+        masterId,
+        alterId,
+        companyId,
+        company,
 
-              voucherDate,
-              voucherTypeName,
-              voucherNumber,
-              partyLedgerName,
+        voucherDate,
+        voucherTypeName,
+        voucherNumber,
+        partyLedgerName,
 
-              clean(voucher?.NARRATION),
+        clean(voucher?.NARRATION),
 
-              JSON.stringify(normalized),
+        JSON.stringify(normalized),
 
-              debitAmount,
+        debitAmount,
 
-              creditAmount,
+        creditAmount,
 
-              balance
+      balance
 
-            ]
+      ]
 
-          );
+    );
 
-          /* ================================
-            INSERT SALES ITEMS
-          ================================ */
+    /* ================================
+      INSERT SALES ITEMS
+    ================================ */
 
-          for (const entry of normalized) {
+    for (const entry of normalized) {
 
-            const inventoryAllocations =
-              entry?.["INVENTORYALLOCATIONS.LIST"];
+      const inventoryAllocations =
+        entry?.["INVENTORYALLOCATIONS.LIST"];
 
-            const allocations =
+      const allocations =
 
-              Array.isArray(
-                inventoryAllocations
-              )
+        Array.isArray(
+          inventoryAllocations
+        )
 
-                ? inventoryAllocations
+          ? inventoryAllocations
 
-                : inventoryAllocations
+          : inventoryAllocations
 
-                ? [inventoryAllocations]
+          ? [inventoryAllocations]
 
-                : [];
+          : [];
 
-            if (allocations.length === 0) {
+      if (allocations.length === 0) {
 
-              continue;
+        continue;
 
-            }
+      }
 
-            for (const item of allocations) {
+      for (const item of allocations) {
 
-              if (!item?.STOCKITEMNAME) {
+        if (!item?.STOCKITEMNAME) {
 
-                continue;
-
-              }
-
-              await voucherClient.query(
-
-          `
-          INSERT INTO ${DB_SCHEMA}.sales_items (
-
-                  company_id,
-                  company_name,
-                  voucher_number,
-                  description,
-                  actual_quantity,
-                  billed_quantity,
-                  total_amount,
-                  created_at,
-                  updated_at
-
-                )
-
-                VALUES (
-
-                  $1, $2, $3, $4,
-                  $5, $6, $7,
-                  NOW(),
-                  NOW()
-
-                )
-                `,
-
-                [
-
-                  companyId,
-
-                  company,
-
-                  voucherNumber,
-
-                  item?.STOCKITEMNAME || null,
-
-                  parseFloat(
-                    String(
-                      item?.ACTUALQTY || 0
-                    ).replace(/[^\d.-]/g, "")
-                  ),
-
-                  parseFloat(
-                    String(
-                      item?.BILLEDQTY || 0
-                    ).replace(/[^\d.-]/g, "")
-                  ),
-
-                  Math.abs(creditAmount)
-
-                ]
-
-              );
-
-            }
-
-          }
-
-          /* ================================
-            COMMIT
-          ================================ */
-
-          await voucherClient.query(
-            "COMMIT"
-          );
-
-          inserted++;
-
-        } catch (voucherError) {
-
-          await voucherClient.query(
-            "ROLLBACK"
-          );
-
-          failed++;
-
-          console.log(
-            `❌ Voucher ${voucherNumber} failed:`,
-            voucherError.message
-          );
-
-          await createAuditLog({
-
-            action:
-              "VOUCHER_SYNC_RECORD_FAILED",
-
-            entity:
-              "voucher-sync",
-
-            metadata: {
-
-              company,
-
-              error:
-                voucherError.message,
-
-              voucher:
-                voucherNumber
-
-            },
-
-            logType:
-              "ERROR"
-
-          });
-
-        } finally {
-
-          voucherClient.release();
+          continue;
 
         }
 
-      } catch (loopError) {
-        failed++;
-        console.log(`❌ Voucher ${voucher?.VOUCHERNUMBER} failed:`, loopError.message);
+        await voucherClient.query(
 
-        await createAuditLog({
-          action: "VOUCHER_SYNC_RECORD_FAILED",
-          entity: "voucher-sync",
-          metadata: { company, error: loopError.message, voucher: voucher?.VOUCHERNUMBER },
-          logType: "ERROR"
-        });
+          `
+          INSERT INTO app_test.sales_items (
+
+            company_id,
+            company_name,
+            voucher_number,
+            description,
+            actual_quantity,
+            billed_quantity,
+            total_amount,
+            created_at,
+            updated_at
+
+          )
+
+          VALUES (
+
+            $1, $2, $3, $4,
+            $5, $6, $7,
+            NOW(),
+            NOW()
+
+          )
+          `,
+
+          [
+
+            companyId,
+
+            company,
+
+            voucherNumber,
+
+            item?.STOCKITEMNAME || null,
+
+            parseFloat(
+              String(
+                item?.ACTUALQTY || 0
+              ).replace(/[^\d.-]/g, "")
+            ),
+
+            parseFloat(
+              String(
+                item?.BILLEDQTY || 0
+              ).replace(/[^\d.-]/g, "")
+            ),
+
+            Math.abs(creditAmount)
+
+          ]
+
+        );
+
       }
+
     }
 
-    /* =====================================
-      EXECUTION TIME
-    ===================================== */
-    const executionTime = Date.now() - startTime;
+    /* ================================
+      COMMIT
+    ================================ */
 
-    /* =====================================
-      FINAL SUCCESS LOG
-    ===================================== */
+    await voucherClient.query(
+      "COMMIT"
+    );
+
+    inserted++;
+
+  } catch (voucherError) {
+
+    await voucherClient.query(
+      "ROLLBACK"
+    );
+
+    failed++;
+
+    console.log(
+      `❌ Voucher ${voucherNumber} failed:`,
+      voucherError.message
+    );
+
     await createAuditLog({
-      action: "SYNC_COMPLETE",
-      entity: "voucher-sync",
-      metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, totalRecords: list.length, executionTime }
+
+      action:
+        "VOUCHER_SYNC_RECORD_FAILED",
+
+      entity:
+        "voucher-sync",
+
+      metadata: {
+
+        company,
+
+        error:
+          voucherError.message,
+
+        voucher:
+          voucherNumber
+
+      },
+
+      logType:
+        "ERROR"
+
     });
 
-    /* =====================================
-      FINAL RESPONSE
-    ===================================== */
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Vouchers synced successfully",
-      company,
-      fromDate,
-      toDate,
-      summary: { inserted, updated, ignored, failed, total: list.length, executionTime },
-      data: list.map((voucher) => ({
-        guid: voucher?.GUID || null,
-        master_id: voucher?.MASTERID || null,
-        alter_id: voucher?.ALTERID || null,
-        company_name: company,
-        date: clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
-        voucher_type: clean(voucher?.VOUCHERTYPENAME),
-        voucher_number: clean(voucher?.VOUCHERNUMBER),
-        party_ledger_name: clean(voucher?.PARTYLEDGERNAME),
-        narration: clean(voucher?.NARRATION),
-        ledger_entries: (() => {
-          const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
-          const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
-          return normalized;
-        })()
-      }))
-    });
-  } catch (err) {
-    /* =====================================
-      ERROR LOG
-    ===================================== */
-    await createAuditLog({
-      action: "SYNC_FAILED",
-      entity: "voucher-sync",
-      metadata: { company, fromDate, toDate, error: err.message },
-      logType: "ERROR"
-    });
-    console.log("❌ VOUCHER SYNC ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
   } finally {
-    client.release();
-  }
-});
 
-/* ===================================================
-  PARENT GROUPS SYNC (UPDATED WITH company_id)
-=================================================== */
+    voucherClient.release();
+
+  }
+
+  
+
+        } catch (loopError) {
+          failed++;
+          console.log(`❌ Voucher ${voucher?.VOUCHERNUMBER} failed:`, loopError.message);
+          
+          await createAuditLog({
+            action: "VOUCHER_SYNC_RECORD_FAILED",
+            entity: "voucher-sync",
+            metadata: { company, error: loopError.message, voucher: voucher?.VOUCHERNUMBER },
+            logType: "ERROR"
+          });
+        }
+      }
+
+          /* =====================================
+        EXECUTION TIME
+      ===================================== */
+      const executionTime = Date.now() - startTime;
+
+      /* =====================================
+        FINAL SUCCESS LOG
+      ===================================== */
+      await createAuditLog({
+        action: "SYNC_COMPLETE",
+        entity: "voucher-sync",
+        metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, totalRecords: list.length, executionTime }
+      });
+
+
+      /* =====================================
+        FINAL RESPONSE
+      ===================================== */
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Vouchers synced successfully",
+        company,
+        fromDate,
+        toDate,
+        summary: { inserted, updated, ignored, failed, total: list.length, executionTime },
+        data: list.map((voucher) => ({
+          guid: voucher?.GUID || null,
+          master_id: voucher?.MASTERID || null,
+          alter_id: voucher?.ALTERID || null,
+          company_name: company,
+          date: clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
+          voucher_type: clean(voucher?.VOUCHERTYPENAME),
+          voucher_number: clean(voucher?.VOUCHERNUMBER),
+          party_ledger_name: clean(voucher?.PARTYLEDGERNAME),
+          narration: clean(voucher?.NARRATION),
+          ledger_entries: (() => {
+            const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
+            const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+            return normalized;
+          })()
+        }))
+      });
+    } catch (err) {
+      /* =====================================
+    
+      /* =====================================
+        ERROR LOG
+      ===================================== */
+      await createAuditLog({
+        action: "SYNC_FAILED",
+        entity: "voucher-sync",
+        metadata: { company, fromDate, toDate, error: err.message },
+        logType: "ERROR"
+      });
+      console.log("❌ VOUCHER SYNC ERROR:", err.message);
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  /* ===================================================
+    PARENT GROUPS SYNC (UPDATED WITH company_id)
+  =================================================== */
 
   router.get("/parent-groups", async (req, res) => {
     const company = req.query.company;
@@ -1576,8 +1593,7 @@ router.get("/voucher-sync", async (req, res) => {
       }
       
       const xml = getParentGroupsXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1601,7 +1617,7 @@ router.get("/voucher-sync", async (req, res) => {
         const alterId = group?.ALTERID || group?.$?.ALTERID || null;
         
         const result = await upsertRecord(
-          `${DB_SCHEMA}.parent_groups`, guid, masterId, alterId,
+          "app_test.parent_groups", guid, masterId, alterId,
           [companyId, company, groupName],
           ["company_id", "company_name", "group_name"],
           client
@@ -1633,9 +1649,9 @@ router.get("/voucher-sync", async (req, res) => {
     }
   });
 
-/* ===================================================
-  GROUP BALANCES SYNC (UPDATED WITH company_id)
-=================================================== */
+  /* ===================================================
+    GROUP BALANCES SYNC (UPDATED WITH company_id)
+  =================================================== */
 
   router.get("/payable-debtors", async (req, res) => {
     const company = req.query.company;
@@ -1658,8 +1674,7 @@ router.get("/voucher-sync", async (req, res) => {
       
       const getGroupData = async (groupName) => {
         const xml = getGroupBalanceXML(company, groupName);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
         const parsed = await parseXML(responseXML);
         const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
         
@@ -1683,7 +1698,7 @@ router.get("/voucher-sync", async (req, res) => {
       let inserted = 0, updated = 0, ignored = 0;
       
       const debtorsResult = await upsertRecord(
-        `${DB_SCHEMA}.group_balances`, debtors.guid, debtors.masterId, debtors.alterId,
+        "app_test.group_balances", debtors.guid, debtors.masterId, debtors.alterId,
         [companyId, company, debtors.group_name, debtors.parent_group, debtors.opening_balance, debtors.closing_balance],
         ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
         client
@@ -1694,7 +1709,7 @@ router.get("/voucher-sync", async (req, res) => {
       else ignored++;
       
       const creditorsResult = await upsertRecord(
-        `${DB_SCHEMA}.group_balances`, creditors.guid, creditors.masterId, creditors.alterId,
+        "app_test.group_balances", creditors.guid, creditors.masterId, creditors.alterId,
         [companyId, company, creditors.group_name, creditors.parent_group, creditors.opening_balance, creditors.closing_balance],
         ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
         client
@@ -1726,9 +1741,9 @@ router.get("/voucher-sync", async (req, res) => {
     }
   });
 
-/* ===================================================
-  ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
-=================================================== */
+  /* ===================================================
+    ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
+  =================================================== */
 
   router.get("/all-parent-groups", async (req, res) => {
     const company = req.query.company;
@@ -1752,8 +1767,7 @@ router.get("/voucher-sync", async (req, res) => {
       }
       
       const xml = getAllParentGroupDetailsXML(company, groupName);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -1773,7 +1787,7 @@ router.get("/voucher-sync", async (req, res) => {
         const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
         
         const result = await upsertRecord(
-          `${DB_SCHEMA}.all_parent_groups`, guid, masterId, alterId,
+          "app_test.all_parent_groups", guid, masterId, alterId,
           [
             companyId,
             company,
@@ -1834,219 +1848,218 @@ router.get("/voucher-sync", async (req, res) => {
     }
   });
 
-/* ===================================================
-  PROFIT LOSS SYNC - COMPLETE FIXED VERSION
-=================================================== */
+  /* ===================================================
+    PROFIT LOSS SYNC - COMPLETE FIXED VERSION
+  =================================================== */
 
-router.get("/profit-loss-sync", async (req, res) => {
-  const company = req.query.company;
-  const fromDate = req.query.fromDate;
-  const toDate = req.query.toDate;
+  router.get("/profit-loss-sync", async (req, res) => {
+    const company = req.query.company;
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
 
-  /* =========================================
-    VALIDATION
-  ========================================= */
-  if (!company || !fromDate || !toDate) {
-    return res.status(400).json({
-      status: "error",
-      message: "company, fromDate and toDate required"
-    });
-  }
+    /* =========================================
+      VALIDATION
+    ========================================= */
+    if (!company || !fromDate || !toDate) {
+      return res.status(400).json({
+        status: "error",
+        message: "company, fromDate and toDate required"
+      });
+    }
 
-  const client = await pool.connect();
+    const client = await pool.connect();
 
-  try {
-    /* =====================================
-      BEGIN TRANSACTION
-    ===================================== */
-    await client.query("BEGIN");
+    try {
+      /* =====================================
+        BEGIN TRANSACTION
+      ===================================== */
+      await client.query("BEGIN");
 
       /* =====================================
         GET COMPANY ID
       ===================================== */
       const companyResult = await client.query(
-        `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
+        `SELECT id FROM app_test.companies WHERE name = $1`,
         [company]
       );
 
-    const companyId = companyResult.rows[0]?.id;
+      const companyId = companyResult.rows[0]?.id;
 
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
+      if (!companyId) {
+        throw new Error("Company not found");
+      }
 
-    /* =====================================
-      GENERATE XML REQUEST
-    ===================================== */
-    const xml = getProfitLossXML(company, fromDate, toDate);
+      /* =====================================
+        GENERATE XML REQUEST
+      ===================================== */
+      const xml = getProfitLossXML(company, fromDate, toDate);
 
-    console.log("📤 SENDING XML REQUEST TO TALLY...");
+      console.log("📤 SENDING XML REQUEST TO TALLY...");
 
       /* =====================================
         SEND TO TALLY
       ===================================== */
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
 
-    console.log("📥 RAW XML RESPONSE:");
-    console.log(responseXML.substring(0, 500) + "...");
+      console.log("📥 RAW XML RESPONSE:");
+      console.log(responseXML.substring(0, 500) + "...");
 
-    /* =====================================
-      PARSE XML RESPONSE
-    ===================================== */
-    const parsed = await parseXML(responseXML);
+      /* =====================================
+        PARSE XML RESPONSE
+      ===================================== */
+      const parsed = await parseXML(responseXML);
 
-    // Log full parsed structure for debugging
-    console.log("🔍 PARSED STRUCTURE:");
-    console.log(JSON.stringify(parsed, null, 2).substring(0, 1000));
+      // Log full parsed structure for debugging
+      console.log("🔍 PARSED STRUCTURE:");
+      console.log(JSON.stringify(parsed, null, 2).substring(0, 1000));
 
-    /* =====================================
-      EXTRACT GROUPS FROM PARSED XML
-    ===================================== */
-    const groups =
-      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
+      /* =====================================
+        EXTRACT GROUPS FROM PARSED XML
+      ===================================== */
+      const groups =
+    parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
 
-    const list = Array.isArray(groups) ? groups : [groups];
+      const list = Array.isArray(groups) ? groups : [groups];
 
-    console.log(`📊 FOUND ${list.length} GROUPS`);
+      console.log(`📊 FOUND ${list.length} GROUPS`);
 
-    /* =====================================
-      INITIALIZE VALUES
-    ===================================== */
-    let totalSales = 0;
-    let totalPurchase = 0;
-    let directExpenses = 0;
-    let directIncomes = 0;
-    let stockValue = 0;
-    let indirectIncome = 0;
-    let indirectExpenses = 0;
+      /* =====================================
+        INITIALIZE VALUES
+      ===================================== */
+      let totalSales = 0;
+      let totalPurchase = 0;
+      let directExpenses = 0;
+      let directIncomes = 0;
+      let stockValue = 0;
+      let indirectIncome = 0;
+      let indirectExpenses = 0;
 
-    /* =====================================
-      PROCESS EACH GROUP
-    ===================================== */
-    for (const group of list) {
-      // Extract name (handle both array and single value)
-      let rawName =
-        group?.["LANGUAGENAME.LIST"]?.[0]?.["NAME.LIST"]?.[0]?.NAME ||
-        group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-        group?.NAME;
+      /* =====================================
+        PROCESS EACH GROUP
+      ===================================== */
+      for (const group of list) {
+        // Extract name (handle both array and single value)
+        let rawName = 
+          group?.["LANGUAGENAME.LIST"]?.[0]?.["NAME.LIST"]?.[0]?.NAME ||
+          group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+          group?.NAME;
 
-      // Convert to array for consistent handling
-      let names = [];
-      if (Array.isArray(rawName)) {
-        names = rawName;
-      } else if (rawName) {
-        names = [rawName];
+        // Convert to array for consistent handling
+        let names = [];
+        if (Array.isArray(rawName)) {
+          names = rawName;
+        } else if (rawName) {
+          names = [rawName];
+        }
+
+        // Extract balance (handle both array and single value)
+        let rawBalance = group?.CLOSINGBALANCE;
+        
+        if (Array.isArray(rawBalance)) {
+          rawBalance = rawBalance[0];
+        }
+
+        const balance = Math.abs(Number(rawBalance || 0));
+
+        console.log(`✓ GROUP: ${names.join(", ")} | BALANCE: ₹${balance.toLocaleString()}`);
+
+        /* =================================
+          CATEGORIZE BY GROUP NAME
+        ================================= */
+        
+        // Sales Accounts
+        if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) {
+          totalSales = balance;
+        }
+        
+        // Purchase Accounts
+        else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) {
+          totalPurchase = balance;
+        }
+        
+        // Direct Expenses
+        else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) {
+          directExpenses = balance;
+        }
+        
+        // Direct Incomes
+        else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) {
+          directIncomes = balance;
+        }
+        
+        // Stock-in-hand
+        else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) {
+          stockValue = balance;
+        }
+        
+        // Indirect Incomes
+        else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) {
+          indirectIncome = balance;
+        }
+        
+        // Indirect Expenses
+        else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) {
+          indirectExpenses = balance;
+        }
       }
 
-      // Extract balance (handle both array and single value)
-      let rawBalance = group?.CLOSINGBALANCE;
-
-      if (Array.isArray(rawBalance)) {
-        rawBalance = rawBalance[0];
-      }
-
-      const balance = Math.abs(Number(rawBalance || 0));
-
-      console.log(`✓ GROUP: ${names.join(", ")} | BALANCE: ₹${balance.toLocaleString()}`);
-
-      /* =================================
-        CATEGORIZE BY GROUP NAME
-      ================================= */
-
-      // Sales Accounts
-      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) {
-        totalSales = balance;
-      }
-
-      // Purchase Accounts
-      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) {
-        totalPurchase = balance;
-      }
-
-      // Direct Expenses
-      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) {
-        directExpenses = balance;
-      }
-
-      // Direct Incomes
-      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) {
-        directIncomes = balance;
-      }
-
-      // Stock-in-hand
-      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) {
-        stockValue = balance;
-      }
-
-      // Indirect Incomes
-      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) {
-        indirectIncome = balance;
-      }
-
-      // Indirect Expenses
-      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) {
-        indirectExpenses = balance;
-      }
-    }
-
-    /* =====================================
-      CALCULATE P&L METRICS
-    ===================================== */
-
-    const grossProfit = Number(
-      (
-        totalSales -
-        totalPurchase -
-        directExpenses +
-        directIncomes
-      ).toFixed(2)
-    );
-
-    const netProfit = Number(
-      (
-        grossProfit +
-        indirectIncome -
-        indirectExpenses
-      ).toFixed(2)
-    );
-
-    const profitMargin = totalSales > 0
-      ? Number(
-          (
-            netProfit /
-            totalSales
-          ) * 100
+      /* =====================================
+        CALCULATE P&L METRICS
+      ===================================== */
+      
+      const grossProfit = Number(
+        (
+          totalSales -
+          totalPurchase -
+          directExpenses +
+          directIncomes
         ).toFixed(2)
-      : 0;
+      );
 
-    /* =====================================
-      PREPARE DATA OBJECT
-    ===================================== */
-    const profitLossData = {
-      totalSales,
-      totalPurchase,
-      directExpenses,
-      directIncomes,
-      stockValue,
-      indirectIncome,
-      indirectExpenses,
-      grossProfit,
-      netProfit,
-      profitMargin: Number(profitMargin)
-    };
+      const netProfit = Number(
+        (
+          grossProfit +
+          indirectIncome -
+          indirectExpenses
+        ).toFixed(2)
+      );
 
-    console.log("💰 CALCULATED P&L:");
-    console.log(JSON.stringify(profitLossData, null, 2));
+      const profitMargin = totalSales > 0
+        ? Number(
+            (
+              netProfit /
+              totalSales
+            ) * 100
+          ).toFixed(2)
+        : 0;
 
-    /* =====================================
-      UPSERT TO DATABASE
-    ===================================== */
-    const guid = `${companyId}_${fromDate}_${toDate}`;
-    const alterId = 1;
+      /* =====================================
+        PREPARE DATA OBJECT
+      ===================================== */
+      const profitLossData = {
+        totalSales,
+        totalPurchase,
+        directExpenses,
+        directIncomes,
+        stockValue,
+        indirectIncome,
+        indirectExpenses,
+        grossProfit,
+        netProfit,
+        profitMargin: Number(profitMargin)
+      };
+
+      console.log("💰 CALCULATED P&L:");
+      console.log(JSON.stringify(profitLossData, null, 2));
+
+      /* =====================================
+        UPSERT TO DATABASE
+      ===================================== */
+      const guid = `${companyId}_${fromDate}_${toDate}`;
+      const alterId = 1;
 
       const result = await upsertRecord(
-        `${DB_SCHEMA}.profit_loss`,
+        "app_test.profit_loss",
         guid,
         null,
         alterId,
@@ -2077,236 +2090,189 @@ router.get("/profit-loss-sync", async (req, res) => {
         client
       );
 
-    /* =====================================
-      COMMIT TRANSACTION
-    ===================================== */
-    await client.query("COMMIT");
+      /* =====================================
+        COMMIT TRANSACTION
+      ===================================== */
+      await client.query("COMMIT");
 
-    /* =====================================
-      SUCCESS RESPONSE
-    ===================================== */
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Profit loss synced successfully",
-      company,
-      fromDate,
-      toDate,
-      dateRange: {
-        from: formatDate(fromDate),
-        to: formatDate(toDate)
-      },
-      summary: {
-        action: result.action
-      },
-      data: profitLossData
-    });
-
-  } catch (err) {
-    /* =====================================
-      ROLLBACK ON ERROR
-    ===================================== */
-    await client.query("ROLLBACK");
-
-    console.error("❌ PROFIT LOSS SYNC ERROR:", err.message);
-    console.error(err.stack);
-
-    return res.status(500).json({
-      status: "error",
-      message: err.message,
-      detail: process.env.NODE_ENV === "development" ? err.stack : undefined
-    });
-
-  } finally {
-    client.release();
-  }
-});
-
-/* ===================================================
-  HELPER: FORMAT DATE FOR DISPLAY
-=================================================== */
-function formatDate(dateStr) {
-  // Convert YYYYMMDD to DD-MM-YYYY
-  if (dateStr.length === 8) {
-    const year = dateStr.substring(0, 4);
-    const month = dateStr.substring(4, 6);
-    const day = dateStr.substring(6, 8);
-    return `${day}-${month}-${year}`;
-  }
-  return dateStr;
-}
-
-/* ===================================================
-  STOCK GROUP SUMMARY SYNC
-  ★★★ UPDATED: now parses CGST / SGST / IGST rates ★★★
-=================================================== */
-
-router.get(
-  "/stock-group-summary-sync",
-  async (req, res) => {
-
-    const company = req.query.company;
-    if (!company) {
-      return res.status(400).json({
-        status: "error",
-        message: "company required"
+      /* =====================================
+        SUCCESS RESPONSE
+      ===================================== */
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "Profit loss synced successfully",
+        company,
+        fromDate,
+        toDate,
+        dateRange: {
+          from: formatDate(fromDate),
+          to: formatDate(toDate)
+        },
+        summary: {
+          action: result.action
+        },
+        data: profitLossData
       });
+
+    } catch (err) {
+      /* =====================================
+        ROLLBACK ON ERROR
+      ===================================== */
+      await client.query("ROLLBACK");
+
+      console.error("❌ PROFIT LOSS SYNC ERROR:", err.message);
+      console.error(err.stack);
+
+      return res.status(500).json({
+        status: "error",
+        message: err.message,
+        detail: process.env.NODE_ENV === "development" ? err.stack : undefined
+      });
+
+    } finally {
+      client.release();
     }
+  });
 
-    const client = await pool.connect();
+  /* ===================================================
+    HELPER: FORMAT DATE FOR DISPLAY
+  =================================================== */
+  function formatDate(dateStr) {
+    // Convert YYYYMMDD to DD-MM-YYYY
+    if (dateStr.length === 8) {
+      const year = dateStr.substring(0, 4);
+      const month = dateStr.substring(4, 6);
+      const day = dateStr.substring(6, 8);
+      return `${day}-${month}-${year}`;
+    }
+    return dateStr;
+  }
 
-    try {
+  /* ===================================================
+    STOCK GROUP SUMMARY SYNC
+  =================================================== */
 
-      await client.query("BEGIN");
-
-      const companyId = await getCompanyId(company, client);
-      if (!companyId) {
-        throw new Error("Company not found");
+  router.get(
+    "/stock-group-summary-sync",
+    async (req, res) => {
+      /* =====================================
+        COMPANY
+      ===================================== */
+      const company = req.query.company;
+      if (!company) {
+        return res.status(400).json({
+          status: "error",
+          message: "company required"
+        });
       }
 
-      const xml = getStockGroupSummaryXML(company);
+      /* =====================================
+        DB CLIENT
+      ===================================== */
+      const client = await pool.connect();
+
+      try {
+        /* =====================================
+          BEGIN TRANSACTION
+        ===================================== */
+        await client.query("BEGIN");
+
+        /* =====================================
+          GET COMPANY ID
+        ===================================== */
+        const companyId = await getCompanyId(company, client);
+        if (!companyId) {
+          throw new Error("Company not found");
+        }
+
+        /* =====================================
+          XML
+        ===================================== */
+        const xml = getStockGroupSummaryXML(company);
 
         /* =====================================
           TALLY RESPONSE
         ===================================== */
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
         console.log(responseXML);
 
-      const parsed = await parseXML(responseXML);
+        /* =====================================
+          XML PARSE
+        ===================================== */
+        const parsed = await parseXML(responseXML);
 
-      const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
-      const list = Array.isArray(stockItems) ? stockItems : [stockItems];
+       
+        /* =====================================
+          STOCK ITEMS
+        ===================================== */
+        const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
+        const list = Array.isArray(stockItems) ? stockItems : [stockItems];
 
-      let inserted = 0;
-      let updated = 0;
+        /* =====================================
+          COUNTERS
+        ===================================== */
+        let inserted = 0;
+        let updated = 0;
 
-      for (const item of list) {
-
-        /* =================================
-          ITEM NAME
-        ================================= */
+        /* =====================================
+          LOOP
+        ===================================== */
+        for (const item of list) {
+          /* =================================
+            ITEM NAME
+          ================================= */
         let itemName =
-          item?.NAME ||
-          item?.["@_NAME"] ||
-          item?.["$"]?.NAME ||
-          item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-          null;
+    item?.NAME ||
+    item?.["@_NAME"] ||
+    item?.["$"]?.NAME ||
+    item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+    null;
 
-        if (Array.isArray(itemName)) {
-          itemName = itemName[0];
-        }
+  if (Array.isArray(itemName)) {
+    itemName = itemName[0];
+  }
 
-        if (typeof itemName === "object" && itemName !== null) {
-          itemName =
-            itemName._ ||
-            itemName.NAME ||
-            JSON.stringify(itemName);
-        }
+  if (typeof itemName === "object" && itemName !== null) {
+    itemName =
+      itemName._ ||
+      itemName.NAME ||
+      JSON.stringify(itemName);
+  }
 
-        itemName = clean(itemName);
+  itemName = clean(itemName);
 
-        /* =================================
-          GROUP NAME
-        ================================= */
-        const groupName = (item?.PARENT || "").replace("&#4;", "").trim();
+          /* =================================
+            GROUP NAME
+          ================================= */
+          const groupName = (item?.PARENT || "").replace("&#4;", "").trim();
 
-        /* =================================
-          QUANTITY
-        ================================= */
-        const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
+          /* =================================
+            QUANTITY
+          ================================= */
+          const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
 
-        /* =================================
-          STOCK VALUE
-        ================================= */
-        const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
-        const stockValue = rawStockValue * -1;
+          /* =================================
+            STOCK VALUE
+          ================================= */
+          const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
 
-        /* =================================
-          HSN CODE
-        ================================= */
-        let hsnCode = null;
-        const hsnList = item?.["HSNDETAILS.LIST"] || [];
-        if (Array.isArray(hsnList)) {
-          const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
-          hsnCode = validHSN?.HSNCODE || null;
-        } else {
-          hsnCode = hsnList?.HSNCODE || null;
-        }
+          /* =================================
+            FIX TALLY SIGN
+          ================================= */
+          const stockValue = rawStockValue * -1;
 
-        /* =================================================
-          ★ GST RATES — CGST / SGST(UTGST) / IGST ★
-          Tally nests these under:
-            GSTDETAILS.LIST
-              -> STATEWISEDETAILS.LIST
-                -> RATEDETAILS.LIST (one entry per duty head)
-                     - GSTRATEDUTYHEAD: "CGST" | "SGST/UTGST" | "IGST" | "Cess" | "State Cess"
-                     - GSTRATE: numeric rate (may be absent if not applicable)
-        ================================================= */
-        let cgstRate = 0;
-        let sgstRate = 0;
-        let igstRate = 0;
-
-        const gstDetails = item?.["GSTDETAILS.LIST"];
-        const gstDetailsArr = Array.isArray(gstDetails) ? gstDetails : gstDetails ? [gstDetails] : [];
-
-        for (const gd of gstDetailsArr) {
-          const stateWise = gd?.["STATEWISEDETAILS.LIST"];
-          const stateWiseArr = Array.isArray(stateWise) ? stateWise : stateWise ? [stateWise] : [];
-
-          for (const sw of stateWiseArr) {
-            const rateDetails = sw?.["RATEDETAILS.LIST"];
-            const rateArr = Array.isArray(rateDetails) ? rateDetails : rateDetails ? [rateDetails] : [];
-
-            for (const rd of rateArr) {
-              const dutyHead =
-                (typeof rd?.GSTRATEDUTYHEAD === "object"
-                  ? rd.GSTRATEDUTYHEAD?._ || ""
-                  : String(rd?.GSTRATEDUTYHEAD || "")
-                ).trim().toUpperCase();
-
-              const rawRate = rd?.GSTRATE;
-              const r = typeof rawRate === "object"
-                ? parseFloat(rawRate?._ || 0)
-                : parseFloat(rawRate || 0);
-
-              if (!r || r <= 0) continue;
-
-              if (dutyHead === "CGST") {
-                cgstRate = r;
-              } else if (dutyHead === "SGST/UTGST" || dutyHead === "SGST") {
-                sgstRate = r;
-              } else if (dutyHead === "IGST") {
-                igstRate = r;
-              }
-            }
+          /* =================================
+            HSN CODE
+          ================================= */
+          let hsnCode = null;
+          const hsnList = item?.["HSNDETAILS.LIST"] || [];
+          if (Array.isArray(hsnList)) {
+            const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
+            hsnCode = validHSN?.HSNCODE || null;
+          } else {
+            hsnCode = hsnList?.HSNCODE || null;
           }
-        }
-
-        // Combined GST rate — kept for backward compatibility with existing gst_rate column
-        // (equals IGST rate, which is the same as CGST+SGST combined for intra-state items)
-        const gstRate = igstRate || (cgstRate + sgstRate) || 0;
-
-        console.log("GST RATE CHECK:", itemName, { cgstRate, sgstRate, igstRate, gstRate });
-
-        /* =================================
-          RATE (unit price) — parsed from "338.98/pc"
-        ================================= */
-        let rate = 0;
-
-        const rawStandardPrice =
-          typeof item?.STANDARDPRICE === "object"
-            ? item.STANDARDPRICE?._ || ""
-            : String(item?.STANDARDPRICE || "").trim();
-
-        if (rawStandardPrice) {
-          const ratePart = rawStandardPrice.split("/")[0];
-          rate = parseFloat(ratePart) || 0;
-        }
-
-        if (!rate && quantity) {
-          rate = Number((Math.abs(stockValue) / quantity).toFixed(2));
-        }
 
           /* =================================
             CHECK EXISTING
@@ -2314,7 +2280,7 @@ router.get(
           const existing = await client.query(
             `
             SELECT id
-            FROM ${DB_SCHEMA}.stock_group_summary
+            FROM app_test.stock_group_summary
             WHERE company_name = $1
             AND item_name = $2
             `,
@@ -2327,7 +2293,7 @@ router.get(
           if (existing.rows.length > 0) {
             await client.query(
               `
-              UPDATE ${DB_SCHEMA}.stock_group_summary
+              UPDATE app_test.stock_group_summary
               SET
                 company_id = $1,
                 group_name = $2,
@@ -2349,7 +2315,7 @@ router.get(
           ================================= */
           await client.query(
             `
-            INSERT INTO ${DB_SCHEMA}.stock_group_summary (
+            INSERT INTO app_test.stock_group_summary (
               company_id,
               company_name,
               group_name,
@@ -2365,104 +2331,179 @@ router.get(
           inserted++;
         }
 
-      await client.query("COMMIT");
+        /* =====================================
+          COMMIT
+        ===================================== */
+        await client.query("COMMIT");
 
-      return res.status(200).json({
-        status: "success",
-        source: "tally",
-        message: "Stock group summary synced successfully",
-        company,
-        summary: {
-          inserted,
-          updated,
-          total: list.length
-        }
-      });
+        /* =====================================
+          FINAL RESPONSE
+        ===================================== */
+        return res.status(200).json({
+          status: "success",
+          source: "tally",
+          message: "Stock group summary synced successfully",
+          company,
+          summary: {
+            inserted,
+            updated,
+            total: list.length
+          },
+          data: list.map((item) => {
+            /* =============================
+              QUANTITY
+            ============================= */
+            const quantity = parseFloat(item?.CLOSINGBALANCE || 0) || 0;
 
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
-      return res.status(500).json({
-        status: "error",
-        message: err.message
-      });
-    } finally {
-      client.release();
+            /* =============================
+              STOCK VALUE
+            ============================= */
+            const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
+
+            /* =============================
+              FIX TALLY SIGN
+            ============================= */
+            const stockValue = rawStockValue * -1;
+
+            /* =============================
+              DEBUG
+            ============================= */
+           // ✅ REPLACE with this — derive itemName inline
+const mappedName = item?.NAME ||
+  item?.["@_NAME"] ||
+  item?.["$"]?.NAME ||
+  item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+  null;
+
+console.log({
+  item_name: mappedName,
+  quantity,
+  rawStockValue,
+  finalStockValue: stockValue
+});
+
+            /* =============================
+              RETURN
+            ============================= */
+            return {
+              group_name: (item?.PARENT || "").replace("&#4;", "").trim(),
+              item_name: item?.NAME ||
+                item?.["@_NAME"] ||
+                item?.["$"]?.NAME ||
+                item?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+                null,
+              hsn_code: (() => {
+                const hsnList = item?.["HSNDETAILS.LIST"] || [];
+                if (Array.isArray(hsnList)) {
+                  const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
+                  return validHSN?.HSNCODE || null;
+                }
+                return hsnList?.HSNCODE || null;
+              })(),
+              quantity,
+              stock_value: stockValue
+            };
+          })
+        });
+      } catch (err) {
+        /* =====================================
+          ROLLBACK
+        ===================================== */
+        await client.query("ROLLBACK");
+        console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
+        return res.status(500).json({
+          status: "error",
+          message: err.message
+        });
+      } finally { 
+        /* =====================================
+          RELEASE CLIENT
+        ===================================== */
+        client.release();
+      }
     }
-  }
-);
+  );
+  /* ===================================================
+    CREATE SYNC JOB
+  =================================================== */
 
-/* ===================================================
-  CREATE SYNC JOB
-=================================================== */
+  router.post(
 
-router.post(
-  "/manual",
-  async (req, res) => {
+    "/manual",
 
-    try {
+    async (req, res) => {
+
+      try {
+
+        const {
+
+          fromDate,
+
+          toDate
+
+        } = req.body;
+
+       
 
       const {
-        fromDate,
-        toDate
-      } = req.body;
+  company,
+  fromYear,
+  toYear
+} = req.body;
 
-      const {
-        company,
-        fromYear,
-        toYear
-      } = req.body;
+if (!company || !fromYear || !toYear) {
+  return res.status(400).json({
+    status: "error",
+    message: "Company, fromYear and toYear are required"
+  });
+}
 
-      if (!company || !fromYear || !toYear) {
-        return res.status(400).json({
-          status: "error",
-          message: "Company, fromYear and toYear are required"
-        });
-      }
+if (!company) {
+  return res.status(400).json({
+    status: "error",
+    message: "Company is required"
+  });
+}
 
-      if (!company) {
-        return res.status(400).json({
-          status: "error",
-          message: "Company is required"
-        });
-      }
 
-      /* =================================
-        STORE COMPANY
-      ================================= */
+          /* =================================
+            STORE COMPANY
+          ================================= */
 
           await pool.query(
 
             `
-            INSERT INTO ${DB_SCHEMA}.companies
+            INSERT INTO app_test.companies
             (
               name
             )
             VALUES ($1)
 
-        ON CONFLICT (name)
+            ON CONFLICT (name)
 
-        DO NOTHING
-        `,
-        [company]
-      );
+            DO NOTHING
+            `,
 
-      /* =================================
-        CREATE JOB
-      ================================= */
+            [company]
 
-      const payload = {
-        company,
-        fromYear,
-        toYear
-      };
+          );
+
+          /* =================================
+            CREATE JOB
+          ================================= */
+
+        const payload = {
+  company,
+  fromYear,
+  toYear
+};
 
           const result =
 
             await pool.query(
 
               `
-              INSERT INTO ${DB_SCHEMA}.job_logs
+              INSERT INTO app_test.job_logs
               (
                 job_type,
                 status,
@@ -2475,65 +2516,74 @@ router.post(
                 $3
               )
 
-          RETURNING id
-          `,
-          [
-            "manual_sync",
-            "pending",
-            payload
-          ]
-        );
-      const jobLogId = result.rows[0].id;
+              RETURNING id
+              `,
 
-      await syncQueue.add(
-        "manual-sync",
-        {
-          jobLogId,
-          company,
-          fromYear,
-          toYear
-        },
-        {
-          ...SYNC_JOB_OPTIONS,
-          jobId: getSyncJobId(jobLogId)
-        }
-      );
+              [
+                "manual_sync",
+                "pending",
+                payload
+              ]
 
-      /* =====================================
-        RESPONSE
-      ===================================== */
+            );
+    const jobLogId = result.rows[0].id;
 
-      return res.status(200).json({
-        status: "success",
-        message: "Sync job created successfully",
-        data: {
-          jobId: jobLogId,
-          company,
-          status: "pending"
-        }
-      });
+await syncQueue.add(
+  "manual-sync",
+  {
+    jobLogId,
+    company,
+    fromYear,
+    toYear,
+    userId: req.body.userId || null  // ✅ ADD THIS!
+  },
+  {
+    ...SYNC_JOB_OPTIONS,
+    jobId: getSyncJobId(jobLogId)
+  }
+);
 
-    } catch (err) {
+        
 
-      console.log(
-        err.message
-      );
+        /* =====================================
+          RESPONSE
+        ===================================== */
 
-      return res.status(500).json({
-        status:
-          "error",
-        message:
+       return res.status(200).json({
+    status: "success",
+    message: "Sync job created successfully",
+    data: {
+        jobId: jobLogId,
+        company,
+        status: "pending"
+    }
+});
+
+      } catch (err) {
+
+        console.log(
           err.message
-      });
+        );
+
+        return res.status(500).json({
+
+          status:
+            "error",
+
+          message:
+            err.message
+
+        });
+
+      }
 
     }
 
-  }
+  );
 
-);
 
-/* ===================================================
- DASHBOARD SYNC (AUTO)
+  /* ===================================================
+   DASHBOARD SYNC (AUTO)
 =================================================== */
 
 router.post(
@@ -2542,16 +2592,12 @@ router.post(
 
     try {
 
-      // Derived from the authenticated request, not a client-supplied
-      // body field — a dashboard session or the connector's own API key.
-      const userId = req.session
-        ? await getLocalUserId(req.session.getUserId())
-        : req.connectorMachine?.userId;
+      const { user_id: userId } = req.body;
 
       if (!userId) {
-        return res.status(401).json({
+        return res.status(400).json({
           status: "error",
-          message: "Unauthenticated"
+          message: "user_id is required"
         });
       }
 
@@ -2565,7 +2611,7 @@ router.post(
             company_name,
             from_year,
             to_year
-        FROM ${DB_SCHEMA}.connector_machines
+        FROM app_test.connector_machines
         WHERE user_id = $1
           AND tally_connected = true
         ORDER BY updated_at DESC
@@ -2604,7 +2650,7 @@ router.post(
 
       await pool.query(
         `
-        INSERT INTO ${DB_SCHEMA}.companies
+        INSERT INTO app_test.companies
         (
             name
         )
@@ -2630,7 +2676,7 @@ router.post(
 
       const result = await pool.query(
         `
-        INSERT INTO ${DB_SCHEMA}.job_logs
+        INSERT INTO app_test.job_logs
         (
             job_type,
             status,
@@ -2657,14 +2703,15 @@ router.post(
          ADD TO BULLMQ
       ===================================== */
 
-      await syncQueue.add(
-        "manual-sync",
-        {
-          jobLogId,
-          company: company_name,
-          fromYear: from_year,
-          toYear: to_year
-        },
+  await syncQueue.add(
+  "manual-sync",
+  {
+    jobLogId,
+    company: company_name,
+    fromYear: from_year,
+    toYear: to_year,
+    userId  // ✅ ADD THIS! (already available from req.body)
+  },
         {
           ...SYNC_JOB_OPTIONS,
           jobId: getSyncJobId(jobLogId)
@@ -2713,252 +2760,249 @@ router.post(
 
   }
 );
+  /* ===================================================
+    UNITS SYNC
+  =================================================== */
 
-/* ===================================================
-  UNITS SYNC
-=================================================== */
+  router.get(
 
-router.get(
-  "/units-sync",
-  async (req, res) => {
+    "/units-sync",
 
-    const company =
-      req.query.company;
+    async (req, res) => {
 
-    if (!company) {
+      const company =
+        req.query.company;
 
-      return res.status(400).json({
+      if (!company) {
 
-        status: "error",
+        return res.status(400).json({
 
-        message:
-          "company query parameter required"
+          status: "error",
 
-      });
+          message:
+            "company query parameter required"
 
-    }
-
-    const client =
-      await pool.connect();
-
-    try {
-
-      await client.query(
-        "BEGIN"
-      );
-
-      /* =====================================
-        COMPANY ID
-      ===================================== */
-
-      const companyId =
-        await getCompanyId(
-          company,
-          client
-        );
-
-      if (!companyId) {
-
-        throw new Error(
-          "Company not found"
-        );
+        });
 
       }
 
-      /* =====================================
-        FETCH UNITS FROM TALLY
-      ===================================== */
+      const client =
+        await pool.connect();
 
-      const xml =
-        getUnitsXML(
-          company
+      try {
+
+        await client.query(
+          "BEGIN"
         );
+
+        /* =====================================
+          COMPANY ID
+        ===================================== */
+
+        const companyId =
+          await getCompanyId(
+            company,
+            client
+          );
+
+        if (!companyId) {
+
+          throw new Error(
+            "Company not found"
+          );
+
+        }
+
+        /* =====================================
+          FETCH UNITS FROM TALLY
+        ===================================== */
+
+        const xml =
+          getUnitsXML(
+            company
+          );
 
         const responseXML =
           await sendToTallyViaConnector(
             companyId,
             xml,
             "sync"
-          await sendToTallyViaConnector(
-            companyId,
-            xml,
-            "sync"
           );
 
-      const parsed =
-        await parseXML(
-          responseXML
-        );
-
-      const units =
-        parsed?.ENVELOPE
-          ?.BODY
-          ?.DATA
-          ?.COLLECTION
-          ?.UNIT || [];
-
-      const list =
-        Array.isArray(units)
-          ? units
-          : [units];
-
-      /* =====================================
-        COUNTERS
-      ===================================== */
-
-      let inserted = 0;
-      let updated = 0;
-      let ignored = 0;
-
-      /* =====================================
-        LOOP
-      ===================================== */
-
-      for (const unit of list) {
-
-        const unitName =
-          clean(
-            unit?.NAME
+        const parsed =
+          await parseXML(
+            responseXML
           );
 
-        if (!unitName) {
-          continue;
-        }
+        const units =
+          parsed?.ENVELOPE
+            ?.BODY
+            ?.DATA
+            ?.COLLECTION
+            ?.UNIT || [];
 
-        const guid =
-          generateFallbackGuid(
+        const list =
+          Array.isArray(units)
+            ? units
+            : [units];
 
-            company,
+        /* =====================================
+          COUNTERS
+        ===================================== */
 
-            unitName,
+        let inserted = 0;
+        let updated = 0;
+        let ignored = 0;
 
-            "unit"
+        /* =====================================
+          LOOP
+        ===================================== */
 
-          );
+        for (const unit of list) {
 
-        const result =
-          await upsertRecord(
+          const unitName =
+            clean(
+              unit?.NAME
+            );
 
-              `${DB_SCHEMA}.units`,
+          if (!unitName) {
+            continue;
+          }
 
-            guid,
-
-            null,
-
-            1,
-
-            [
-
-              companyId,
+          const guid =
+            generateFallbackGuid(
 
               company,
 
-              unitName
+              unitName,
 
-            ],
+              "unit"
 
-            [
+            );
 
-              "company_id",
+          const result =
+            await upsertRecord(
 
-              "company_name",
+              "app_test.units",
 
-              "unit_name"
+              guid,
 
-            ],
+              null,
 
-            client
+              1,
 
-          );
+              [
 
-        if (
-          result.action ===
-          "inserted"
-        ) {
+                companyId,
 
-          inserted++;
+                company,
 
-        } else if (
+                unitName
 
-          result.action ===
-          "updated"
+              ],
 
-        ) {
+              [
 
-          updated++;
+                "company_id",
 
-        } else {
+                "company_name",
 
-          ignored++;
+                "unit_name"
+
+              ],
+
+              client
+
+            );
+
+          if (
+            result.action ===
+            "inserted"
+          ) {
+
+            inserted++;
+
+          } else if (
+
+            result.action ===
+            "updated"
+
+          ) {
+
+            updated++;
+
+          } else {
+
+            ignored++;
+
+          }
 
         }
+
+        /* =====================================
+          COMMIT
+        ===================================== */
+
+        await client.query(
+          "COMMIT"
+        );
+
+        return res.status(200).json({
+
+          status: "success",
+
+          source: "tally",
+
+          message:
+            "Units synced successfully",
+
+          company,
+
+          summary: {
+
+            inserted,
+
+            updated,
+
+            ignored,
+
+            total:
+              list.length
+
+          }
+
+        });
+
+      } catch (err) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+        console.log(
+
+          "❌ UNITS SYNC ERROR:",
+
+          err.message
+
+        );
+
+        return res.status(500).json({
+
+          status: "error",
+
+          message:
+            err.message
+
+        });
+
+      } finally {
+
+        client.release();
 
       }
 
-      /* =====================================
-        COMMIT
-      ===================================== */
-
-      await client.query(
-        "COMMIT"
-      );
-
-      return res.status(200).json({
-
-        status: "success",
-
-        source: "tally",
-
-        message:
-          "Units synced successfully",
-
-        company,
-
-        summary: {
-
-          inserted,
-
-          updated,
-
-          ignored,
-
-          total:
-            list.length
-
-        }
-
-      });
-
-    } catch (err) {
-
-      await client.query(
-        "ROLLBACK"
-      );
-
-      console.log(
-
-        "❌ UNITS SYNC ERROR:",
-
-        err.message
-
-      );
-
-      return res.status(500).json({
-
-        status: "error",
-
-        message:
-          err.message
-
-      });
-
-    } finally {
-
-      client.release();
-
     }
-
-  }
 
   );
   router.get("/all-ledgers-sync", async (req, res) => {
@@ -2983,8 +3027,7 @@ router.get(
       }
       
       const xml = getAllLedgersXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       
       const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -3000,127 +3043,133 @@ router.get(
       
       for (const ledger of list) {
 
-      let rawLedgerName =
-        ledger?.$?.NAME ||
-        ledger?.["@NAME"] ||
-        ledger?.NAME ||
-        ledger?.MAILINGNAME ||
-        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
+  let rawLedgerName =
+    ledger?.$?.NAME ||
+    ledger?.["@NAME"] ||
+    ledger?.NAME ||
+    ledger?.MAILINGNAME ||
+    ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
 
-      if (Array.isArray(rawLedgerName)) {
-        rawLedgerName = rawLedgerName[0];
-      }
+  if (Array.isArray(rawLedgerName)) {
+    rawLedgerName = rawLedgerName[0];
+  }
 
-      const ledgerName = clean(rawLedgerName);
+  const ledgerName = clean(rawLedgerName);
+  
 
-      if (!ledgerName) {
+    if (!ledgerName) {
 
-        ignored++;
-
-        console.log(
-          "❌ SKIPPED - NO LEDGER NAME"
-        );
-
-        continue;
-
-      }
+      ignored++;
 
       console.log(
-        `📌 PROCESSING: ${ledgerName}`
+        "❌ SKIPPED - NO LEDGER NAME"
       );
 
-      // Extract GUID (like working APIs)
-      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'ledger');
-      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
-      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+      continue;
 
+    }
+
+    console.log(
+      `📌 PROCESSING: ${ledgerName}`
+    );
+
+    // remaining code...
+
+          
+        // Extract GUID (like working APIs)
+        const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+        const guid = originalGuid || generateFallbackGuid(company, ledgerName, 'ledger');
+        const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+        const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+        
+        // Extract balances (like working APIs)
       // Extract balances
-      const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
-      const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+  const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
+  const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
 
-      // Extract balance type
-      const openingBalanceRaw = String(
-        ledger?.OPENINGBALANCE || ""
-      ).trim();
+  // Extract balance type
+  const openingBalanceRaw = String(
+    ledger?.OPENINGBALANCE || ""
+  ).trim();
 
-      const closingBalanceRaw = String(
-        ledger?.CLOSINGBALANCE || ""
-      ).trim();
+  const closingBalanceRaw = String(
+    ledger?.CLOSINGBALANCE || ""
+  ).trim();
 
-      const openingBalanceType =
-        Number(openingBalance) < 0
-          ? "Dr"
-          : "Cr";
+  const openingBalanceType =
+    Number(openingBalance) < 0
+      ? "Dr"
+      : "Cr";
 
-      const closingBalanceType =
-        Number(closingBalance) < 0
-          ? "Dr"
-          : "Cr";
-      console.log(
-        "BALANCE CHECK:",
-        ledgerName,
-        openingBalance,
-        openingBalanceType,
-        closingBalance,
-        closingBalanceType
-      );
+  const closingBalanceType =
+    Number(closingBalance) < 0
+      ? "Dr"
+      : "Cr";
+    console.log(
+    "BALANCE CHECK:",
+    ledgerName,
+    openingBalance,
+    openingBalanceType,
+    closingBalance,
+    closingBalanceType
+  );
 
-      // Extract address (like working APIs)
-      const address = Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-        ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-        : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS);
 
-      // Extract contact details (like working APIs)
-      const phone = clean(ledger?.PHONE || ledger?.LEDGERPHONE);
-      const mobile = clean(ledger?.MOBILE || ledger?.LEDGERMOBILE);
-      const email = clean(ledger?.EMAIL || ledger?.LEDGEREMAIL);
-      const fax = clean(ledger?.FAX);
+        // Extract address (like working APIs)
+        const address = Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+          ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+          : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS);
+        
+        // Extract contact details (like working APIs)
+        const phone = clean(ledger?.PHONE || ledger?.LEDGERPHONE);
+        const mobile = clean(ledger?.MOBILE || ledger?.LEDGERMOBILE);
+        const email = clean(ledger?.EMAIL || ledger?.LEDGEREMAIL);
+        const fax = clean(ledger?.FAX);
       const contactPerson = clean(
-        ledger?.CONTACTPERSON ||
-        ledger?.["CONTACTDETAILS.LIST"]?.CONTACTPERSON ||
-        ledger?.["CONTACTDETAILS.LIST"]?.NAME ||
-        (
-          Array.isArray(ledger?.["CONTACTDETAILS.LIST"])
-            ? (
-                ledger["CONTACTDETAILS.LIST"][0]?.CONTACTPERSON ||
-                ledger["CONTACTDETAILS.LIST"][0]?.NAME
-              )
-            : null
-        )
-      );
-      console.log(
-        "CONTACT CHECK:",
-        ledgerName,
-        contactPerson,
-        JSON.stringify(
-          ledger?.["CONTACTDETAILS.LIST"],
-          null,
-          2
-        )
-      );
-      // Extract tax details (like working APIs)
-      const gstList = ledger?.["LEDGSTREGDETAILS.LIST"];
+    ledger?.CONTACTPERSON ||
+    ledger?.["CONTACTDETAILS.LIST"]?.CONTACTPERSON ||
+    ledger?.["CONTACTDETAILS.LIST"]?.NAME ||
+    (
+      Array.isArray(ledger?.["CONTACTDETAILS.LIST"])
+        ? (
+            ledger["CONTACTDETAILS.LIST"][0]?.CONTACTPERSON ||
+            ledger["CONTACTDETAILS.LIST"][0]?.NAME
+          )
+        : null
+    )
+  );
+  console.log(
+    "CONTACT CHECK:",
+    ledgerName,
+    contactPerson,
+    JSON.stringify(
+      ledger?.["CONTACTDETAILS.LIST"],
+      null,
+      2
+    )
+  );
+        // Extract tax details (like working APIs)
+  const gstList = ledger?.["LEDGSTREGDETAILS.LIST"];
 
-      const gstNumber = clean(
-        Array.isArray(gstList)
-          ? gstList[0]?.GSTIN
-          : gstList?.GSTIN
-      );
+  const gstNumber = clean(
+    Array.isArray(gstList)
+      ? gstList[0]?.GSTIN
+      : gstList?.GSTIN
+  );
 
-      console.log(
-        "GST CHECK:",
-        ledgerName,
-        gstNumber
-      );
-      const panNumber = clean(ledger?.INCOMETAXNUMBER);
-      const gstRegistrationType = clean(ledger?.GSTREGISTRATIONTYPE);
-
-      // Extract location details (like working APIs)
-      const state = clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME);
-      const country = clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME);
-      const pincode = clean(ledger?.PINCODE);
-      const parentGroup = clean(ledger?.PARENT || ledger?.GROUPNAME);
+  console.log(
+    "GST CHECK:",
+    ledgerName,
+    gstNumber
+  );
+        const panNumber = clean(ledger?.INCOMETAXNUMBER);
+        const gstRegistrationType = clean(ledger?.GSTREGISTRATIONTYPE);
+        
+        // Extract location details (like working APIs)
+        const state = clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME);
+        const country = clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME);
+        const pincode = clean(ledger?.PINCODE);
+        const parentGroup = clean(ledger?.PARENT || ledger?.GROUPNAME);
 
         const data = [
     companyId,
@@ -3170,7 +3219,7 @@ router.get(
         
         // Use upsertRecord like working APIs
         const result = await upsertRecord(
-          `${DB_SCHEMA}.all_ledger_details`,
+          "app_test.all_ledger_details",
           guid,
           masterId,
           alterId,
@@ -3199,69 +3248,265 @@ router.get(
         } else {
   ignored++;
 
-        console.log("🚨 IGNORED LEDGER");
-        console.log({
-          ledgerName,
-          guid,
-          masterId,
-          alterId,
-          result
+  console.log("🚨 IGNORED LEDGER");
+  console.log({
+    ledgerName,
+    guid,
+    masterId,
+    alterId,
+    result
+  });
+}
+      }
+      
+      await client.query("COMMIT");
+      
+      // RESPONSE LIKE WORKING APIs WITH DETAILED DATA
+      return res.status(200).json({
+        status: "success",
+        source: "tally",
+        message: "All ledger details synced successfully",
+        company: company,
+        summary: {
+          total_found: list.length,
+          inserted: inserted,
+          updated: updated,
+          ignored: ignored
+        },
+        // Show sample of what was inserted/updated
+        samples: {
+          inserted: insertedLedgers.slice(0, 5),
+          updated: updatedLedgers.slice(0, 5)
+        },
+        // Data quality summary
+        data_summary: {
+          with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,
+          with_address: insertedLedgers.filter(l => l.has_address).length + updatedLedgers.filter(l => l.has_address).length,
+          with_phone: insertedLedgers.filter(l => l.has_phone).length + updatedLedgers.filter(l => l.has_phone).length
+        }
+      });
+      
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.log("❌ ALL LEDGERS SYNC ERROR:", err.message);
+      return res.status(500).json({
+        status: "error",
+        message: err.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  /* ===================================================
+    Purchase and sales Ledger
+  =================================================== */
+  router.get(
+    "/purchase-sales-ledgers-sync",
+    async (req, res) => {
+
+      const company = req.query.company;
+
+      if (!company) {
+        return res.status(400).json({
+          status: "error",
+          message: "company query parameter required"
         });
       }
-    }
 
-    await client.query("COMMIT");
+      const client = await pool.connect();
 
-    // RESPONSE LIKE WORKING APIs WITH DETAILED DATA
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "All ledger details synced successfully",
-      company: company,
-      summary: {
-        total_found: list.length,
-        inserted: inserted,
-        updated: updated,
-        ignored: ignored
-      },
-      // Show sample of what was inserted/updated
-      samples: {
-        inserted: insertedLedgers.slice(0, 5),
-        updated: updatedLedgers.slice(0, 5)
-      },
-      // Data quality summary
-      data_summary: {
-        with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,
-        with_address: insertedLedgers.filter(l => l.has_address).length + updatedLedgers.filter(l => l.has_address).length,
-        with_phone: insertedLedgers.filter(l => l.has_phone).length + updatedLedgers.filter(l => l.has_phone).length
+      try {
+
+        await client.query("BEGIN");
+
+        const companyId = await getCompanyId(company, client);
+
+        if (!companyId) {
+          throw new Error("Company not found");
+        }
+
+        const xml = getPurchaseSalesLedgersXML(company);
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        const parsed = await parseXML(responseXML);
+        
+
+        const ledgers =
+          parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+
+        const list = Array.isArray(ledgers) ? ledgers : [ledgers];
+
+        console.log("=================================");
+        console.log("📊 TOTAL PURCHASE/SALES LEDGERS:", list.length);
+        console.log("=================================");
+
+        let inserted = 0;
+        let updated = 0;
+        let ignored = 0;
+
+        for (const ledger of list) {
+
+          /* ================================
+            EXTRACT LEDGER NAME
+          ================================ */
+          let rawName =
+            ledger?.$?.NAME ||
+            ledger?.["@NAME"] ||
+            ledger?.NAME ||
+            ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+            null;
+
+          if (Array.isArray(rawName)) rawName = rawName[0];
+          if (typeof rawName === "object" && rawName !== null) rawName = rawName?._ || null;
+
+          const ledgerName = clean(rawName);
+
+          if (!ledgerName) {
+            ignored++;
+            console.log("⚠️ SKIPPED — no ledger name");
+            continue;
+          }
+
+          /* ================================
+            EXTRACT PARENT GROUP
+          ================================ */
+          const parentGroup = clean(
+            ledger?.PARENT || ledger?.$?.PARENT || ""
+          )?.replace(/&#4;/g, "").trim() || null;
+
+          console.log(`📌 LEDGER: "${ledgerName}" | PARENT: "${parentGroup}"`);
+
+          /* ================================
+            DETERMINE LEDGER TYPE
+          ================================ */
+          const normalizedParent = (parentGroup || "").toLowerCase().trim();
+
+          let ledgerType = null;
+
+          if (normalizedParent.includes("purchase")) {
+            ledgerType = "PURCHASE";
+          } else if (normalizedParent.includes("sales")) {
+            ledgerType = "SALES";
+          } else {
+            ignored++;
+            console.log(`⚠️ SKIPPED — unknown parent group: "${parentGroup}"`);
+            continue;
+          }
+
+          console.log(`✅ TYPE: ${ledgerType}`);
+
+          /* ================================
+            CHECK EXISTING
+          ================================ */
+          const existing = await client.query(
+            `
+            SELECT id
+            FROM app_test.company_purchase_sales_ledgers
+            WHERE company_id = $1
+            AND ledger_name = $2
+            `,
+            [companyId, ledgerName]
+          );
+
+          /* ================================
+            UPDATE
+          ================================ */
+          if (existing.rows.length) {
+
+            await client.query(
+              `
+              UPDATE app_test.company_purchase_sales_ledgers
+              SET
+                parent_group = $1,
+                ledger_type  = $2,
+                updated_at   = NOW()
+              WHERE id = $3
+              `,
+              [parentGroup, ledgerType, existing.rows[0].id]
+            );
+
+            updated++;
+            console.log(`🔄 UPDATED: ${ledgerName}`);
+
+          } else {
+
+            /* ================================
+              INSERT
+            ================================ */
+            await client.query(
+              `
+              INSERT INTO app_test.company_purchase_sales_ledgers
+              (
+                company_id,
+                ledger_name,
+                parent_group,
+                ledger_type,
+                created_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, NOW(), NOW())
+              `,
+              [companyId, ledgerName, parentGroup, ledgerType]
+            );
+
+            inserted++;
+            console.log(`✅ INSERTED: ${ledgerName}`);
+
+          }
+        }
+
+        await client.query("COMMIT");
+
+        console.log("=================================");
+        console.log(`Total   : ${list.length}`);
+        console.log(`Inserted: ${inserted} | Updated: ${updated} | Ignored: ${ignored}`);
+        console.log("=================================");
+
+        return res.status(200).json({
+          status: "success",
+          source: "tally",
+          message: "Purchase/Sales ledgers synced successfully",
+          company,
+          summary: {
+            inserted,
+            updated,
+            ignored,
+            total: list.length
+          }
+        });
+
+      } catch (err) {
+
+        await client.query("ROLLBACK");
+
+        console.log("❌ PURCHASE/SALES LEDGER SYNC ERROR:", err.message);
+
+        return res.status(500).json({
+          status: "error",
+          message: err.message
+        });
+
+      } finally {
+
+        client.release();
+
       }
-    });
 
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ ALL LEDGERS SYNC ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  } finally {
-    client.release();
-  }
-});
+    }
+  );
 
-/* ===================================================
-  Purchase and sales Ledger
-=================================================== */
-router.get(
-  "/purchase-sales-ledgers-sync",
-  async (req, res) => {
+  /* ===================================================
+    GODOWN SYNC
+  =================================================== */
+
+  router.get("/godown-sync", async (req, res) => {
 
     const company = req.query.company;
 
     if (!company) {
       return res.status(400).json({
-        status: "error",
-        message: "company query parameter required"
+        status  : "error",
+        message : "company query parameter required"
       });
     }
 
@@ -3277,153 +3522,112 @@ router.get(
         throw new Error("Company not found");
       }
 
-        const xml = getPurchaseSalesLedgersXML(company);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-        const parsed = await parseXML(responseXML);
-        
+      /*
+      ====================================
+      STEP 1 — FETCH GODOWNS FROM TALLY
+      ====================================
+      */
 
-      const ledgers =
-        parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
-
-      const list = Array.isArray(ledgers) ? ledgers : [ledgers];
+      const xml         = getGodownsXML(company);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+      const parsed      = await parseXML(responseXML);
 
       console.log("=================================");
-      console.log("📊 TOTAL PURCHASE/SALES LEDGERS:", list.length);
+      console.log("PARSED GODOWN RESPONSE");
       console.log("=================================");
+      console.log(JSON.stringify(parsed, null, 2));
+
+      /*
+      ====================================
+      STEP 2 — EXTRACT GODOWN LIST
+      ====================================
+      */
+
+      const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
+      const list       = Array.isArray(rawGodowns) ? rawGodowns : [rawGodowns];
 
       let inserted = 0;
-      let updated = 0;
-      let ignored = 0;
+      let updated  = 0;
+      let ignored  = 0;
 
-      for (const ledger of list) {
+      /*
+      ====================================
+      STEP 3 — UPSERT INTO DB
+      ====================================
+      */
 
-        /* ================================
-          EXTRACT LEDGER NAME
-        ================================ */
-        let rawName =
-          ledger?.$?.NAME ||
-          ledger?.["@NAME"] ||
-          ledger?.NAME ||
-          ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-          null;
+      for (const godown of list) {
 
-        if (Array.isArray(rawName)) rawName = rawName[0];
-        if (typeof rawName === "object" && rawName !== null) rawName = rawName?._ || null;
+        let godownName = godown?.DSPDISPNAME || null;
 
-        const ledgerName = clean(rawName);
+        if (Array.isArray(godownName)) {
+          godownName = godownName[0];
+        }
 
-        if (!ledgerName) {
+        godownName = clean(godownName);
+
+        if (!godownName) {
           ignored++;
-          console.log("⚠️ SKIPPED — no ledger name");
           continue;
         }
 
-        /* ================================
-          EXTRACT PARENT GROUP
-        ================================ */
-        const parentGroup = clean(
-          ledger?.PARENT || ledger?.$?.PARENT || ""
-        )?.replace(/&#4;/g, "").trim() || null;
+        const existing = await client.query(
+          `SELECT id
+          FROM app_test.godown_details
+          WHERE company_id = $1
+            AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
+          LIMIT 1`,
+          [companyId, godownName]
+        );
 
-        console.log(`📌 LEDGER: "${ledgerName}" | PARENT: "${parentGroup}"`);
-
-        /* ================================
-          DETERMINE LEDGER TYPE
-        ================================ */
-        const normalizedParent = (parentGroup || "").toLowerCase().trim();
-
-        let ledgerType = null;
-
-        if (normalizedParent.includes("purchase")) {
-          ledgerType = "PURCHASE";
-        } else if (normalizedParent.includes("sales")) {
-          ledgerType = "SALES";
-        } else {
-          ignored++;
-          console.log(`⚠️ SKIPPED — unknown parent group: "${parentGroup}"`);
-          continue;
-        }
-
-        console.log(`✅ TYPE: ${ledgerType}`);
-
-          /* ================================
-            CHECK EXISTING
-          ================================ */
-          const existing = await client.query(
-            `
-            SELECT id
-            FROM ${DB_SCHEMA}.company_purchase_sales_ledgers
-            WHERE company_id = $1
-            AND ledger_name = $2
-            `,
-            [companyId, ledgerName]
-          );
-
-        /* ================================
-          UPDATE
-        ================================ */
         if (existing.rows.length) {
 
-            await client.query(
-              `
-              UPDATE ${DB_SCHEMA}.company_purchase_sales_ledgers
-              SET
-                parent_group = $1,
-                ledger_type  = $2,
-                updated_at   = NOW()
-              WHERE id = $3
-              `,
-              [parentGroup, ledgerType, existing.rows[0].id]
-            );
+          await client.query(
+            `UPDATE app_test.godown_details
+            SET updated_at = NOW()
+            WHERE id = $1`,
+            [existing.rows[0].id]
+          );
 
           updated++;
-          console.log(`🔄 UPDATED: ${ledgerName}`);
+          console.log(`✅ GODOWN UPDATED  : ${godownName}`);
 
         } else {
 
-            /* ================================
-              INSERT
-            ================================ */
-            await client.query(
-              `
-              INSERT INTO ${DB_SCHEMA}.company_purchase_sales_ledgers
-              (
-                company_id,
-                ledger_name,
-                parent_group,
-                ledger_type,
-                created_at,
-                updated_at
-              )
-              VALUES ($1, $2, $3, $4, NOW(), NOW())
-              `,
-              [companyId, ledgerName, parentGroup, ledgerType]
-            );
+          await client.query(
+            `INSERT INTO app_test.godown_details
+            (company_id, company_name, godown_name, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())`,
+            [companyId, company, godownName]
+          );
 
           inserted++;
-          console.log(`✅ INSERTED: ${ledgerName}`);
+          console.log(`✅ GODOWN INSERTED : ${godownName}`);
 
         }
+
       }
 
       await client.query("COMMIT");
 
       console.log("=================================");
-      console.log(`Total   : ${list.length}`);
-      console.log(`Inserted: ${inserted} | Updated: ${updated} | Ignored: ${ignored}`);
+      console.log("GODOWN SYNC COMPLETE");
+      console.log(`   Inserted : ${inserted}`);
+      console.log(`   Updated  : ${updated}`);
+      console.log(`   Ignored  : ${ignored}`);
+      console.log(`   Total    : ${list.length}`);
       console.log("=================================");
 
       return res.status(200).json({
-        status: "success",
-        source: "tally",
-        message: "Purchase/Sales ledgers synced successfully",
+        status  : "success",
+        source  : "tally",
+        message : "Godowns synced successfully",
         company,
-        summary: {
+        summary : {
           inserted,
           updated,
           ignored,
-          total: list.length
+          total : list.length
         }
       });
 
@@ -3431,11 +3635,11 @@ router.get(
 
       await client.query("ROLLBACK");
 
-      console.log("❌ PURCHASE/SALES LEDGER SYNC ERROR:", err.message);
+      console.log("❌ GODOWN SYNC ERROR:", err.message);
 
       return res.status(500).json({
-        status: "error",
-        message: err.message
+        status  : "error",
+        message : err.message
       });
 
     } finally {
@@ -3444,164 +3648,7 @@ router.get(
 
     }
 
-  }
-);
-
-/* ===================================================
-  GODOWN SYNC
-=================================================== */
-
-router.get("/godown-sync", async (req, res) => {
-
-  const company = req.query.company;
-
-  if (!company) {
-    return res.status(400).json({
-      status  : "error",
-      message : "company query parameter required"
-    });
-  }
-
-  const client = await pool.connect();
-
-  try {
-
-    await client.query("BEGIN");
-
-    const companyId = await getCompanyId(company, client);
-
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
-
-    /*
-    ====================================
-    STEP 1 — FETCH GODOWNS FROM TALLY
-    ====================================
-    */
-
-      const xml         = getGodownsXML(company);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync");
-      const parsed      = await parseXML(responseXML);
-
-    console.log("=================================");
-    console.log("PARSED GODOWN RESPONSE");
-    console.log("=================================");
-    console.log(JSON.stringify(parsed, null, 2));
-
-    /*
-    ====================================
-    STEP 2 — EXTRACT GODOWN LIST
-    ====================================
-    */
-
-    const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
-    const list       = Array.isArray(rawGodowns) ? rawGodowns : [rawGodowns];
-
-    let inserted = 0;
-    let updated  = 0;
-    let ignored  = 0;
-
-    /*
-    ====================================
-    STEP 3 — UPSERT INTO DB
-    ====================================
-    */
-
-    for (const godown of list) {
-
-      let godownName = godown?.DSPDISPNAME || null;
-
-      if (Array.isArray(godownName)) {
-        godownName = godownName[0];
-      }
-
-      godownName = clean(godownName);
-
-      if (!godownName) {
-        ignored++;
-        continue;
-      }
-
-        const existing = await client.query(
-          `SELECT id
-          FROM ${DB_SCHEMA}.godown_details
-          WHERE company_id = $1
-            AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
-          LIMIT 1`,
-          [companyId, godownName]
-        );
-
-      if (existing.rows.length) {
-
-          await client.query(
-            `UPDATE ${DB_SCHEMA}.godown_details
-            SET updated_at = NOW()
-            WHERE id = $1`,
-            [existing.rows[0].id]
-          );
-
-        updated++;
-        console.log(`✅ GODOWN UPDATED  : ${godownName}`);
-
-      } else {
-
-          await client.query(
-            `INSERT INTO ${DB_SCHEMA}.godown_details
-            (company_id, company_name, godown_name, created_at, updated_at)
-            VALUES ($1, $2, $3, NOW(), NOW())`,
-            [companyId, company, godownName]
-          );
-
-        inserted++;
-        console.log(`✅ GODOWN INSERTED : ${godownName}`);
-
-      }
-
-    }
-
-    await client.query("COMMIT");
-
-    console.log("=================================");
-    console.log("GODOWN SYNC COMPLETE");
-    console.log(`   Inserted : ${inserted}`);
-    console.log(`   Updated  : ${updated}`);
-    console.log(`   Ignored  : ${ignored}`);
-    console.log(`   Total    : ${list.length}`);
-    console.log("=================================");
-
-    return res.status(200).json({
-      status  : "success",
-      source  : "tally",
-      message : "Godowns synced successfully",
-      company,
-      summary : {
-        inserted,
-        updated,
-        ignored,
-        total : list.length
-      }
-    });
-
-  } catch (err) {
-
-    await client.query("ROLLBACK");
-
-    console.log("❌ GODOWN SYNC ERROR:", err.message);
-
-    return res.status(500).json({
-      status  : "error",
-      message : err.message
-    });
-
-  } finally {
-
-    client.release();
-
-  }
-
-});
+  });
 
 router.get("/job-status", async (req, res) => {
   try {
@@ -3626,8 +3673,8 @@ router.get("/job-status", async (req, res) => {
           jl.error_message,
           c.id as company_id,
           c.name as company_name
-      FROM ${DB_SCHEMA}.job_logs jl
-      JOIN ${DB_SCHEMA}.companies c
+      FROM app_test.job_logs jl
+      JOIN app_test.companies c
         ON c.name = jl.payload->>'company'
       WHERE c.id = $1
       ORDER BY jl.id DESC
@@ -3655,7 +3702,6 @@ router.get("/job-status", async (req, res) => {
     });
   }
 });
-
 /* ===================================================
    GET SYNC STATUS for connctor company  sync status
 =================================================== */
@@ -3675,7 +3721,7 @@ router.get("/status/:jobId", async (req, res) => {
         error_message,
         started_at,
         completed_at
-      FROM ${DB_SCHEMA}.job_logs
+      FROM app_test.job_logs
       WHERE id = $1
       `,
       [jobId]
@@ -3740,5 +3786,4 @@ router.get("/status/:jobId", async (req, res) => {
   }
 
 });
-
-export default router;
+  export default router;

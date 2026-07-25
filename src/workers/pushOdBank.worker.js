@@ -25,14 +25,6 @@ function isTemporaryOdBankError(error) {
       "EAI_AGAIN",
       "ENOTFOUND"
     ].includes(code) ||
-  return (
-    [
-      "ECONNRESET",
-      "ECONNREFUSED",
-      "ETIMEDOUT",
-      "EAI_AGAIN",
-      "ENOTFOUND"
-    ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
     message.includes("tally server unavailable") ||
@@ -166,8 +158,6 @@ const worker = new Worker(
 
       return {
         odBankId,
-        status: "failed",
-        error: error.message
         status: "failed",
         error: error.message
       };

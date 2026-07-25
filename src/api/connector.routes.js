@@ -3,45 +3,57 @@ import pool from "../db/index.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import authMiddleware from "../middleware/auth.middleware.js";
+import { checkCompanyAccess } from "../utils/companyAccess.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
-import {
-  syncQueue,
-  getSyncJobId,
-  SYNC_JOB_OPTIONS
-} from "../queues/sync.queue.js";
 
-import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
 
-/* =========================================
-   GENERATE CONNECTOR KEY
-========================================= */
-
-router.post("/generate-key", verifySession(), async (req, res) => {
+router.post("/generate-key", authMiddleware, async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const authenticatedUserId = req.user.id;
+    const { 
+      user_id,
+      company_id
+    } = req.body;
 
     if (!user_id) {
-      return res.status(404).json({
+      return res.status(400).json({
         status: "error",
-        message: "No profile found for this account"
+        message: "user_id is required"
+      });
+    }
+
+    if (!company_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "company_id is required"
+      });
+    }
+
+    if (authenticatedUserId !== Number(user_id)) {
+      return res.status(403).json({
+        status: "error",
+        message: "You can only generate keys for your own user"
+      });
+    }
+
+    const hasAccess = await checkCompanyAccess(authenticatedUserId, company_id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "You don't have access to this company"
       });
     }
 
     const token = "PAIR-" + crypto.randomBytes(4).toString("hex").toUpperCase();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    const token = "PAIR-" + crypto.randomBytes(4).toString("hex").toUpperCase();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query(
-      `
-      INSERT INTO app_test.connector_pairing_tokens
-      (id, user_id, token, expires_at)
-      VALUES (gen_random_uuid(), $1, $2, $3)
-      `,
-      [user_id, token, expiresAt]
-      [user_id, token, expiresAt]
+      `INSERT INTO app_test.connector_pairing_tokens
+       (id, user_id, token, expires_at, company_id)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4)`,
+      [user_id, token, expiresAt, company_id]
     );
 
     return res.status(200).json({
@@ -51,7 +63,7 @@ router.post("/generate-key", verifySession(), async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Generate Key Error:", err);
+    console.error("❌ Generate Key Error:", err.message);
     return res.status(500).json({
       status: "error",
       message: err.message
@@ -59,162 +71,114 @@ router.post("/generate-key", verifySession(), async (req, res) => {
   }
 });
 
-/* =========================================
-   PAIR CONNECTOR + AUTO SYNC ✅
-========================================= */
-
 router.post("/pair", async (req, res) => {
 
   try {
 
     const {
       token,
-      company,    // ✅ company name
-      fromYear,   // ✅ from year e.g. "2026"
-      toYear      // ✅ to year e.g. "2027"
+      machine_id
     } = req.body;
 
-    // Validate
     if (!token) {
-      return res.status(400).json({ status: "error", message: "token is required" });
+      return res.status(400).json({
+        status: "error",
+        message: "token is required"
+      });
     }
 
-    if (!company?.trim()) {
-      return res.status(400).json({ status: "error", message: "company is required" });
+    if (!machine_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "machine_id is required"
+      });
     }
 
-    if (!fromYear || !toYear) {
-      return res.status(400).json({ status: "error", message: "fromYear and toYear are required" });
-    }
-
-    // Validate token
     const result = await pool.query(
-      `SELECT * FROM app_test.connector_pairing_tokens WHERE token = $1 LIMIT 1`,
+      `SELECT *
+       FROM app_test.connector_pairing_tokens
+       WHERE token = $1
+       LIMIT 1`,
       [token]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ status: "error", message: "Invalid token" });
+      return res.status(404).json({
+        status: "error",
+        message: "Invalid token"
+      });
     }
 
     const pairingToken = result.rows[0];
 
     if (pairingToken.is_used) {
-      return res.status(400).json({ status: "error", message: "Token already used" });
+      return res.status(400).json({
+        status: "error",
+        message: "Token already used"
+      });
     }
 
     if (new Date(pairingToken.expires_at) < new Date()) {
-      return res.status(400).json({ status: "error", message: "Token expired" });
+      return res.status(400).json({
+        status: "error",
+        message: "Token expired"
+      });
     }
 
-    // Fetch user
     const userResult = await pool.query(
-      `SELECT * FROM app_test.users WHERE id = $1 LIMIT 1`,
+      `SELECT *
+       FROM app_test.users
+       WHERE id = $1
+       LIMIT 1`,
       [pairingToken.user_id]
     );
 
     if (userResult.rows.length === 0) {
-      return res.status(404).json({ status: "error", message: "User not found" });
+      return res.status(404).json({
+        status: "error",
+        message: "User not found"
+      });
     }
 
     const user = userResult.rows[0];
 
-    // ✅ Lookup company_id (company already exists - synced from Tally)
-    const companyResult = await pool.query(
-      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1) LIMIT 1`,
-      [company.trim()]
-    );
-
-    const companyId = companyResult.rows[0]?.id || null;
-
-    if (!companyId) {
-      return res.status(400).json({
-        status: "error",
-        message: `Company not found: ${company}`
-      });
-    }
-
-    console.log(`✅ Company: ${company} → ID ${companyId}`);
-
-    // Generate JWT
     const jwtToken = jwt.sign(
       {
         id: user.id,
         email: user.email,
-        role: user.role
+        role: user.role,
+        machine_id
       },
       process.env.JWT_SECRET,
-      { expiresIn: "30d" }
+      {
+        expiresIn: "30d"
+      }
     );
 
-    // ✅ Mark token as used + save company_id
     const updateResult = await pool.query(
-      `
-      UPDATE app_test.connector_pairing_tokens
-      SET
-        is_used = TRUE,
-        company_id = $1
-      WHERE id = $2
-      RETURNING id
-      `,
-      [companyId, pairingToken.id]
+      `UPDATE app_test.connector_pairing_tokens
+       SET
+         is_used = TRUE,
+         machine_id = $1
+       WHERE id = $2
+       RETURNING id`,
+      [
+        machine_id,
+        pairingToken.id
+      ]
     );
 
     if (updateResult.rows.length === 0) {
-      return res.status(500).json({ status: "error", message: "Failed to update pairing token" });
+      return res.status(500).json({
+        status: "error",
+        message: "Failed to update pairing token"
+      });
     }
 
-    // ✅ AUTO-TRIGGER SYNC!
-    let syncJobId = null;
-    try {
-      const jobLogResult = await pool.query(
-        `
-        INSERT INTO app_test.job_logs (job_type, status, payload)
-        VALUES ($1, $2, $3)
-        RETURNING id
-        `,
-        [
-          "auto_sync",
-          "pending",
-          JSON.stringify({
-            company: company.trim(),
-            fromYear,
-            toYear
-          })
-        ]
-      );
-
-      const jobLogId = jobLogResult.rows[0].id;
-      syncJobId = jobLogId;
-
-      await syncQueue.add(
-        "auto-sync",
-        {
-          jobLogId,
-          company: company.trim(),
-          fromYear,
-          toYear
-        },
-        {
-          ...SYNC_JOB_OPTIONS,
-          jobId: getSyncJobId(jobLogId)
-        }
-      );
-
-      console.log(`✅ Auto sync triggered: ${company} (${fromYear}-${toYear})`);
-
-    } catch (syncErr) {
-      console.error(`⚠️ Auto sync trigger failed: ${syncErr.message}`);
-    }
-
-    return res.status(200).json({
     return res.status(200).json({
       status: "success",
-      message: "Connector paired successfully. Sync started!",
+      message: "Connector paired successfully",
       jwt_token: jwtToken,
-      company_id: companyId,
-      sync_started: true,
-      sync_job_id: syncJobId,
       user: {
         id: user.id,
         email: user.email,
@@ -225,23 +189,18 @@ router.post("/pair", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ status: "error", message: err.message });
+    console.error("❌ Pair error:", err.message);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
   }
 
 });
 
-/* =========================================
-   CONNECTOR POLLS FOR JOBS
-========================================= */
-
 router.get("/jobs", authMiddleware, async (req, res) => {
   try {
     const userId = req.user?.id;
-    console.log("================================");
-console.log("JWT User:", req.user);
-console.log("User ID:", userId);
-console.log("================================");
 
     if (!userId) {
       return res.status(401).json({
@@ -278,10 +237,6 @@ console.log("================================");
   }
 });
 
-/* =========================================
-   CONNECTOR SUBMITS JOB RESULT
-========================================= */
-
 router.post("/jobs/result", authMiddleware, async (req, res) => {
   const client = await pool.connect();
 
@@ -300,16 +255,14 @@ router.post("/jobs/result", authMiddleware, async (req, res) => {
     await client.query("BEGIN");
 
     const jobResult = await client.query(
-      `
-      UPDATE app_test.connector_jobs
-      SET
-        status = $1,
-        response_xml = $2,
-        result = $3,
-        updated_at = NOW()
-      WHERE id = $4
-      RETURNING *
-      `,
+      `UPDATE app_test.connector_jobs
+       SET
+         status = $1,
+         response_xml = $2,
+         result = $3,
+         updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
       [status, response_xml || null, result ? JSON.stringify(result) : null, job_id]
     );
 

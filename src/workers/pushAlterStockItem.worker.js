@@ -16,9 +16,6 @@ const connection = new IORedis({
 function isTemporaryAlterStockItemError(error) {
   const code = String(error?.code || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
-function isTemporaryAlterStockItemError(error) {
-  const code = String(error?.code || "").toUpperCase();
-  const message = String(error?.message || "").toLowerCase();
 
   return (
     [
@@ -79,13 +76,14 @@ const worker = new Worker(
       // STEP 4: GET CONNECTOR PAIRING ✅
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.push_stock_item psi
-        JOIN app_test.companies c
-          ON psi.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE psi.id = $1
+       SELECT cpt.user_id
+FROM app_test.connector_pairing_tokens cpt
+WHERE cpt.company_id = (
+  SELECT company_id FROM app_test.push_stock_item WHERE id = $1
+)
+AND cpt.is_used = true
+ORDER BY cpt.created_at DESC
+LIMIT 1
         `,
         [stockItemId]
       );
@@ -149,7 +147,6 @@ const worker = new Worker(
   },
   {
     connection,
-    concurrency: 5
     concurrency: 5
   }
 );

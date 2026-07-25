@@ -112,20 +112,6 @@ const worker = new Worker(
         `,
         [ledgerId]
       );
-      // ─────────────────────────────────────────────────────────────
-      // STEP 2: Get connector pairing info for this ledger's company
-      // ─────────────────────────────────────────────────────────────
-      const pairingResult = await pool.query(
-        `
-        SELECT cpt.user_id
-        FROM app_test.push_ledger pl
-        JOIN app_test.companies c ON pl.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt 
- ON c.id = cpt.company_id
-        WHERE pl.id = $1
-        `,
-        [ledgerId]
-      );
 
       const pairing = pairingResult.rows[0];
       if (!pairing) {
@@ -235,7 +221,7 @@ const worker = new Worker(
       return {
         ledgerId,
         status: "failed",
-        error: error.message
+        error: error.message,
         status: "failed",
         error: error.message
       };
@@ -310,7 +296,6 @@ worker.on("error", (error) => {
 });
 
 console.log(
-  "✅ Push Ledger BullMQ worker started (using Connector)"
   "✅ Push Ledger BullMQ worker started (using Connector)"
 );
 

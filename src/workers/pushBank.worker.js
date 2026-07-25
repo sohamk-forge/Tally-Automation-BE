@@ -23,14 +23,6 @@ function isTemporaryBankError(error) {
       "EAI_AGAIN",
       "ENOTFOUND"
     ].includes(code) ||
-  return (
-    [
-      "ECONNRESET",
-      "ECONNREFUSED",
-      "ETIMEDOUT",
-      "EAI_AGAIN",
-      "ENOTFOUND"
-    ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
     message.includes("tally server unavailable") ||
