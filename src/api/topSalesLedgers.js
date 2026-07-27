@@ -53,25 +53,20 @@ async function getCompanyInfo(companyId, companyName) {
 }
 
 /* ===================================================
-   TOP SALES LEDGERS — using party_ledger_name + debit_amount
+   TOP SELLING ITEMS — parsed from ledger_entries
+   (INVENTORYALLOCATIONS.LIST -> STOCKITEMNAME/AMOUNT)
 =================================================== */
 async function getTopSellingItems(companyId, yearStart, yearEnd) {
   const result = await pool.query(
-    `SELECT party_ledger_name,
-            SUM(ABS(debit_amount)) AS total_sales,
-            COUNT(*) AS voucher_count
-       FROM ${DB_SCHEMA}.vouchers
-      WHERE company_id = $1
-        AND DATE(voucher_date) >= $2
-        AND DATE(voucher_date) < $3
-        AND LOWER(voucher_type) LIKE '%sales%'
-        AND LOWER(voucher_type) NOT LIKE '%return%'
-        AND LOWER(voucher_type) NOT LIKE '%credit note%'
-        AND LOWER(voucher_type) NOT LIKE '%debit note%'
-        AND party_ledger_name IS NOT NULL
-        AND TRIM(party_ledger_name) != ''
-      GROUP BY party_ledger_name
-      ORDER BY total_sales DESC`,
+    `SELECT ledger_entries
+     FROM ${DB_SCHEMA}.vouchers
+     WHERE company_id = $1
+       AND DATE(voucher_date) >= $2
+       AND DATE(voucher_date) < $3
+       AND LOWER(voucher_type) LIKE '%sales%'
+       AND LOWER(voucher_type) NOT LIKE '%return%'
+       AND LOWER(voucher_type) NOT LIKE '%credit note%'
+       AND LOWER(voucher_type) NOT LIKE '%debit note%'`,
     [companyId, yearStart, yearEnd]
   );
 
