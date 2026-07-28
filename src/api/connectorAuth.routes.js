@@ -95,19 +95,22 @@ router.post("/pair", async (req, res) => {
       (
         user_id,
         machine_id,
-        key_hash
+        key_hash,
+        company_id
       )
       VALUES
       (
         $1,
         $2,
-        $3
+        $3,
+        $4
       )
       `,
       [
         user.id,
         machine_id,
-        keyHash
+        keyHash,
+        pairingToken.company_id
       ]
     );
 
