@@ -99,16 +99,16 @@ const worker = new Worker(
       // STEP 2: Get connector pairing info for this ledger's company
       // ─────────────────────────────────────────────────────────────
       const pairingResult = await pool.query(
-        `
-        SELECT cpt.user_id
-        FROM ${DB_SCHEMA}.push_ledger pl
-        JOIN ${DB_SCHEMA}.companies c ON pl.company_id = c.id
-        JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE pl.id = $1
-        `,
-        [ledgerId]
-      );
+  `
+  SELECT user_id
+  FROM ${DB_SCHEMA}.connector_pairing_tokens
+  WHERE company_id = $1
+    AND is_used = TRUE
+  ORDER BY created_at DESC
+  LIMIT 1;
+  `,
+  [row.company_id]   // ✅ Correct
+);
 
       const pairing = pairingResult.rows[0];
       if (!pairing) {

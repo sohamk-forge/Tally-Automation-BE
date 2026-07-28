@@ -1,3 +1,38 @@
+// Shared helper: Tally sets <STATUS>1</STATUS> even when nothing was
+// actually created (missing ledger, missing stock item, missing parent
+// group, etc). The connector's self-reported job status ("completed")
+// can't be trusted on its own — the only reliable signal is the actual
+// Tally response XML: CREATED must be > 0, and EXCEPTIONS/ERRORS must be 0.
+// If either is off, or a LINEERROR is present, the operation failed —
+// regardless of what the connector claims.
+function resolveTallyOutcome(responseXml) {
+  let finalStatus = "failed";
+  let errorMessage = null;
+
+  try {
+    const xml = responseXml || "";
+
+    const created = parseInt(xml.match(/<CREATED>(\d+)<\/CREATED>/)?.[1] || "0");
+    const exceptions = parseInt(xml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/)?.[1] || "0");
+    const errors = parseInt(xml.match(/<ERRORS>(\d+)<\/ERRORS>/)?.[1] || "0");
+    const lineError = xml.match(/<LINEERROR>(.*?)<\/LINEERROR>/)?.[1] || null;
+
+    if (created > 0 && exceptions === 0 && errors === 0) {
+      finalStatus = "success";
+      errorMessage = null;
+    } else {
+      finalStatus = "failed";
+      errorMessage = lineError || "Tally import failed";
+    }
+  } catch (e) {
+    console.error("Error parsing Tally response:", e.message);
+    finalStatus = "failed";
+    errorMessage = e.message;
+  }
+
+  return { finalStatus, errorMessage };
+}
+
 export async function processConnectorJobResult(client, job) {
   try {
     const { id, job_type, status, response_xml, result, payload } = job;
@@ -7,217 +42,144 @@ export async function processConnectorJobResult(client, job) {
     );
 
     switch (job_type) {
-      case "ledger":
+      case "ledger": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
         await client.query(
           `
           UPDATE app_test.push_ledger
           SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
+            status = $1,
             tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
+            error_message = $3,
             updated_at = NOW()
           WHERE id = $4
           `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.ledger_id
-          ]
+          [finalStatus, response_xml || null, errorMessage, payload.ledger_id]
         );
 
-        console.log(`✅ Ledger ${payload.ledger_id} marked ${status}`);
+        console.log(`✅ Ledger ${payload.ledger_id} marked ${finalStatus}`);
         break;
+      }
 
-      case "sales_invoice":
+      case "sales_invoice": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
         await client.query(
           `
           UPDATE app_test.sales_invoice_extractions
           SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
+            sync_status = $1,
             tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
+            error_message = $3,
             updated_at = NOW()
           WHERE id = $4
           `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.invoice_id
-          ]
+          [finalStatus, response_xml || null, errorMessage, payload.invoice_id]
         );
 
-        console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${status}`);
+        console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${finalStatus}`);
         break;
+      }
 
-   case "purchase_invoice":
-  // Parse Tally response to check if actually created
-  let invoiceStatus = status;
-  let invoiceError = null;
-  
-  try {
-    const responseXml = response_xml || "";
-    const createdMatch = responseXml.match(/<CREATED>(\d+)<\/CREATED>/);
-    const exceptionsMatch = responseXml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-    const errorMatch = responseXml.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
-    
-    const created = parseInt(createdMatch?.[1] || 0);
-    const exceptions = parseInt(exceptionsMatch?.[1] || 0);
-    
-    if (created > 0 && exceptions === 0) {
-      invoiceStatus = 'success';
-    } else if (exceptions > 0 || created === 0) {
-      invoiceStatus = 'failed';
-      invoiceError = errorMatch?.[1] || 'Tally import failed';
-    }
-  } catch (e) {
-    console.error("Error parsing Tally response:", e.message);
-  }
-  
-  await client.query(
-    `UPDATE app_test.invoice_extractions
-    SET
-      sync_status = $1,
-      tally_response = $2,
-      error_message = $3,
-      updated_at = NOW()
-    WHERE id = $4
-    `,
-    [invoiceStatus, response_xml || null, invoiceError, payload.invoice_id]
-  );
+      case "purchase_invoice": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
 
-  console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${invoiceStatus}`);
-  break;
+        await client.query(
+          `UPDATE app_test.invoice_extractions
+          SET
+            sync_status = $1,
+            tally_response = $2,
+            error_message = $3,
+            updated_at = NOW()
+          WHERE id = $4
+          `,
+          [finalStatus, response_xml || null, errorMessage, payload.invoice_id]
+        );
 
-      case "stock_item":
+        console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${finalStatus}`);
+        break;
+      }
+
+      case "stock_item": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
         await client.query(
           `
           UPDATE app_test.push_stock_item
           SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
+            status = $1,
             tally_response = $2,
-            last_error = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
+            last_error = $3,
             updated_at = NOW()
           WHERE id = $4
           `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.stock_item_id
-          ]
+          [finalStatus, response_xml || null, errorMessage, payload.stock_item_id]
         );
 
-        console.log(`✅ Stock Item ${payload.stock_item_id} marked ${status}`);
+        console.log(`✅ Stock Item ${payload.stock_item_id} marked ${finalStatus}`);
         break;
+      }
 
-      case "bank":
+      case "bank": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
         await client.query(
           `
           UPDATE app_test.push_bank
           SET
-            sync_status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE sync_status
-            END,
+            sync_status = $1,
             tally_response = $2,
-            error_message = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
+            error_message = $3,
             updated_at = NOW()
           WHERE id = $4
           `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.bank_id
-          ]
+          [finalStatus, response_xml || null, errorMessage, payload.bank_id]
         );
 
-        console.log(`✅ Bank ${payload.bank_id} marked ${status}`);
+        console.log(`✅ Bank ${payload.bank_id} marked ${finalStatus}`);
         break;
+      }
 
-      case "odbank":
-  await client.query(
-    `
-    UPDATE app_test.bank_od_accounts
-    SET
-      sync_status = CASE
-        WHEN $1 = 'completed' THEN 'success'
-        WHEN $1 = 'failed' THEN 'failed'
-        ELSE sync_status
-      END,
-      tally_response = $2,
-      error_message = CASE
-        WHEN $1 = 'failed' THEN $3
-        ELSE NULL
-      END,
-      updated_at = NOW()
-    WHERE id = $4
-    `,
-    [
-      status,
-      response_xml || null,
-      result?.error || null,
-      payload.odbank_id
-    ]
-  );
+      case "odbank": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
 
-  console.log(`✅ OD/OC Bank ${payload.odbank_id} marked ${status}`);
-  break;
-      case "alter_stock_item":
+        await client.query(
+          `
+          UPDATE app_test.bank_od_accounts
+          SET
+            sync_status = $1,
+            tally_response = $2,
+            error_message = $3,
+            updated_at = NOW()
+          WHERE id = $4
+          `,
+          [finalStatus, response_xml || null, errorMessage, payload.odbank_id]
+        );
+
+        console.log(`✅ OD/OC Bank ${payload.odbank_id} marked ${finalStatus}`);
+        break;
+      }
+
+      case "alter_stock_item": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
         await client.query(
           `
           UPDATE app_test.alter_stock_item
           SET
-            status = CASE
-              WHEN $1 = 'completed' THEN 'success'
-              WHEN $1 = 'failed' THEN 'failed'
-              ELSE status
-            END,
+            status = $1,
             tally_response = $2,
-            last_error = CASE
-              WHEN $1 = 'failed' THEN $3
-              ELSE NULL
-            END,
+            last_error = $3,
             updated_at = NOW()
           WHERE id = $4
           `,
-          [
-            status,
-            response_xml || null,
-            result?.error || null,
-            payload.alter_stock_item_id
-          ]
+          [finalStatus, response_xml || null, errorMessage, payload.alter_stock_item_id]
         );
 
-        console.log(`✅ Alter Stock Item ${payload.alter_stock_item_id} marked ${status}`);
+        console.log(`✅ Alter Stock Item ${payload.alter_stock_item_id} marked ${finalStatus}`);
         break;
+      }
 
       default:
         console.log(
