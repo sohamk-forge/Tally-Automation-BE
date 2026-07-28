@@ -17,6 +17,7 @@ router.post("/ledger-mapping", async (req, res) => {
     const {
       company_id,
       purchase_ledger,        // ✅ NEW! Actual ledger name e.g. "Purchase @18%"
+      sales_ledger,           // ✅ Actual ledger name e.g. "Sales @18%"
       invoice_parent_group,
       cgst_ledger,
       sgst_ledger,
@@ -50,18 +51,20 @@ router.post("/ledger-mapping", async (req, res) => {
         UPDATE ${DB_SCHEMA}.company_ledger_mappings
         SET
           purchase_ledger = $1,
-          invoice_parent_group = $2,
-          cgst_ledger = $3,
-          sgst_ledger = $4,
-          igst_ledger = $5,
-          tds_ledger = $6,
-          cess_ledger = $7,
-          rounded_off_ledger = $8,
+          sales_ledger = $2,
+          invoice_parent_group = $3,
+          cgst_ledger = $4,
+          sgst_ledger = $5,
+          igst_ledger = $6,
+          tds_ledger = $7,
+          cess_ledger = $8,
+          rounded_off_ledger = $9,
           updated_at = NOW()
-        WHERE company_id = $9
+        WHERE company_id = $10
         `,
         [
           purchase_ledger || null,
+          sales_ledger || null,
           invoice_parent_group,
           cgst_ledger,
           sgst_ledger,
@@ -86,6 +89,7 @@ router.post("/ledger-mapping", async (req, res) => {
       (
         company_id,
         purchase_ledger,
+        sales_ledger,
         invoice_parent_group,
         cgst_ledger,
         sgst_ledger,
@@ -96,12 +100,13 @@ router.post("/ledger-mapping", async (req, res) => {
       )
       VALUES
       (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
       )
       `,
       [
         company_id,
         purchase_ledger || null,
+        sales_ledger || null,
         invoice_parent_group,
         cgst_ledger,
         sgst_ledger,

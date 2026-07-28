@@ -72,6 +72,7 @@ const worker = new Worker(
       }
 
       console.log(`📋 Sales ledger mapping loaded for company ${row.company_id}:`, {
+        sales_ledger: mapping.sales_ledger,
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
         igst_ledger: mapping.igst_ledger,
@@ -83,10 +84,18 @@ const worker = new Worker(
         ? JSON.parse(row.raw_json)
         : row.raw_json;
 
+      const salesLedger = mapping.sales_ledger || invoice.sales_ledger;
+      if (!salesLedger) {
+        throw new Error(`Sales ledger not configured for company ${row.company_id}`);
+      }
+
       // STEP 3C: GENERATE XML ✅
       const xml = await generateSalesXml({
         ...invoice,
         company: row.company_name,
+
+        // ✅ Fix: use actual Tally ledger from mapping, not hardcoded "Sales"
+        sales_ledger: salesLedger,
 
         // ✅ Tax ledgers from mapping
         cgst_ledger: mapping.cgst_ledger,
