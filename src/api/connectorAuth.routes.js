@@ -117,6 +117,17 @@ router.post("/pair", async (req, res) => {
 );
     const companyId = companyUpsertResult.rows[0].id;
 
+    // Record that this user now has access to this company. ON CONFLICT
+    // because a user can pair multiple machines to the same company.
+    await client.query(
+      `
+      INSERT INTO ${DB_SCHEMA}.user_companies (user_id, company_id)
+      VALUES ($1, $2)
+      ON CONFLICT (user_id, company_id) DO NOTHING
+      `,
+      [user.id, companyId]
+    );
+
     // Generate a long-lived, revocable API key for this machine (shown once —
     // only its hash is stored). Replaces the old 30-day JWT.
     const apiKey = crypto.randomBytes(32).toString("hex");
