@@ -1189,50 +1189,6 @@ for (const [name, item] of uniqueCompanies) {
             continue;
           }
 
-          /* ================================
-            CHECK IF VOUCHER EXISTS (WITHOUT TRANSACTION)
-          ================================ */
-          const existingVoucher = await client.query(
-            `SELECT id FROM app_test.vouchers WHERE company_id = $1 AND voucher_number = $2 AND voucher_date = $3`,
-            [companyId, voucherNumber, voucherDate]
-          );
-
-          if (existingVoucher.rows.length > 0) {
-
-    await client.query(
-      `
-      UPDATE app_test.vouchers
-      SET
-        voucher_type = $1,
-        party_ledger_name = $2,
-        narration = $3,
-        ledger_entries = $4,
-        debit_amount = $5,
-        credit_amount = $6,
-        balance = $7,
-        updated_at = NOW()
-      WHERE company_id = $8
-        AND voucher_number = $9
-        AND voucher_date = $10
-      `,
-      [
-        voucherTypeName,
-        partyLedgerName,
-        clean(voucher?.NARRATION),
-        JSON.stringify(normalized),
-        debitAmount,
-        creditAmount,
-        balance,
-        companyId,
-        voucherNumber,
-        voucherDate
-      ]
-    );
-
-    updated++;
-    continue;
-  }
-
     /* ================================
     START A NEW TRANSACTION FOR THIS VOUCHER
   ================================ */
@@ -1274,7 +1230,7 @@ for (const [name, item] of uniqueCompanies) {
     const alterId =
       voucher?.ALTERID || 0;
 
-    await voucherClient.query(
+    const upsertResult = await voucherClient.query(
 
       `
       INSERT INTO app_test.vouchers (
@@ -1306,6 +1262,17 @@ for (const [name, item] of uniqueCompanies) {
         NOW(), NOW()
 
       )
+      ON CONFLICT (company_id, voucher_number, voucher_date)
+      DO UPDATE SET
+        voucher_type = EXCLUDED.voucher_type,
+        party_ledger_name = EXCLUDED.party_ledger_name,
+        narration = EXCLUDED.narration,
+        ledger_entries = EXCLUDED.ledger_entries,
+        debit_amount = EXCLUDED.debit_amount,
+        credit_amount = EXCLUDED.credit_amount,
+        balance = EXCLUDED.balance,
+        updated_at = NOW()
+      RETURNING (xmax = 0) AS was_inserted
       `,
 
       [
@@ -1334,6 +1301,12 @@ for (const [name, item] of uniqueCompanies) {
       ]
 
     );
+
+    if (upsertResult.rows[0]?.was_inserted) {
+      inserted++;
+    } else {
+      updated++;
+    }
 
     /* ================================
       INSERT SALES ITEMS
@@ -1438,8 +1411,6 @@ for (const [name, item] of uniqueCompanies) {
     await voucherClient.query(
       "COMMIT"
     );
-
-    inserted++;
 
   } catch (voucherError) {
 
