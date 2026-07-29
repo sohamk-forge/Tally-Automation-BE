@@ -1,4 +1,17 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+
+// DEBUG: Check if .env loaded
+console.log("API_DOMAIN:", process.env.API_DOMAIN);
+console.log("FRONTEND_URL:", process.env.FRONTEND_URL);
+console.log("SUPERTOKENS_CONNECTION_URI:", process.env.SUPERTOKENS_CONNECTION_URI);
+console.log("SUPERTOKENS_API_KEY:", process.env.SUPERTOKENS_API_KEY);
 import pool from "../src/db/index.js";
 import UserRoles from "supertokens-node/recipe/userroles/index.js";
 import { initSupertokens } from "../src/config/supertokens.js";

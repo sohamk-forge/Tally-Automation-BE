@@ -8,11 +8,14 @@ const router = express.Router();
 
 router.post("/pair", async (req, res) => {
 
+  const client = await pool.connect();
+
   try {
 
     const {
       token,
-      machine_id
+      machine_id,
+      company_name
     } = req.body;
 
     // Validate token
@@ -31,17 +34,31 @@ router.post("/pair", async (req, res) => {
       });
     }
 
-    const result = await pool.query(
+    // Validate company_name
+    if (!company_name) {
+      return res.status(400).json({
+        status: "error",
+        message: "company_name is required"
+      });
+    }
+
+    await client.query("BEGIN");
+
+    // Lock the pairing token row so a concurrent request can't read it
+    // before this one marks it used
+    const result = await client.query(
       `
       SELECT *
       FROM ${DB_SCHEMA}.connector_pairing_tokens
       WHERE token = $1
       LIMIT 1
+      FOR UPDATE
       `,
       [token]
     );
 
     if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         status: "error",
         message: "Invalid token"
@@ -51,6 +68,7 @@ router.post("/pair", async (req, res) => {
     const pairingToken = result.rows[0];
 
     if (pairingToken.is_used) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         status: "error",
         message: "Token already used"
@@ -58,6 +76,7 @@ router.post("/pair", async (req, res) => {
     }
 
     if (new Date(pairingToken.expires_at) < new Date()) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         status: "error",
         message: "Token expired"
@@ -65,7 +84,7 @@ router.post("/pair", async (req, res) => {
     }
 
     // Fetch user
-    const userResult = await pool.query(
+    const userResult = await client.query(
       `
       SELECT *
       FROM ${DB_SCHEMA}.users
@@ -76,6 +95,7 @@ router.post("/pair", async (req, res) => {
     );
 
     if (userResult.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         status: "error",
         message: "User not found"
@@ -84,12 +104,25 @@ router.post("/pair", async (req, res) => {
 
     const user = userResult.rows[0];
 
+   
+   const companyUpsertResult = await client.query(
+  `
+  INSERT INTO ${DB_SCHEMA}.companies (name)
+  VALUES ($1)
+  ON CONFLICT (name) DO UPDATE
+    SET name = EXCLUDED.name
+  RETURNING id
+  `,
+  [company_name]
+);
+    const companyId = companyUpsertResult.rows[0].id;
+
     // Generate a long-lived, revocable API key for this machine (shown once —
     // only its hash is stored). Replaces the old 30-day JWT.
     const apiKey = crypto.randomBytes(32).toString("hex");
     const keyHash = hashApiKey(apiKey);
 
-    await pool.query(
+    await client.query(
       `
       INSERT INTO ${DB_SCHEMA}.connector_api_keys
       (
@@ -112,27 +145,32 @@ router.post("/pair", async (req, res) => {
     );
 
     // Mark token as used and verify update succeeded
-    const updateResult = await pool.query(
+    const updateResult = await client.query(
       `
       UPDATE ${DB_SCHEMA}.connector_pairing_tokens
       SET
         is_used = TRUE,
-        machine_id = $1
-      WHERE id = $2
+        machine_id = $1,
+        company_id = $2
+      WHERE id = $3
       RETURNING id
       `,
       [
         machine_id,
+        companyId,
         pairingToken.id
       ]
     );
 
     if (updateResult.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(500).json({
         status: "error",
         message: "Failed to update pairing token"
       });
     }
+
+    await client.query("COMMIT");
 
     // Return the API key with full user details — the raw key is only ever
     // shown here, the connector app must store it locally.
@@ -151,6 +189,7 @@ router.post("/pair", async (req, res) => {
 
   } catch (err) {
 
+    await client.query("ROLLBACK").catch(() => {});
     console.error(err);
 
     return res.status(500).json({
@@ -158,6 +197,8 @@ router.post("/pair", async (req, res) => {
       message: err.message
     });
 
+  } finally {
+    client.release();
   }
 
 });
