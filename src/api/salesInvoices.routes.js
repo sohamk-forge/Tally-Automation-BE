@@ -63,13 +63,13 @@ router.post("/sales-invoices", async (req, res) => {
       });
     }
 
-    const hasAccess = await checkCompanyAccess(userId, companyId);
-    if (!hasAccess) {
-      return res.status(403).json({
-        status: "error",
-        message: "You don't have access to this company"
-      });
-    }
+    // const hasAccess = await checkCompanyAccess(userId, companyId);
+    // if (!hasAccess) {
+    //   return res.status(403).json({
+    //     status: "error",
+    //     message: "You don't have access to this company"
+    //   });
+    // }
 
     const cleanInvoiceData = JSON.parse(JSON.stringify(invoice_data));
 
@@ -334,13 +334,13 @@ router.get("/sales-invoices", async (req, res) => {
       });
     }
 
-    const hasAccess = await checkCompanyAccess(userId, companyId);
-    if (!hasAccess) {
-      return res.status(403).json({
-        status: "error",
-        message: "You don't have access to this company"
-      });
-    }
+    // const hasAccess = await checkCompanyAccess(userId, companyId);
+    // if (!hasAccess) {
+    //   return res.status(403).json({
+    //     status: "error",
+    //     message: "You don't have access to this company"
+    //   });
+    // }
 
     let query = `
       SELECT *

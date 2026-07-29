@@ -1,4 +1,4 @@
-import axios from "axios";
+﻿import axios from "axios";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
@@ -26,11 +26,13 @@ async function processJob(job) {
   const { jobLogId, company, fromYear, toYear, userId } = job.data;
   const id = jobLogId;
 
-  const api = axios.create({
-    baseURL: "http://localhost:5000",
-    timeout: 300000,
-    headers: { 'x-user-id': userId || '' }
-  });
+const api = axios.create({
+  baseURL: "http://localhost:5000",
+  timeout: 300000,
+  headers: {
+    "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
+  }
+});
 
   await pool.query(
     `UPDATE app_test.job_logs SET status = 'running', started_at = NOW() WHERE id = $1 AND status = 'pending'`,
