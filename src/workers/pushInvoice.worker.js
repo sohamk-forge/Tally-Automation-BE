@@ -121,17 +121,23 @@ const worker = new Worker(
       console.log(`🔍 XML:\n${xml}`);
 
       // STEP 4: GET CONNECTOR PAIRING
+      // Fixed: query direct from connector_pairing_tokens by company_id,
+      // filtered to the used token, ordered to the most recent pairing —
+      // same fix already applied in pushLedger/pushSalesInvoice/
+      // pushStockItem/pushBank workers. The old join (invoice_extractions
+      // -> companies -> connector_pairing_tokens) had no ORDER BY/LIMIT/
+      // is_used filter, so with multiple pairing tokens sharing the same
+      // company_id it could return a stale user_id nondeterministically.
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.invoice_extractions ie
-        JOIN app_test.companies c
-          ON ie.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE ie.id = $1
+        SELECT user_id
+        FROM app_test.connector_pairing_tokens
+        WHERE company_id = $1
+          AND is_used = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
         `,
-        [invoiceId]
+        [row.company_id]
       );
 
       const pairing = pairingResult.rows[0];

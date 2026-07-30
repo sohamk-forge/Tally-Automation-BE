@@ -35,6 +35,33 @@ function isTemporaryAlterStockItemError(error) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️ TODO (needs a design decision, deliberately NOT changed here):
+//
+// 1. STATUS COLUMN COLLISION
+//    This worker and pushStockItem.worker.js both write
+//    push_stock_item.status on the SAME row. Once both have run,
+//    status = 'pending' does not say whether the create job or the opening
+//    job is outstanding, and whichever connector result lands last
+//    overwrites the other's outcome. Fix by splitting the column
+//    (create_status / opening_status) or using distinct values
+//    (awaiting_create / awaiting_opening).
+//
+// 2. CREATE → ALTER SEQUENCING
+//    The create worker only marks 'pending'; the item does not exist in
+//    Tally until the connector runs that job and reports back. If the route
+//    enqueues this alter job at the same time as the create job, this XML
+//    can reach Tally first and fail because the item is not there yet.
+//    Safe: enqueue from the create job's success callback. Unsafe: enqueue
+//    directly from the route. Verify which one you have.
+//
+// 3. PAYLOAD KEY MISMATCH
+//    Create sends payload.stock_item_id, this sends
+//    payload.alter_stock_item_id, both referring to push_stock_item.id.
+//    Confirm the connector result handler knows both job_type values
+//    ('stock_item', 'alter_stock_item') AND both payload keys.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const worker = new Worker(
   ALTER_STOCK_ITEM_QUEUE_NAME,
   async (job) => {
@@ -62,10 +89,15 @@ const worker = new Worker(
 
     try {
       // STEP 3: GENERATE XML ✅ (using getStockItemOpeningXML)
+      //
+      // ✅ FIXED: was row.unit, but push_stock_item has no `unit` column —
+      // the column is `unit_name`. row.unit was always undefined, so every
+      // opening push silently fell back to "nos" regardless of the unit the
+      // user selected.
       const xml = getStockItemOpeningXML({
         company: row.company_name,
         itemName: row.item_name,
-        unit: row.unit || "nos",
+        unit: row.unit_name || "nos",
         openingQuantity: row.opening_quantity || 0,
         openingRate: row.opening_rate || 0,
         openingValue: row.opening_value || 0
@@ -74,23 +106,37 @@ const worker = new Worker(
       console.log(`📤 Alter stock item XML generated: ${row.item_name}`);
 
       // STEP 4: GET CONNECTOR PAIRING ✅
+      //
+      // Simplified: company_id already available on `row`, so the subquery
+      // back into push_stock_item is unnecessary. Matches the shape used in
+      // pushBank / pushLedger / pushSalesInvoice / pushStockItem.
+      //
+      // ⚠️ INTERIM FIX ONLY. Deterministic, not correct: if two logins share
+      // a company_id, every job for that company routes to whoever paired
+      // most recently. Real fix is a user_id column on push_stock_item,
+      // written from req.user.id at insert time. The candidate_count warning
+      // below tells you whether that migration is urgent.
       const pairingResult = await pool.query(
         `
-       SELECT cpt.user_id
-FROM app_test.connector_pairing_tokens cpt
-WHERE cpt.company_id = (
-  SELECT company_id FROM app_test.push_stock_item WHERE id = $1
-)
-AND cpt.is_used = true
-ORDER BY cpt.created_at DESC
-LIMIT 1
+        SELECT user_id, COUNT(*) OVER () AS candidate_count
+        FROM app_test.connector_pairing_tokens
+        WHERE company_id = $1
+          AND is_used = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
         `,
-        [stockItemId]
+        [row.company_id]
       );
 
       const pairing = pairingResult.rows[0];
       if (!pairing) {
         throw new Error(`No connector pairing found for stock item ${stockItemId}`);
+      }
+
+      if (Number(pairing.candidate_count) > 1) {
+        console.warn(
+          `⚠️ AMBIGUOUS PAIRING: company ${row.company_id} has ${pairing.candidate_count} used pairing tokens; routing alter stock item ${stockItemId} to user ${pairing.user_id}`
+        );
       }
 
       // STEP 5: CREATE CONNECTOR JOB ✅

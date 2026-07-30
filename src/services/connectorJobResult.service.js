@@ -2,9 +2,12 @@
 // actually created (missing ledger, missing stock item, missing parent
 // group, etc). The connector's self-reported job status ("completed")
 // can't be trusted on its own — the only reliable signal is the actual
-// Tally response XML: CREATED must be > 0, and EXCEPTIONS/ERRORS must be 0.
-// If either is off, or a LINEERROR is present, the operation failed —
-// regardless of what the connector claims.
+// Tally response XML.
+//
+// Creates report <CREATED>; alterations report <ALTERED> with CREATED at 0.
+// So the check is (CREATED + ALTERED) > 0, with EXCEPTIONS/ERRORS at 0.
+// Requiring CREATED > 0 alone graded every alter job as failed even when
+// Tally had accepted it.
 function resolveTallyOutcome(responseXml) {
   let finalStatus = "failed";
   let errorMessage = null;
@@ -13,11 +16,12 @@ function resolveTallyOutcome(responseXml) {
     const xml = responseXml || "";
 
     const created = parseInt(xml.match(/<CREATED>(\d+)<\/CREATED>/)?.[1] || "0");
+    const altered = parseInt(xml.match(/<ALTERED>(\d+)<\/ALTERED>/)?.[1] || "0");
     const exceptions = parseInt(xml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/)?.[1] || "0");
     const errors = parseInt(xml.match(/<ERRORS>(\d+)<\/ERRORS>/)?.[1] || "0");
     const lineError = xml.match(/<LINEERROR>(.*?)<\/LINEERROR>/)?.[1] || null;
 
-    if (created > 0 && exceptions === 0 && errors === 0) {
+    if ((created + altered) > 0 && exceptions === 0 && errors === 0) {
       finalStatus = "success";
       errorMessage = null;
     } else {
@@ -164,9 +168,20 @@ export async function processConnectorJobResult(client, job) {
       case "alter_stock_item": {
         const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
 
+        // ✅ FIXED: was UPDATE app_test.alter_stock_item.
+        // payload.alter_stock_item_id is a push_stock_item.id — the opening
+        // stock worker reads and writes push_stock_item, so the result must
+        // land on the same row. Pointing at a different table meant either a
+        // thrown error (rolling back the whole result transaction and leaving
+        // the connector job stuck) or an update to an unrelated row.
+        //
+        // ⚠️ NOTE: this shares push_stock_item.status with the create flow.
+        // A failed opening push will leave the row at 'failed' even though
+        // the item itself was created fine — check tally_response to see
+        // which stage failed. Splitting the column is the real fix.
         await client.query(
           `
-          UPDATE app_test.alter_stock_item
+          UPDATE app_test.push_stock_item
           SET
             status = $1,
             tally_response = $2,
@@ -177,7 +192,9 @@ export async function processConnectorJobResult(client, job) {
           [finalStatus, response_xml || null, errorMessage, payload.alter_stock_item_id]
         );
 
-        console.log(`✅ Alter Stock Item ${payload.alter_stock_item_id} marked ${finalStatus}`);
+        console.log(
+          `✅ Opening stock for item ${payload.alter_stock_item_id} marked ${finalStatus}`
+        );
         break;
       }
 

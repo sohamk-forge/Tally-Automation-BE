@@ -9,7 +9,7 @@ import { DB_SCHEMA } from "../config/db.js";
 
   const router = express.Router();
 
-  router.post("/push/stock-item", async (req, res) => {
+    router.post("/push-stock-item", async (req, res) => {
 
     try {
       const data = req.body;

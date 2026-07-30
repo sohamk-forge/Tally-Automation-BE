@@ -89,6 +89,15 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       // STEP 2: IF NOT FOUND → SYNC STOCK GROUPS
       // ─────────────────────────────────────────────────────────────
+      //
+      // ⚠️ KNOWN ISSUE (untested after the auth rollout):
+      // This is an internal HTTP call with NO Authorization header. Now that
+      // authMiddleware is applied to the sync routes, this will likely return
+      // 401/403, which fails every stock item whose parent group is not yet
+      // present in stock_group_summary. Fix by either passing a service token
+      // or calling the sync function in-process instead of over HTTP.
+      // Test explicitly with a parent group that does not exist locally.
+      // ─────────────────────────────────────────────────────────────
 
       if (!parentGroupExists.rows.length) {
         console.log(`🔄 Parent group not found, syncing...`);
@@ -98,7 +107,9 @@ const worker = new Worker(
         );
 
         if (!syncResponse.ok) {
-          throw new Error("Stock group sync failed");
+          throw new Error(
+            `Stock group sync failed (HTTP ${syncResponse.status})`
+          );
         }
 
         // ✅ VALIDATE JSON RESPONSE (check application-level success)
@@ -151,6 +162,15 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       // STEP 5: GENERATE XML ✅
       // ─────────────────────────────────────────────────────────────
+      //
+      // ⚠️ TODO: applicableFrom is hardcoded to 2025-04-01. The active company
+      // is "(from 1-Apr-26)", so this is very likely wrong — derive it from the
+      // company's financial year instead of a literal.
+      //
+      // ⚠️ TODO: row.opening_quantity / opening_rate / opening_value exist on
+      // push_stock_item but are never sent to Tally. If the UI collects opening
+      // stock, it is being stored and silently dropped.
+      // ─────────────────────────────────────────────────────────────
 
       const xml = getStockItemCreateXML({
         company: row.company_name,
@@ -172,22 +192,46 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       // STEP 6: GET CONNECTOR PAIRING
       // ─────────────────────────────────────────────────────────────
+      //
+      // Query connector_pairing_tokens directly by company_id, filtered to used
+      // tokens and ordered to the most recent pairing — same approach as the
+      // pushBank / pushLedger / pushSalesInvoice workers.
+      //
+      // The old join (companies -> connector_pairing_tokens) had no is_used
+      // filter, no ORDER BY and no LIMIT, so rows[0] was an arbitrary user
+      // whenever a company had more than one pairing token.
+      //
+      // ⚠️ INTERIM FIX ONLY. This makes the choice deterministic, not correct:
+      // if two different logins share a company_id, every job for that company
+      // routes to whoever paired most recently. The real fix is a user_id
+      // column on push_stock_item, written from req.user.id at insert time, so
+      // the job owner never has to be inferred. The candidate_count warning
+      // below exists to tell you whether that migration is urgent.
+      // ─────────────────────────────────────────────────────────────
 
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.companies c
-        JOIN app_test.connector_pairing_tokens cpt 
-          ON c.id = cpt.company_id
-        WHERE c.id = $1
+        SELECT user_id, COUNT(*) OVER () AS candidate_count
+        FROM app_test.connector_pairing_tokens
+        WHERE company_id = $1
+          AND is_used = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
         `,
         [row.company_id]
       );
 
       const pairing = pairingResult.rows[0];
+
       if (!pairing) {
         throw new Error(
           `No connector pairing found for stock item ${stockItemId}`
+        );
+      }
+
+      if (Number(pairing.candidate_count) > 1) {
+        console.warn(
+          `⚠️ AMBIGUOUS PAIRING: company ${row.company_id} has ${pairing.candidate_count} used pairing tokens; routing stock item ${stockItemId} to user ${pairing.user_id}`
         );
       }
 

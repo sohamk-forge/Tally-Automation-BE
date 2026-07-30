@@ -34,7 +34,7 @@ function isTemporaryBankError(error) {
 }
 
 const worker = new Worker(
-  BANK_QUEUE_NAME,  // ✅ Uses "bank-push" from queues/bank.queue.js
+  BANK_QUEUE_NAME,
   async (job) => {
     const { bankId } = job.data;
 
@@ -49,7 +49,6 @@ const worker = new Worker(
     const row = result.rows[0];
     if (!row) {
       throw new Error(`Bank ${bankId} not found`);
-      throw new Error(`Bank ${bankId} not found`);
     }
 
     // STEP 2: MARK AS PROCESSING
@@ -61,39 +60,45 @@ const worker = new Worker(
     try {
       // STEP 3: GENERATE XML (no Tally calls here!) ✅
       const xml = createBankLedgerXML({
-  company: row.company_name,
-  ledger_name: row.ledger_name,
-  parent: row.parent_group || "Bank Accounts",
-  opening_balance: row.opening_balance,
-  bank_name: row.bank_name,
-  branch_name: row.branch_name,
-  account_holder: row.account_holder,
-  account_number: row.account_number,
-  ifsc_code: row.ifsc_code,
-  swift_code: row.swift_code,
-  address: row.address,
-  state: row.state,
-  country: row.country || "India",
-  pincode: row.pincode,
-  contact_person: row.contact_person,
-  mobile: row.mobile,
-  email: row.email
-});
+        company: row.company_name,
+        ledger_name: row.ledger_name,
+        parent: row.parent_group || "Bank Accounts",
+        opening_balance: row.opening_balance,
+        bank_name: row.bank_name,
+        branch_name: row.branch_name,
+        account_holder: row.account_holder,
+        account_number: row.account_number,
+        ifsc_code: row.ifsc_code,
+        swift_code: row.swift_code,
+        address: row.address,
+        state: row.state,
+        country: row.country || "India",
+        pincode: row.pincode,
+        contact_person: row.contact_person,
+        mobile: row.mobile,
+        email: row.email
+      });
 
       console.log(`📤 Bank XML generated: ${row.bank_name}`);
 
-      // STEP 4: GET CONNECTOR PAIRING (same as pushLedger)
+      // STEP 4: GET CONNECTOR PAIRING
+      // Fixed: query direct from connector_pairing_tokens by company_id,
+      // filtered to the used token, ordered to the most recent pairing —
+      // same fix already applied in pushLedger/pushSalesInvoice/pushStockItem
+      // workers. The old join (push_bank -> companies ->
+      // connector_pairing_tokens) had no ORDER BY/LIMIT/is_used filter, so
+      // with multiple pairing tokens sharing the same company_id it could
+      // return a stale user_id nondeterministically.
       const pairingResult = await pool.query(
         `
-        SELECT cpt.user_id
-        FROM app_test.push_bank pb
-        JOIN app_test.companies c
-          ON pb.company_id = c.id
-        JOIN app_test.connector_pairing_tokens cpt
-          ON c.id = cpt.company_id
-        WHERE pb.id = $1
+        SELECT user_id
+        FROM app_test.connector_pairing_tokens
+        WHERE company_id = $1
+          AND is_used = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
         `,
-        [bankId]
+        [row.company_id]
       );
 
       const pairing = pairingResult.rows[0];
@@ -119,16 +124,6 @@ const worker = new Worker(
         [bankId]
       );
 
-      console.log(`✅ Bank job created for connector: ${row.bank_name}`, {
-        jobId: connectorJob.id,
-        userId: pairing.user_id
-      });
-
-      return {
-        bankId,
-        status: 'pending',
-        connectorJobId: connectorJob.id
-      };
       console.log(`✅ Bank job created for connector: ${row.bank_name}`, {
         jobId: connectorJob.id,
         userId: pairing.user_id
@@ -176,7 +171,6 @@ worker.on("completed", (job) => {
 worker.on("failed", async (job, error) => {
   console.error(`❌ Bank job failed: ${job?.id}`, error.message);
 
-  if (!job) return;
   if (!job) return;
 
   const maximumAttempts = Number(job.opts.attempts || 1);
