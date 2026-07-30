@@ -14,7 +14,10 @@ const router = express.Router();
      -> lists vouchers (grouped by voucher_type) for the transactions table
 
    GET /api/v1/voucher/:id/pdf
-     -> generates and streams back the PDF for one voucher row
+     -> generates and streams back the PDF for one voucher row.
+        HSN/SAC codes for line items are looked up from
+        <schema>.stock_group_summary (by company_id + stock item name),
+        NOT read from the voucher's ledger_entries JSON.
    ========================================================== */
 
 // ---- LIST: GET /api/v1/voucher ----
@@ -72,6 +75,30 @@ router.get("/", async (req, res) => {
   }
 });
 
+/**
+ * Builds a { [stock_item_name]: hsn_code } lookup map for a company from
+ * the stock_group_summary table.
+ *
+ * NOTE: adjust column names here (stock_item_name / hsn_code) if your
+ * actual stock_group_summary schema uses different names.
+ */
+async function buildHsnMap(companyId) {
+  const hsnResult = await db.query(
+    `SELECT item_name, hsn_code
+     FROM ${DB_SCHEMA}.stock_group_summary
+     WHERE company_id = $1`,
+    [companyId]
+  );
+
+  const hsnMap = {};
+  for (const r of hsnResult.rows) {
+    if (r.item_name) {
+      hsnMap[r.item_name] = r.hsn_code || "";
+    }
+  }
+  return hsnMap;
+}
+
 // ---- PDF: GET /api/v1/voucher/:id/pdf ----
 router.get("/:id/pdf", async (req, res) => {
   try {
@@ -93,7 +120,12 @@ router.get("/:id/pdf", async (req, res) => {
     }
 
     const companyInfo = await getCompanyInfo(row.company_id);
-    const voucher = normalizeVoucherRow(row, companyInfo);
+
+    // HSN/SAC codes come exclusively from stock_group_summary, matched by
+    // stock item name -- not from the voucher's ledger_entries JSON.
+    const hsnMap = await buildHsnMap(row.company_id);
+
+    const voucher = normalizeVoucherRow(row, companyInfo, hsnMap);
 
     if (!voucher.templateKey) {
       return res.status(422).json({
@@ -103,12 +135,12 @@ router.get("/:id/pdf", async (req, res) => {
 
     const pdfBuffer = await renderVoucherPdf(voucher);
 
-res.set({
-  "Content-Type": "application/pdf",
-  "Content-Disposition": `inline; filename="${voucher.voucherType}_${voucher.voucherNumber}.pdf"`,
-  "Content-Length": pdfBuffer.length,   // ← add this
-});
-return res.end(pdfBuffer);              // ← change res.send to res.end
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${voucher.voucherType}_${voucher.voucherNumber}.pdf"`,
+      "Content-Length": pdfBuffer.length,
+    });
+    return res.end(pdfBuffer);
   } catch (err) {
     console.error("GET /api/v1/voucher/:id/pdf error:", err);
     return res.status(500).json({ error: err.message });

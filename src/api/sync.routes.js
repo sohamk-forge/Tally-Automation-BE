@@ -17,6 +17,8 @@ import express from "express";
       getStockGroupSummaryXML,
         getAllLedgersXML,
           getPurchaseSalesLedgersXML,
+          getCompanyDetailsXML,
+          getCompanyGSTDetailsXML,
           getGodownsXML
       
   } from "../services/xmlBuilder.js";
@@ -3773,5 +3775,539 @@ router.get("/status/:jobId", async (req, res) => {
 
   }
 
+});
+router.get("/company-details", async (req, res) => {
+  const company = req.query.company;
+
+  // ============================================
+  // VALIDATION
+  // ============================================
+  if (!company) {
+    return res.status(400).json({
+      status: "error",
+      message: "company query parameter required"
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // ============================================
+    // 1. GET COMPANY ID
+    // ============================================
+    const companyId = await getCompanyId(company, client);
+
+    if (!companyId) {
+      throw new Error("Company not found");
+    }
+
+    console.log("\n============================================");
+    console.log("🏢 COMPANY DETAILS SYNC");
+    console.log("Company   :", company);
+    console.log("Company ID:", companyId);
+    console.log("============================================");
+
+
+    // ============================================
+    // 2. COMPANY DETAILS XML
+    // ============================================
+    const companyXML = getCompanyDetailsXML(company);
+
+    console.log("\n📤 CALL 1: COMPANY DETAILS");
+    console.log("--------------------------------------------");
+    console.log(companyXML);
+    console.log("--------------------------------------------");
+
+
+    // ============================================
+    // 3. SEND COMPANY XML TO TALLY
+    // ============================================
+    const companyResponseXML =
+      await sendToTallyViaConnector(
+        companyId,
+        companyXML,
+        "sync",
+        req.headers["x-user-id"] || null
+      );
+
+    console.log("\n📥 COMPANY RESPONSE");
+    console.log("--------------------------------------------");
+    console.log(companyResponseXML);
+    console.log("--------------------------------------------");
+
+
+    // ============================================
+    // 4. PARSE COMPANY RESPONSE
+    // ============================================
+    const companyParsed =
+      await parseXML(companyResponseXML);
+
+    console.log("\n📦 PARSED COMPANY RESPONSE");
+    console.log(
+      JSON.stringify(companyParsed, null, 2)
+    );
+
+
+    // ============================================
+    // 5. FIND COMPANY OBJECT
+    // ============================================
+    const companyData =
+      companyParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.COMPANY ||
+      companyParsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
+
+    if (!companyData) {
+      throw new Error(
+        "No company details found in Tally response"
+      );
+    }
+
+
+    // ============================================
+    // HELPER FOR TALLY VALUES
+    // ============================================
+    const readTallyValue = (value) => {
+      if (
+        value === undefined ||
+        value === null
+      ) {
+        return null;
+      }
+
+      // String
+      if (typeof value === "string") {
+        return value.trim();
+      }
+
+      // xml2js object with "_" value
+      if (
+        typeof value === "object" &&
+        value._ !== undefined
+      ) {
+        return String(value._).trim();
+      }
+
+      // Array
+      if (Array.isArray(value)) {
+        if (!value.length) {
+          return null;
+        }
+
+        return readTallyValue(value[0]);
+      }
+
+      return null;
+    };
+
+
+    // ============================================
+    // 6. COMPANY NAME
+    // ============================================
+    const name =
+      readTallyValue(companyData?.NAME) ||
+      company;
+
+
+    // ============================================
+    // 7. ADDRESS
+    // ============================================
+    let address = null;
+
+    let addressList =
+      companyData?.["ADDRESS.LIST"];
+
+    if (Array.isArray(addressList)) {
+      addressList = addressList[0];
+    }
+
+    const rawAddresses =
+      addressList?.ADDRESS;
+
+    if (rawAddresses) {
+      const addresses = Array.isArray(rawAddresses)
+        ? rawAddresses
+        : [rawAddresses];
+
+      address = addresses
+        .map((item) => readTallyValue(item))
+        .filter(Boolean)
+        .join(", ");
+    }
+
+
+    // ============================================
+    // 8. EMAIL
+    // ============================================
+    const email =
+      readTallyValue(companyData?.EMAIL);
+
+
+    // ============================================
+    // 9. STATE
+    // ============================================
+    const state =
+      readTallyValue(
+        companyData?.STATENAME
+      ) ||
+      readTallyValue(
+        companyData?.STATE
+      );
+
+
+    // ============================================
+    // 10. GST ENABLED
+    // ============================================
+    const gstEnabled =
+      String(
+        readTallyValue(
+          companyData?.ISGSTON
+        ) || ""
+      )
+        .trim()
+        .toLowerCase() === "yes";
+
+
+    console.log("\n✅ COMPANY DATA");
+    console.log({
+      name,
+      address,
+      email,
+      state,
+      gstEnabled
+    });
+
+
+    // ============================================
+    // 11. GST / TAX UNIT XML
+    // ============================================
+    const gstXML =
+      getCompanyGSTDetailsXML(company);
+
+    console.log("\n📤 CALL 2: GST TAX UNIT");
+    console.log("--------------------------------------------");
+    console.log(gstXML);
+    console.log("--------------------------------------------");
+
+
+    // ============================================
+    // 12. SEND GST XML TO TALLY
+    // ============================================
+    const gstResponseXML =
+      await sendToTallyViaConnector(
+        companyId,
+        gstXML,
+        "sync",
+        req.headers["x-user-id"] || null
+      );
+
+    console.log("\n📥 GST RESPONSE");
+    console.log("--------------------------------------------");
+    console.log(gstResponseXML);
+    console.log("--------------------------------------------");
+
+
+    // ============================================
+    // 13. PARSE GST RESPONSE
+    // ============================================
+    const gstParsed =
+      await parseXML(gstResponseXML);
+
+    console.log("\n📦 PARSED GST RESPONSE");
+    console.log(
+      JSON.stringify(gstParsed, null, 2)
+    );
+
+
+    // ============================================
+    // 14. FIND TAX UNITS
+    // ============================================
+    let taxUnits =
+      gstParsed
+        ?.ENVELOPE
+        ?.BODY
+        ?.DATA
+        ?.COLLECTION
+        ?.TAXUNIT || [];
+
+    if (!Array.isArray(taxUnits)) {
+      taxUnits = [taxUnits];
+    }
+
+    console.log("\n🏷️ TAX UNITS");
+    console.log(
+      JSON.stringify(taxUnits, null, 2)
+    );
+
+
+    // ============================================
+    // 15. FIND GST TAX UNIT
+    // ============================================
+    const gstTaxUnit =
+      taxUnits.find((unit) => {
+        const attrs = unit?.$ || {};
+
+        const taxType =
+          String(
+            attrs.TAXTYPE || ""
+          )
+            .trim()
+            .toUpperCase();
+
+        const taxRegistration =
+          String(
+            attrs.TAXREGISTRATION || ""
+          ).trim();
+
+        const gstNumber =
+          readTallyValue(
+            unit?.GSTREGNUMBER
+          );
+
+        return (
+          taxType === "GST" ||
+          taxRegistration !== "" ||
+          gstNumber !== null
+        );
+      });
+
+
+    console.log("\n✅ GST TAX UNIT");
+    console.log(
+      JSON.stringify(
+        gstTaxUnit,
+        null,
+        2
+      )
+    );
+
+
+    // ============================================
+    // 16. GSTIN
+    // ============================================
+    let gstin = null;
+
+    if (gstTaxUnit) {
+      gstin =
+        readTallyValue(
+          gstTaxUnit?.GSTREGNUMBER
+        );
+
+      // fallback to TAXREGISTRATION attribute
+      if (!gstin) {
+        gstin =
+          readTallyValue(
+            gstTaxUnit?.$?.TAXREGISTRATION
+          );
+      }
+    }
+
+
+    // ============================================
+    // 17. GST REGISTRATION DETAILS
+    // ============================================
+    let gstRegistrationDetails =
+      gstTaxUnit?.[
+        "GSTREGISTRATIONDETAILS.LIST"
+      ] || null;
+
+
+    // Tally may return an array
+    if (
+      Array.isArray(
+        gstRegistrationDetails
+      )
+    ) {
+      gstRegistrationDetails =
+        gstRegistrationDetails[0];
+    }
+
+
+    // ============================================
+    // 18. GST REGISTRATION TYPE
+    // ============================================
+    const registrationType =
+      readTallyValue(
+        gstRegistrationDetails
+          ?.REGISTRATIONTYPE
+      );
+
+
+    // ============================================
+    // 19. GST STATE
+    // ============================================
+    const gstState =
+      readTallyValue(
+        gstRegistrationDetails?.STATE
+      ) ||
+      state;
+
+
+    // ============================================
+    // 20. PLACE OF SUPPLY
+    // ============================================
+    const placeOfSupply =
+      readTallyValue(
+        gstRegistrationDetails
+          ?.PLACEOFSUPPLY
+      );
+
+
+    // ============================================
+    // 21. EFFECTIVE FROM
+    // ============================================
+    const effectiveFrom =
+      readTallyValue(
+        gstRegistrationDetails
+          ?.FROMDATE
+      );
+
+
+    // ============================================
+    // 22. GSTR1 PERIODICITY
+    // ============================================
+    const gstr1Periodicity =
+      readTallyValue(
+        gstRegistrationDetails
+          ?.GSTR1PERIODICITY
+      );
+
+
+    // ============================================
+    // 23. DEBUG FINAL DATA
+    // ============================================
+    console.log("\n============================================");
+    console.log("✅ FINAL COMPANY DETAILS");
+    console.log("Name              :", name);
+    console.log("Address           :", address);
+    console.log("Email             :", email);
+    console.log("State             :", gstState || state);
+    console.log("GST Enabled       :", gstEnabled);
+    console.log("GSTIN             :", gstin);
+    console.log("Registration Type :", registrationType);
+    console.log("Place Of Supply   :", placeOfSupply);
+    console.log("Effective From    :", effectiveFrom);
+    console.log("GSTR1 Periodicity :", gstr1Periodicity);
+    console.log("============================================");
+
+
+    // ============================================
+    // 24. SAVE TO DATABASE
+    // ============================================
+    await client.query(
+      `
+      INSERT INTO app_test.company_details
+      (
+        company_id,
+        company_name,
+        address,
+        state,
+        email,
+        gstin,
+        last_synced_at,
+        created_at,
+        updated_at
+      )
+      VALUES
+      (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        NOW(),
+        NOW(),
+        NOW()
+      )
+
+      ON CONFLICT (company_id)
+      DO UPDATE SET
+
+        company_name =
+          EXCLUDED.company_name,
+
+        address =
+          EXCLUDED.address,
+
+        state =
+          EXCLUDED.state,
+
+        email =
+          EXCLUDED.email,
+
+        gstin =
+          EXCLUDED.gstin,
+
+        last_synced_at =
+          NOW(),
+
+        updated_at =
+          NOW()
+      `,
+      [
+        companyId,
+        name,
+        address,
+        gstState || state,
+        email,
+        gstin
+      ]
+    );
+
+
+    // ============================================
+    // 25. COMMIT
+    // ============================================
+    await client.query("COMMIT");
+
+
+    // ============================================
+    // 26. FINAL API RESPONSE
+    // ============================================
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      company,
+
+      data: {
+        name,
+        address,
+        email,
+        state: gstState || state,
+        gstEnabled,
+        gstin,
+        registrationType,
+        placeOfSupply,
+        effectiveFrom,
+        gstr1Periodicity
+      }
+    });
+
+  } catch (err) {
+
+    // ============================================
+    // ROLLBACK
+    // ============================================
+    await client.query("ROLLBACK");
+
+    console.error(
+      "\n❌ COMPANY DETAILS ERROR"
+    );
+
+    console.error(err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+
+  } finally {
+
+    // ============================================
+    // RELEASE DB CONNECTION
+    // ============================================
+    client.release();
+  }
 });
   export default router;

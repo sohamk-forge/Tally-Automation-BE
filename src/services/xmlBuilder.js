@@ -1517,3 +1517,72 @@ export const getStockInHandXML = (company) => {
 </ENVELOPE>
   `;
 };
+export const getCompanyDetailsXML = (company) => {
+  return `
+<ENVELOPE>
+    <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Object</TYPE>
+        <SUBTYPE>Company</SUBTYPE>
+        <ID TYPE="Name">${company}</ID>
+    </HEADER>
+
+    <BODY>
+        <DESC>
+            <STATICVARIABLES>
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+
+            <FETCHLIST>
+                <FETCH>NAME</FETCH>
+                <FETCH>ADDRESS</FETCH>
+                <FETCH>EMAIL</FETCH>
+                <FETCH>STATENAME</FETCH>
+                <FETCH>ISGSTON</FETCH>
+            </FETCHLIST>
+        </DESC>
+    </BODY>
+</ENVELOPE>
+`;
+};
+
+export const getCompanyGSTDetailsXML = (company) => {
+  return `
+<ENVELOPE>
+    <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>TaxUnitCollection</ID>
+    </HEADER>
+
+    <BODY>
+        <DESC>
+
+            <STATICVARIABLES>
+                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+
+            <TDL>
+                <TDLMESSAGE>
+
+                    <COLLECTION NAME="TaxUnitCollection">
+                        <TYPE>Tax Unit</TYPE>
+
+                        <FETCH>NAME</FETCH>
+                        <FETCH>GSTREGNUMBER</FETCH>
+                        <FETCH>GSTREGISTRATIONDETAILS.LIST</FETCH>
+
+                    </COLLECTION>
+
+                </TDLMESSAGE>
+            </TDL>
+
+        </DESC>
+    </BODY>
+</ENVELOPE>
+`;
+};

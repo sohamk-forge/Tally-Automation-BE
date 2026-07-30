@@ -169,6 +169,8 @@ import challanRoutes
 import purchaseValidationRoutes
  from "./api/purchaseValidation.routes.js";
 
+import voucherPdfRoutes from "./api/voucherPdf.routes.js";
+
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -485,11 +487,7 @@ app.use(
 /* =================================
    VOUCHER APIs
 ================================= */
-app.use(
-  "/api/v1/voucher",
-  ...requireSessionOrApiKey(),
-  voucherRoutes
-);
+app.use("/api/v1/voucher", ...requireSessionOrApiKey(), voucherRoutes);
 
 app.use("/api/v1/sales", ...requireSessionOrApiKey(), salesAccountRoutes);
 
@@ -506,6 +504,13 @@ app.use("/api/v1", ...requireSessionOrApiKey(), monthlySalesTrendRouter);
 app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanRoutes);
 
 app.use("/api/purchase-validation", ...requireSessionOrApiKey(), purchaseValidationRoutes);
+
+app.use(
+  "/api/v1/voucher",
+  ...requireSessionOrApiKey(),
+  voucherPdfRoutes
+);
+
 
 /* =================================
    DEFAULT API

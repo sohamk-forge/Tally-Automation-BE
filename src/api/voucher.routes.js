@@ -16,6 +16,7 @@ import {
 import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
 
+
 const router = express.Router();
 
 const upload = multer({
