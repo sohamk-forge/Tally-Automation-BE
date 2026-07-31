@@ -383,4 +383,78 @@ router.get("/sales-invoices", async (req, res) => {
   }
 });
 
+router.delete("/sales-invoices/:id", async (req, res) => {
+  try {
+
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        status: "error",
+        message: "Unauthenticated"
+      });
+    }
+
+    const { id } = req.params;
+
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid invoice id required"
+      });
+    }
+
+    // Optional: fetch first to confirm it exists (and to get company_id for access check)
+    const existing = await pool.query(
+      `SELECT id, company_id FROM app_test.sales_invoice_extractions WHERE id = $1`,
+      [id]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: "Invoice not found"
+      });
+    }
+
+    // const hasAccess = await checkCompanyAccess(userId, existing.rows[0].company_id);
+    // if (!hasAccess) {
+    //   return res.status(403).json({
+    //     status: "error",
+    //     message: "You don't have access to this company"
+    //   });
+    // }
+
+    // Remove any queued job for this invoice so it doesn't get processed after deletion
+    const jobId = getSalesJobId(id);
+    const existingJob = await salesQueue.getJob(jobId);
+    if (existingJob) {
+      await existingJob.remove();
+      console.log(`Old job removed for deleted invoice: ${jobId}`);
+    }
+
+    await pool.query(
+      `DELETE FROM app_test.sales_invoice_extractions WHERE id = $1`,
+      [id]
+    );
+
+    console.log(`🗑️ Invoice deleted: ${id}`);
+
+    return res.status(200).json({
+      status: "success",
+      message: "Invoice deleted successfully",
+      invoice_id: Number(id)
+    });
+
+  } catch (err) {
+    console.error("DELETE invoice error:", err);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
 export default router;

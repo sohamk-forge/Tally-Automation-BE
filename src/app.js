@@ -191,7 +191,8 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:5173",
-  "http://100.117.199.124:5173",   // add every Tailscale IP you test from
+  "http://100.117.199.124:5173", 
+  "http://192.168.0.7:5173",  // add every Tailscale IP you test from
 ];
 
 // Logs every incoming request before anything else touches it — including
