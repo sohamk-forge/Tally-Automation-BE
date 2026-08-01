@@ -138,15 +138,34 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
 function formatValidationError(validation) {
   const parts = [];
 
-  if (validation.missingLedgers.length) {
-    const ledgerList = validation.missingLedgers
-      .map((m) => `"${m.ledger}" (${m.field})`)
-      .join(", ");
-    parts.push(`Missing ledger(s): ${ledgerList}`);
+  // Missing Ledgers
+  if (validation.missingLedgers.length > 0) {
+    const ledgerNames = [
+      ...new Set(
+        validation.missingLedgers
+          .map((item) => String(item.ledger || "").trim())
+          .filter(Boolean)
+      )
+    ];
+
+    if (ledgerNames.length > 0) {
+      parts.push(`Ledger not present: ${ledgerNames.join(", ")}`);
+    }
   }
 
-  if (validation.missingStockItems.length) {
-    parts.push(`Missing stock item(s): ${validation.missingStockItems.join(", ")}`);
+  // Missing Stock Items
+  if (validation.missingStockItems.length > 0) {
+    const stockNames = [
+      ...new Set(
+        validation.missingStockItems
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      )
+    ];
+
+    if (stockNames.length > 0) {
+      parts.push(`Stock item not present: ${stockNames.join(", ")}`);
+    }
   }
 
   return parts.length > 0
