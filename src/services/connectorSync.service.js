@@ -27,27 +27,55 @@ function sleep(ms) {
 export async function sendToTallyViaConnector(
   companyId,
   xml,
-  syncType = "sync"
+  syncType = "sync",
+  userId = null
 ) {
 
-  // STEP 1: FIND CONNECTOR PAIRING FOR THIS COMPANY
-  const pairingResult = await pool.query(
-    `
-    SELECT cpt.user_id
-    FROM app_test.connector_pairing_tokens cpt
-    WHERE cpt.company_id = $1
-    ORDER BY cpt.created_at DESC
-    LIMIT 1
-    `,
-    [companyId]
-  );
+  // STEP 1: FIND CORRECT CONNECTOR PAIRING
+  let pairingResult;
 
-  const pairing = pairingResult.rows[0];
-  if (!pairing) {
-    throw new Error(
-      `No connector pairing found for company ${companyId}`
+  if (userId) {
+    // Prefer the authenticated/requested user's connector
+    pairingResult = await pool.query(
+      `
+      SELECT cpt.user_id
+      FROM app_test.connector_pairing_tokens cpt
+      WHERE cpt.company_id = $1
+        AND cpt.user_id = $2
+        AND cpt.is_used = TRUE
+      ORDER BY cpt.created_at DESC
+      LIMIT 1
+      `,
+      [companyId, userId]
+    );
+  } else {
+    // Fallback for existing routes that don't pass userId yet
+    pairingResult = await pool.query(
+      `
+      SELECT cpt.user_id
+      FROM app_test.connector_pairing_tokens cpt
+      WHERE cpt.company_id = $1
+        AND cpt.is_used = TRUE
+      ORDER BY cpt.created_at DESC
+      LIMIT 1
+      `,
+      [companyId]
     );
   }
+
+  const pairing = pairingResult.rows[0];
+
+  if (!pairing) {
+    throw new Error(
+      userId
+        ? `No connector pairing found for company ${companyId} and user ${userId}`
+        : `No connector pairing found for company ${companyId}`
+    );
+  }
+
+  console.log(
+    `🔗 Connector resolved: company=${companyId}, user=${pairing.user_id}`
+  );
 
   // STEP 2: CREATE CONNECTOR JOB
   const connectorJob = await createConnectorJob({
@@ -56,15 +84,16 @@ export async function sendToTallyViaConnector(
     requestXml: xml,
     payload: {
       company_id: companyId,
+      user_id: pairing.user_id,
       sync: true
     }
   });
 
   console.log(
-    `🔄 Sync connector job created: ${connectorJob.id} (${syncType})`
+    `🔄 Sync connector job created: ${connectorJob.id} (${syncType}) user=${pairing.user_id}`
   );
 
-  // STEP 3: POLL connector_jobs UNTIL COMPLETED / FAILED / TIMEOUT
+  // STEP 3: POLL JOB
   const startTime = Date.now();
 
   while (Date.now() - startTime < TIMEOUT_MS) {
@@ -96,6 +125,7 @@ export async function sendToTallyViaConnector(
       console.log(
         `✅ Sync connector job completed: ${connectorJob.id}`
       );
+
       return job.response_xml || "";
     }
 
@@ -105,8 +135,6 @@ export async function sendToTallyViaConnector(
         `Sync connector job ${connectorJob.id} failed`
       );
     }
-
-    // status still 'pending' or 'claimed' → keep polling
   }
 
   throw new Error(
