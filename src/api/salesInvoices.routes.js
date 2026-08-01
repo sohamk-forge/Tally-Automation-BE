@@ -32,7 +32,10 @@ router.post("/sales-invoices", async (req, res) => {
     const {
       company,
       invoice_data,
-      narration
+      narration,
+      // Optional. If the caller (e.g. the Review tab's retry) knows which row it
+      // is re-pushing, it can send the id and we update that exact row.
+      invoice_id
     } = req.body;
 
     if (!company || !invoice_data) {
@@ -107,7 +110,7 @@ router.post("/sales-invoices", async (req, res) => {
     const stateCode = gstin.substring(0, 2);
 
     if (stateCode === "27") {
-      // Maharashtra → CGST + SGST
+      // Maharashtra -> CGST + SGST
       const halfRate = gstPercent / 2;
       cleanInvoiceData.cgst_amount = Number(
         ((taxableAmount * halfRate) / 100).toFixed(2)
@@ -118,13 +121,13 @@ router.post("/sales-invoices", async (req, res) => {
       cleanInvoiceData.igst_amount = 0;
 
     } else if (stateCode) {
-      // Other state → IGST
+      // Other state -> IGST
       cleanInvoiceData.cgst_amount = 0;
       cleanInvoiceData.sgst_amount = 0;
       cleanInvoiceData.igst_amount = gstAmount;
 
     } else {
-      // No GSTIN → default CGST + SGST (same as bulk)
+      // No GSTIN -> default CGST + SGST (same as bulk)
       const halfRate = gstPercent / 2;
       cleanInvoiceData.cgst_amount = Number(
         ((taxableAmount * halfRate) / 100).toFixed(2)
@@ -170,29 +173,94 @@ router.post("/sales-invoices", async (req, res) => {
     });
 
     // =========================================
-    // CHECK EXISTING OR INSERT NEW
+    // FIND THE EXISTING ROW (OR DECIDE IT IS NEW)
     // =========================================
+    //
+    // invoice_no stays OPTIONAL, so we try three ways in order of reliability:
+    //
+    //   1. invoice_id sent by the caller  -> exact row, always correct
+    //   2. invoice_no supplied            -> match on the number (original behaviour)
+    //   3. neither                        -> match on the invoice's own content
+    //
+    // Case 3 is what fixes the duplicate: a retry that arrives with an empty
+    // invoice_no used to match nothing and INSERT a second row, leaving the old
+    // failed row in the Review tab while the new row showed success - the same
+    // invoice appearing in both tabs (seen with ids 3192 and 4593).
+    //
+    // Caveat on case 3: two genuinely different invoices for the same customer,
+    // on the same date, for the same total, both pushed with no invoice number,
+    // would be treated as one. Send invoice_id from the retry to avoid this.
 
-    const existingInvoice = await pool.query(
-      `
-      SELECT id
-      FROM app_test.sales_invoice_extractions
-      WHERE company_id = $1
-        AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
-      LIMIT 1
-      `,
-      [
-        companyId,
-        (invoice_data.invoice_no || "").trim()
-      ]
+    let existingInvoice;
+    let matchedBy;
+
+    if (invoice_id) {
+
+      matchedBy = "invoice_id";
+      existingInvoice = await pool.query(
+        `
+        SELECT id
+        FROM app_test.sales_invoice_extractions
+        WHERE id = $1
+          AND company_id = $2
+        LIMIT 1
+        `,
+        [invoice_id, companyId]
+      );
+
+    } else if ((invoice_data.invoice_no || "").trim()) {
+
+      matchedBy = "invoice_no";
+      existingInvoice = await pool.query(
+        `
+        SELECT id
+        FROM app_test.sales_invoice_extractions
+        WHERE company_id = $1
+          AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
+        LIMIT 1
+        `,
+        [companyId, invoice_data.invoice_no.trim()]
+      );
+
+    } else {
+
+      matchedBy = "content";
+      // ORDER BY id ASC so we land on the ORIGINAL row, not a duplicate that a
+      // previous run may already have created.
+      existingInvoice = await pool.query(
+        `
+        SELECT id
+        FROM app_test.sales_invoice_extractions
+        WHERE company_id = $1
+          AND LOWER(TRIM(customer_name)) = LOWER(TRIM($2))
+          AND TRIM(invoice_date) = TRIM($3)
+          AND (raw_json->>'grand_total')::numeric = $4
+        ORDER BY id ASC
+        LIMIT 1
+        `,
+        [
+          companyId,
+          invoice_data.customer_name || "",
+          invoice_data.invoice_date || "",
+          cleanInvoiceData.grand_total
+        ]
+      );
+
+    }
+
+    console.log(
+      `Invoice lookup by ${matchedBy}: ${existingInvoice.rows.length ? `matched id ${existingInvoice.rows[0].id}` : "no match (will insert)"}`
     );
 
     let invoiceId;
 
     if (existingInvoice.rows.length > 0) {
 
-      console.log(`Updating existing invoice: ${invoice_data.invoice_no}`);
+      console.log(`Updating existing invoice: ${invoice_data.invoice_no || "(no invoice_no)"}`);
 
+      // invoice_no is written here too, so a retry that supplies a corrected
+      // number updates it. COALESCE/NULLIF keeps the stored number when the
+      // retry sends a blank one, instead of wiping it.
       const updateResult = await pool.query(
         `
         UPDATE app_test.sales_invoice_extractions
@@ -202,13 +270,14 @@ router.post("/sales-invoices", async (req, res) => {
           invoice_date = $3,
           godown_name = $4,
           raw_json = $5,
+          invoice_no = COALESCE(NULLIF(TRIM($6), ''), invoice_no),
           sync_status = 'pending',
           error_count = 0,
           last_error = NULL,
           error_message = NULL,
           gst_details = NULL,
           updated_at = NOW()
-        WHERE id = $6
+        WHERE id = $7
         RETURNING id
         `,
         [
@@ -217,16 +286,17 @@ router.post("/sales-invoices", async (req, res) => {
           invoice_data.invoice_date || "",
           invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData,
+          invoice_data.invoice_no || "",
           existingInvoice.rows[0].id
         ]
       );
 
       invoiceId = updateResult.rows[0].id;
-      console.log(`✅ Invoice updated: ${invoiceId}`);
+      console.log(`Invoice updated: ${invoiceId}`);
 
     } else {
 
-      console.log(`Creating new invoice: ${invoice_data.invoice_no}`);
+      console.log(`Creating new invoice: ${invoice_data.invoice_no || "(no invoice_no)"}`);
 
       const result = await pool.query(
         `
@@ -265,7 +335,7 @@ router.post("/sales-invoices", async (req, res) => {
       );
 
       invoiceId = result.rows[0].id;
-      console.log(`✅ New invoice created: ${invoiceId}`);
+      console.log(`New invoice created: ${invoiceId}`);
     }
 
     const jobId = getSalesJobId(invoiceId);
@@ -283,7 +353,7 @@ router.post("/sales-invoices", async (req, res) => {
 
     console.log("Job ID:", job.id);
     console.log("Job Name:", job.name);
-    console.log(`✅ Sales Invoice Queued: ${invoiceId}`);
+    console.log(`Sales Invoice Queued: ${invoiceId}`);
 
     return res.status(200).json({
       status: "success",
@@ -299,7 +369,7 @@ router.post("/sales-invoices", async (req, res) => {
 
     console.log("");
     console.log("====================================");
-    console.log("💥 SALES INVOICE API ERROR");
+    console.log("SALES INVOICE API ERROR");
     console.log("====================================");
     console.log(err);
 
@@ -359,6 +429,9 @@ router.get("/sales-invoices", async (req, res) => {
       params.push(invoice_no);
     }
 
+    // NOTE: nothing in the codebase increments error_count - it is 0 on every
+    // row - so this filter currently returns nothing. The Review tab should
+    // filter on sync_status = 'failed' instead.
     if (error_only === 'true') {
       query += ` AND error_count > 0`;
     }
@@ -440,7 +513,7 @@ router.delete("/sales-invoices/:id", async (req, res) => {
       [id]
     );
 
-    console.log(`🗑️ Invoice deleted: ${id}`);
+    console.log(`Invoice deleted: ${id}`);
 
     return res.status(200).json({
       status: "success",
