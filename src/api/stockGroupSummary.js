@@ -7,20 +7,68 @@ const router = express.Router();
 /* =========================================
    STOCK GROUP SUMMARY API
 
-   GET /api/stock/group-summary?company_name=ABC%20Traders&gstin=27ABCDE1234F1Z5
-   GET /api/stock/group-summary?company_name=ABC%20Traders&state_code=27
-   GET /api/stock/group-summary?company_name=ABC%20Traders
+   Accepts EITHER company_id (preferred) OR company_name.
+
+   GET /api/stock/group-summary?company_id=1
+   GET /api/stock/group-summary?company_id=1&gstin=27ABCDE1234F1Z5
+   GET /api/stock/group-summary?company_id=1&state_code=27
+   GET /api/stock/group-summary?company_name=ABC%20Traders          (legacy)
+
+   Why company_id is preferred:
+   The frontend (api/tally.js -> getStockGroupSummary) sends company_id, and
+   ids are stable. Matching on the company NAME is fragile in this project —
+   names like "Sai Sanjivani Enterprise (Eicher Workshop) - (from 1-Apr-26)"
+   have already been truncated upstream, and a truncated name silently
+   returns "no stock group summary found" instead of an obvious error.
+
+   When company_id is supplied we resolve it to the canonical name from the
+   companies table, then query stock_group_summary by that name (that table
+   stores company_name, not company_id).
 ========================================= */
 
 router.get("/stock/group-summary", async (req, res) => {
   try {
-    const companyName = (req.query.company_name || "").trim();
+    const companyIdParam = (req.query.company_id || "").toString().trim();
+    let companyName = (req.query.company_name || "").trim();
+    let resolvedBy;
 
-    if (!companyName) {
+    if (companyIdParam) {
+
+      const companyId = Number(companyIdParam);
+
+      if (!Number.isInteger(companyId) || companyId <= 0) {
+        return res.status(400).json({
+          status: "error",
+          message: "company_id must be a positive integer",
+        });
+      }
+
+      const companyRow = await pool.query(
+        `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`,
+        [companyId]
+      );
+
+      if (!companyRow.rows.length) {
+        return res.status(404).json({
+          status: "error",
+          message: `Company id ${companyId} not found`,
+        });
+      }
+
+      companyName = (companyRow.rows[0].name || "").trim();
+      resolvedBy = "company_id";
+
+    } else if (companyName) {
+
+      resolvedBy = "company_name";
+
+    } else {
+
       return res.status(400).json({
         status: "error",
-        message: "company_name required",
+        message: "company_id or company_name required",
       });
+
     }
 
     // ---------------------------------------
@@ -38,7 +86,7 @@ router.get("/stock/group-summary", async (req, res) => {
     // Determine company's own state from DB (company_details)
     // ---------------------------------------
     const companyResult = await pool.query(
-      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE company_name = $1`,
+      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE TRIM(company_name) = TRIM($1)`,
       [companyName]
     );
 
@@ -58,9 +106,9 @@ router.get("/stock/group-summary", async (req, res) => {
     }
 
     const isSameState =
-  customerStateCode === null
-    ? true
-    : customerStateCode === companyStateCode;
+      customerStateCode === null
+        ? true
+        : customerStateCode === companyStateCode;
 
     const stateSource = stateCodeFromQuery
       ? "state_code_param"
@@ -75,7 +123,7 @@ router.get("/stock/group-summary", async (req, res) => {
         quantity, stock_value, gst_rate, cgst_rate, sgst_rate, igst_rate,
         rate, created_at
       FROM ${DB_SCHEMA}.stock_group_summary
-      WHERE company_name = $1
+      WHERE TRIM(company_name) = TRIM($1)
       ORDER BY id DESC
       `,
       [companyName]
@@ -86,6 +134,7 @@ router.get("/stock/group-summary", async (req, res) => {
         status: "error",
         source: "database",
         company_name: companyName,
+        resolved_by: resolvedBy,
         message: "No stock group summary found",
         total: 0,
         data: [],
@@ -143,6 +192,7 @@ router.get("/stock/group-summary", async (req, res) => {
       status: "success",
       source: "database",
       company_name: companyName,
+      resolved_by: resolvedBy,
       company_gstin: companyGSTIN,
       company_state_code: companyStateCode,
       customer_state_code: customerStateCode,
@@ -151,7 +201,7 @@ router.get("/stock/group-summary", async (req, res) => {
       data,
     });
   } catch (err) {
-    console.log("❌ STOCK GROUP SUMMARY API ERROR:", err.message);
+    console.log("STOCK GROUP SUMMARY API ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
