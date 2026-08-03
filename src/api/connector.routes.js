@@ -81,17 +81,24 @@ router.get("/current", verifySession(), async (req, res) => {
       });
     }
 
+    // Live status comes from connector_api_keys.last_seen_at.
+    // Machine table is used only for display/company information.
     const result = await pool.query(
       `
       SELECT
-          company_name,
-          from_year,
-          to_year,
-          tally_connected
-      FROM ${DB_SCHEMA}.connector_machines
-      WHERE user_id = $1
-        AND tally_connected = true
-      ORDER BY updated_at DESC
+          k.machine_id,
+          k.last_seen_at,
+          m.company_name,
+          m.from_year,
+          m.to_year
+      FROM ${DB_SCHEMA}.connector_api_keys k
+      LEFT JOIN ${DB_SCHEMA}.connector_machines m
+        ON m.machine_id = k.machine_id
+       AND m.user_id = k.user_id
+      WHERE k.user_id = $1
+        AND k.revoked_at IS NULL
+        AND k.last_seen_at >= NOW() - INTERVAL '30 seconds'
+      ORDER BY k.last_seen_at DESC
       LIMIT 1
       `,
       [user_id]
@@ -100,24 +107,31 @@ router.get("/current", verifySession(), async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({
         status: "error",
-        message: "No connected machine found"
+        message: "Connector is offline"
       });
     }
 
     return res.status(200).json({
       status: "success",
-      data: result.rows[0]
+      data: {
+        connected: true,
+        machine_id: result.rows[0].machine_id,
+        last_seen_at: result.rows[0].last_seen_at,
+        company_name: result.rows[0].company_name,
+        from_year: result.rows[0].from_year,
+        to_year: result.rows[0].to_year
+      }
     });
 
   } catch (err) {
     console.error("Current Connector Error:", err);
+
     return res.status(500).json({
       status: "error",
       message: err.message
     });
   }
 });
-
 /* =========================================
    LIST GENERATED API KEYS
    Dashboard-only view of this user's connector API keys. There's no

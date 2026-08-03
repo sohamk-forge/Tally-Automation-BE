@@ -2,6 +2,7 @@ import crypto from "crypto";
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+
 export const hashApiKey = (rawKey) =>
   crypto.createHash("sha256").update(rawKey).digest("hex");
 
@@ -36,12 +37,27 @@ export const verifyConnectorApiKey = async (req, res, next) => {
       });
     }
 
+    const row = result.rows[0];
+
+    // Live heartbeat — connector is currently running
+    pool.query(
+      `
+      UPDATE ${DB_SCHEMA}.connector_api_keys
+      SET last_seen_at = NOW()
+      WHERE key_hash = $1
+      `,
+      [keyHash]
+    ).catch((err) => {
+      console.error("Connector heartbeat update failed:", err.message);
+    });
+
     req.connectorMachine = {
-      userId: result.rows[0].user_id,
-      machineId: result.rows[0].machine_id,
+      userId: row.user_id,
+      machineId: row.machine_id,
     };
 
     return next();
+
   } catch (err) {
     return next(err);
   }
