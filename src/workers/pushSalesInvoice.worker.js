@@ -87,19 +87,45 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
   const missingLedgers = [];
   const missingStockItems = [];
 
-  // STAGE 1: mapped ledgers (sales, CGST, SGST, IGST, rounding)
+  // STAGE 1: mapped ledgers (sales, CGST, SGST, IGST, conditional TDS/cess/round-off)
+  // sales_ledger, cgst_ledger, sgst_ledger, igst_ledger are always required.
+  // tds_ledger / cess_ledger / rounded_off_ledger are only required when the
+  // invoice actually carries a nonzero amount for that component.
   const ledgersToValidate = [
     { field: "sales_ledger", value: mapping.sales_ledger },
     { field: "cgst_ledger", value: mapping.cgst_ledger },
     { field: "sgst_ledger", value: mapping.sgst_ledger },
     { field: "igst_ledger", value: mapping.igst_ledger },
-    { field: "rounded_off_ledger", value: mapping.rounded_off_ledger }
-  ].filter((entry) => entry.value); // skip unset/optional ledgers (e.g. IGST for intra-state)
+
+    ...(Number(invoice.tds_amount || 0) !== 0
+      ? [{ field: "tds_ledger", value: mapping.tds_ledger }]
+      : []),
+
+    ...(Number(invoice.cess_amount || 0) !== 0
+      ? [{ field: "cess_ledger", value: mapping.cess_ledger }]
+      : []),
+
+    ...(Number(invoice.round_off || 0) !== 0
+      ? [{ field: "rounded_off_ledger", value: mapping.rounded_off_ledger }]
+      : [])
+  ];
   // Note: mapping now comes from company_sales_ledger_mappings, which
   // actually has a sales_ledger column — this check will now run for real
   // instead of always being skipped due to an undefined value.
 
   for (const { field, value } of ledgersToValidate) {
+
+    if (!value) {
+      // Mapping itself is missing/blank — flag it explicitly rather than
+      // silently skipping the check (which previously let an empty
+      // sales_ledger sail through and produce <LEDGERNAME/> in the XML).
+      missingLedgers.push({
+        field,
+        ledger: `(mapping missing for ${field})`
+      });
+      continue;
+    }
+
     const exists = await ledgerExists(companyId, value);
     if (!exists) {
       missingLedgers.push({ field, ledger: value });
@@ -263,12 +289,31 @@ const worker = new Worker(
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
         igst_ledger: mapping.igst_ledger,
+        tds_ledger: mapping.tds_ledger,
+        cess_ledger: mapping.cess_ledger,
         rounded_off_ledger: mapping.rounded_off_ledger
       });
 
       const invoice = typeof row.raw_json === "string"
         ? JSON.parse(row.raw_json)
         : row.raw_json;
+
+      // Hard guards — the mapping is authoritative and overwrites whatever
+      // ledger name the request body sent, so it must never be blank when
+      // it's about to be used. A blank sales_ledger previously produced a
+      // bare <LEDGERNAME/> in the generated XML, which Tally rejected with
+      // a generic/misleading error instead of a clean validation message.
+      if (!mapping.sales_ledger?.trim()) {
+        throw new Error(
+          `Sales ledger mapping is missing for company ${row.company_id}`
+        );
+      }
+
+      if (Number(invoice.tds_amount || 0) > 0 && !mapping.tds_ledger?.trim()) {
+        throw new Error(
+          `TDS ledger mapping is missing for company ${row.company_id}`
+        );
+      }
 
       // Debug visibility — confirms exactly what's being validated against,
       // so a mismatch (wrong column, wrong field name) is obvious in logs
@@ -279,6 +324,8 @@ const worker = new Worker(
         cgstLedger: mapping.cgst_ledger,
         sgstLedger: mapping.sgst_ledger,
         igstLedger: mapping.igst_ledger,
+        tdsLedger: mapping.tds_ledger,
+        cessLedger: mapping.cess_ledger,
         roundedOffLedger: mapping.rounded_off_ledger,
         customerLedger: invoice.party_ledger || invoice.customer_name,
         lineItemCount: Array.isArray(invoice.line_items) ? invoice.line_items.length : 0,
@@ -327,13 +374,20 @@ const worker = new Worker(
 
       const xml = await generateSalesXml({
         ...invoice,
+
         company: row.company_name,
+
         sales_ledger: mapping.sales_ledger,
         sales_parent_group: mapping.sales_parent_group,
+
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
         igst_ledger: mapping.igst_ledger,
+
+        tds_ledger: mapping.tds_ledger,
+        cess_ledger: mapping.cess_ledger,
         rounded_off_ledger: mapping.rounded_off_ledger,
+
         reference_date: row.invoice_date,
         reference_number: row.invoice_no,
         voucher_type: "Sales Invoice"
