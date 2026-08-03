@@ -9,7 +9,7 @@ import { DB_SCHEMA } from "../config/db.js";
  * Called right after a SuperTokens sign up so every new session has a
  * corresponding local numeric user id available (see getLocalUserId.js).
  */
-export const ensureLocalUserProfile = async (supertokensUserId, email, role = "user", profile = {}) => {
+export const ensureLocalUserProfile = async (supertokensUserId, email, role = "user", profile = {}, hasPassword = true) => {
   await UserRoles.createNewRoleOrAddPermissions(role, []);
   await UserRoles.addRoleToUser("public", supertokensUserId, role);
 
@@ -24,7 +24,8 @@ export const ensureLocalUserProfile = async (supertokensUserId, email, role = "u
       role,
       first_name,
       last_name,
-      phone
+      phone,
+      has_password
     )
     VALUES
     (
@@ -33,13 +34,25 @@ export const ensureLocalUserProfile = async (supertokensUserId, email, role = "u
       $3,
       $4,
       $5,
-      $6
+      $6,
+      $7
     )
-    ON CONFLICT (supertokens_user_id) DO NOTHING
+    ON CONFLICT (email) DO NOTHING
     RETURNING id
     `,
-    [email, supertokensUserId, role, firstName, lastName, phone]
+    [email, supertokensUserId, role, firstName, lastName, phone, hasPassword]
   );
 
-  return result.rows[0]?.id ?? null;
+  if (result.rows[0]) return result.rows[0].id;
+
+  // Someone can already have a local profile under a different SuperTokens
+  // recipe (e.g. signed up with EmailPassword, then invited via the
+  // Passwordless magic-link flow — two different recipe user ids, same
+  // email). Email is the real identity anchor here, so reuse that row
+  // rather than erroring on the email uniqueness constraint.
+  const existing = await pool.query(
+    `SELECT id FROM ${DB_SCHEMA}.users WHERE email = $1 LIMIT 1`,
+    [email]
+  );
+  return existing.rows[0]?.id ?? null;
 };

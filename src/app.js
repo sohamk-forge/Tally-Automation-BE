@@ -174,6 +174,12 @@ import voucherPdfRoutes from "./api/voucherPdf.routes.js";
 import partyTransactionsRoutes
  from "./api/party-transactions.routes.js";
 
+import invitesRoutes
+ from "./api/invites.routes.js";
+
+import accountRoutes
+ from "./api/account.routes.js";
+
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -516,6 +522,26 @@ app.use(
 );
 
 app.use("/api/v1/party-transactions", ...requireSessionOrApiKey(), partyTransactionsRoutes);
+
+/* =================================
+   INVITE APIs
+================================= */
+
+app.use(
+  "/api/invites",
+  ...requireSessionOrApiKey(),
+  invitesRoutes
+);
+
+/* =================================
+   ACCOUNT APIs
+================================= */
+
+app.use(
+  "/api/account",
+  ...requireSessionOrApiKey(),
+  accountRoutes
+);
 
 
 

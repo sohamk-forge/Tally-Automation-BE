@@ -30,6 +30,7 @@
     "knex": "^3.2.9",
     "multer": "^2.2.0",
     "node-cron": "^4.2.1",
+    "nodemailer": "^9.0.3",
     "pg": "^8.20.0",
     "puppeteer": "^25.4.0",
     "supertokens-node": "^24.0.3",
