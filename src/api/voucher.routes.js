@@ -90,18 +90,6 @@ function isSeparatorRow(row) {
 
 /* ===========================
    UNIQUE FILE NAME RESOLVER
-
-   Replaces the old "reject if this file_name already exists for this
-   company" behavior. Instead of blocking a re-upload of a
-   same-named file, this finds a free " (n)" variant of the name for
-   this company_id, so the new upload is inserted, processed, and
-   returned as its OWN distinct file_name/section — it is never
-   merged into the rows/groups of the existing file with that name.
-
-   Any trailing " (n)" already present on the incoming name is
-   stripped first to find the "root" name, so repeated re-uploads of
-   the same source file keep incrementing from the same root instead
-   of stacking suffixes like "Statement (1) (1).xls".
 =========================== */
 
 async function getUniqueFileName(company_id, fileName) {
@@ -112,7 +100,7 @@ async function getUniqueFileName(company_id, fileName) {
 
   const existing = await db.query(
     `SELECT DISTINCT file_name
-     FROM app_test.contra_vouchers
+     FROM ${DB_SCHEMA}.contra_vouchers
      WHERE company_id = $1
        AND file_name LIKE $2`,
     [company_id, `${root}%${ext}`]
@@ -133,59 +121,53 @@ async function getUniqueFileName(company_id, fileName) {
 
 /* ===========================
    FALLBACK GROUP KEY EXTRACTOR
-
-   Used whenever the semantic enrichment script (semantic_cli.py)
-   couldn't identify a known merchant and returned "unknown"/null.
-   This is common for person-to-person IMPS/NEFT/UPI transfers, since
-   those scripts are usually built to recognize known merchant/brand
-   name patterns, not individual names.
-
-   Extracts the payer/payee name segment sitting between the
-   transaction reference and the bank code (IMPS/NEFT/RTGS), or
-   between "UPI-" and the "@bank" handle (UPI), so transfers to/from
-   the same person still cluster together under a stable group_key
-   instead of every such transaction collapsing into one blanket
-   "unknown" bucket.
-
-   NOTE: this is a best-effort fallback, not a replacement for proper
-   semantic enrichment — it only parses the common bank narration
-   shapes below. If the narration doesn't match either pattern, it
-   returns null and the original "unknown" value is kept as-is.
 =========================== */
 
 function deriveFallbackGroupKey(narration) {
   if (!narration) return null;
 
-  // Matches: IMPS-<digits>-<NAME SEGMENT>-<BANKCODE>-...
-  //      or: NEFT-<digits>-<NAME SEGMENT>-<BANKCODE>-...
-  //      or: RTGS-<digits>-<NAME SEGMENT>-<BANKCODE>-...
   const impsMatch = narration.match(/^(?:IMPS|NEFT|RTGS)-\d+-(.+?)-[A-Z]{3,6}-/i);
   if (impsMatch) {
     return impsMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
   }
 
-  // Matches: UPI-<NAME SEGMENT>-<vpa>@<bank>-...
   const upiMatch = narration.match(/^UPI-(.+?)-[\w.]+@[\w]+-/i);
   if (upiMatch) {
     return upiMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
   }
 
-  return null; // couldn't parse a name segment — leave as unknown
+  return null;
 }
 
 /* ===========================
-   SEMANTIC ENRICHMENT (replaces the old :8000 FastAPI service)
+   SEMANTIC ENRICHMENT
 =========================== */
+
+const SEMANTIC_CLI_TIMEOUT_MS = 15000;
 
 function runSemanticEnrichment(transactions) {
   return new Promise((resolve) => {
     if (!transactions.length) return resolve(transactions);
 
     const pyFile = path.join(process.cwd(), "src", "python", "semantic_cli.py");
-    const python = spawn("python", [pyFile]);
+    const python = spawn("python3", [pyFile]);
 
     let output = "";
     let errorOutput = "";
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      console.error("semantic_cli timed out after", SEMANTIC_CLI_TIMEOUT_MS, "ms — killing process");
+      python.kill();
+      finish(transactions.map(() => ({})));
+    }, SEMANTIC_CLI_TIMEOUT_MS);
 
     python.stdout.on("data", (d) => (output += d.toString()));
     python.stderr.on("data", (d) => (errorOutput += d.toString()));
@@ -193,24 +175,24 @@ function runSemanticEnrichment(transactions) {
     python.on("close", (code) => {
       if (code !== 0) {
         console.error("semantic_cli failed:", errorOutput);
-        return resolve(transactions.map(() => ({}))); // fail-open
+        return finish(transactions.map(() => ({})));
       }
       try {
         const parsed = JSON.parse(output);
         if (parsed?.error) {
           console.error("semantic_cli error:", parsed.error);
-          return resolve(transactions.map(() => ({})));
+          return finish(transactions.map(() => ({})));
         }
-        resolve(parsed);
+        finish(parsed);
       } catch (e) {
         console.error("semantic_cli parse error:", e.message, output);
-        resolve(transactions.map(() => ({})));
+        finish(transactions.map(() => ({})));
       }
     });
 
     python.on("error", (err) => {
       console.error("semantic_cli spawn error:", err.message);
-      resolve(transactions.map(() => ({})));
+      finish(transactions.map(() => ({})));
     });
 
     python.stdin.write(JSON.stringify(transactions));
@@ -243,7 +225,7 @@ async function runDuplicateCheck(voucher) {
   }
 
   const updated = await db.query(
-    `UPDATE app_test.contra_vouchers
+    `UPDATE ${DB_SCHEMA}.contra_vouchers
      SET duplicate_checked = true,
          duplicate_message = $1,
          status = $2
@@ -319,49 +301,12 @@ router.post("/create", async (req, res) => {
 
 /* ===========================
    PROCESS A SINGLE UPLOADED FILE
-
-   Extracted from the old /upload-statement handler so that each
-   uploaded file — when multiple are sent in one request — can be
-   parsed, enriched, and inserted independently, and returned as its
-   own review section keyed by file_name.
-
-   CHANGED: a same-named file is no longer rejected as
-   "already_exists". Instead, getUniqueFileName() resolves a free
-   " (n)" variant for this company_id, and that variant is used for
-   every insert/return below. Because every downstream query that
-   groups by file_name (statement-details, statement-transactions,
-   waiting-ledger, duplicate checks, etc.) keys off this exact
-   file_name column, this upload always lands in its own section and
-   is never merged into the previous file's rows or groups.
 =========================== */
 
 async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
   const originalFileName = file.originalname;
-
-      const existingFile = await db.query(
-        `SELECT
-          file_name,
-          bank_ledger,
-          TO_CHAR(MIN(voucher_date), 'DD-Mon-YYYY') AS start_date,
-          TO_CHAR(MAX(voucher_date), 'DD-Mon-YYYY') AS end_date,
-          COUNT(*) AS total_rows
-         FROM ${DB_SCHEMA}.contra_vouchers
-         WHERE company_id = $1
-           AND file_name = $2
-           AND file_name IS NOT NULL
-         GROUP BY file_name, bank_ledger`,
-        [company_id, fileName]
-      );
-
-  if (existingFile.rows.length > 0) {
-    return {
-      file_name: fileName,
-      success: false,
-      already_exists: true,
-      message: `This file "${fileName}" has already been uploaded.`,
-      data: existingFile.rows[0]
-    };
-  }
+  const fileName = await getUniqueFileName(company_id, originalFileName);
+  const wasRenamed = fileName !== originalFileName;
 
   let workbook;
   try {
@@ -434,10 +379,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     const merchantName = enriched[i]?.merchant_name || null;
     let groupKey = enriched[i]?.group_key || null;
 
-    // Fallback group_key derivation. If the Python script returned
-    // nothing, or literally "unknown"/"UNKNOWN", try to parse a stable
-    // payer/payee name segment out of the narration itself for common
-    // transfer-type narrations (IMPS/NEFT/RTGS/UPI).
     if (!groupKey || groupKey.toLowerCase() === "unknown") {
       const fallbackKey = deriveFallbackGroupKey(narration);
       if (fallbackKey) {
@@ -460,84 +401,86 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
       group_key: groupKey || ""
     });
 
-        if (withdrawalAmt !== null && withdrawalAmt > 0) {
-          const existingDebit = await db.query(
-            `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
-             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
-               AND amount = $4 AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $5`,
-            [company_id, bank_ledger, txnDate, withdrawalAmt, narration]
+    if (withdrawalAmt !== null && withdrawalAmt > 0) {
+      const existingDebit = await db.query(
+        `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE company_id = $1 AND bank_ledger = $2 AND file_name = $3
+           AND voucher_date = $4 AND amount = $5
+           AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $6`,
+        [company_id, bank_ledger, fileName, txnDate, withdrawalAmt, narration]
+      );
+
+      if (existingDebit.rows.length > 0) {
+        const ex = existingDebit.rows[0];
+        if (ex.status === 'FAILED') {
+          const r = await db.query(
+            `UPDATE ${DB_SCHEMA}.contra_vouchers
+             SET status = 'WAITING_LEDGER', err_message = NULL,
+                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+             WHERE id = $2 RETURNING *`,
+            [chequeRef, ex.id]
           );
-
-          if (existingDebit.rows.length > 0) {
-            const ex = existingDebit.rows[0];
-            if (ex.status === 'FAILED') {
-              const r = await db.query(
-                `UPDATE ${DB_SCHEMA}.contra_vouchers
-                 SET status = 'WAITING_LEDGER', err_message = NULL,
-                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-                 WHERE id = $2 RETURNING *`,
-                [chequeRef, ex.id]
-              );
-              inserted.push({ ...r.rows[0], _action: 'reset' });
-            } else {
-              inserted.push({ ...ex, _action: 'skipped' });
-            }
-          } else {
-            const r = await db.query(
-              `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-               (company_id, company_name, voucher_date, bank_ledger,
-                amount, narration, instrument_number,
-                debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name, merchant_name, group_key)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-               RETURNING *`,
-              [company_id, company_name, txnDate, bank_ledger,
-               withdrawalAmt, narration, chequeRef, password || null, fileName,
-               merchantName, groupKey]
-            );
-            inserted.push({ ...r.rows[0], _action: 'inserted' });
-          }
+          inserted.push({ ...r.rows[0], _action: 'reset' });
+        } else {
+          inserted.push({ ...ex, _action: 'skipped' });
         }
-
-        if (depositAmt !== null && depositAmt > 0) {
-          const existingCredit = await db.query(
-            `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
-             WHERE company_id = $1 AND bank_ledger = $2 AND voucher_date = $3
-               AND amount = $4 AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $5`,
-            [company_id, bank_ledger, txnDate, depositAmt, narration]
-          );
-
-          if (existingCredit.rows.length > 0) {
-            const ex = existingCredit.rows[0];
-            if (ex.status === 'FAILED') {
-              const r = await db.query(
-                `UPDATE ${DB_SCHEMA}.contra_vouchers
-                 SET status = 'WAITING_LEDGER', err_message = NULL,
-                     instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-                 WHERE id = $2 RETURNING *`,
-                [chequeRef, ex.id]
-              );
-              inserted.push({ ...r.rows[0], _action: 'reset' });
-            } else {
-              inserted.push({ ...ex, _action: 'skipped' });
-            }
-          } else {
-            const r = await db.query(
-              `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-               (company_id, company_name, voucher_date, bank_ledger,
-                amount, narration, instrument_number,
-                debit_credit, voucher_type, party_ledger, status,
-                statement_password, file_name, merchant_name, group_key)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-               RETURNING *`,
-              [company_id, company_name, txnDate, bank_ledger,
-               depositAmt, narration, chequeRef, password || null, fileName,
-               merchantName, groupKey]
-            );
-            inserted.push({ ...r.rows[0], _action: 'inserted' });
-          }
-        }
+      } else {
+        const r = await db.query(
+          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+           (company_id, company_name, voucher_date, bank_ledger,
+            amount, narration, instrument_number,
+            debit_credit, voucher_type, party_ledger, status,
+            statement_password, file_name, merchant_name, group_key)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
+           RETURNING *`,
+          [company_id, company_name, txnDate, bank_ledger,
+           withdrawalAmt, narration, chequeRef, password || null, fileName,
+           merchantName, groupKey]
+        );
+        inserted.push({ ...r.rows[0], _action: 'inserted' });
       }
+    }
+
+    if (depositAmt !== null && depositAmt > 0) {
+      const existingCredit = await db.query(
+        `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE company_id = $1 AND bank_ledger = $2 AND file_name = $3
+           AND voucher_date = $4 AND amount = $5
+           AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $6`,
+        [company_id, bank_ledger, fileName, txnDate, depositAmt, narration]
+      );
+
+      if (existingCredit.rows.length > 0) {
+        const ex = existingCredit.rows[0];
+        if (ex.status === 'FAILED') {
+          const r = await db.query(
+            `UPDATE ${DB_SCHEMA}.contra_vouchers
+             SET status = 'WAITING_LEDGER', err_message = NULL,
+                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
+             WHERE id = $2 RETURNING *`,
+            [chequeRef, ex.id]
+          );
+          inserted.push({ ...r.rows[0], _action: 'reset' });
+        } else {
+          inserted.push({ ...ex, _action: 'skipped' });
+        }
+      } else {
+        const r = await db.query(
+          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+           (company_id, company_name, voucher_date, bank_ledger,
+            amount, narration, instrument_number,
+            debit_credit, voucher_type, party_ledger, status,
+            statement_password, file_name, merchant_name, group_key)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
+           RETURNING *`,
+          [company_id, company_name, txnDate, bank_ledger,
+           depositAmt, narration, chequeRef, password || null, fileName,
+           merchantName, groupKey]
+        );
+        inserted.push({ ...r.rows[0], _action: 'inserted' });
+      }
+    }
+  }
 
   if (!inserted.length) {
     return {
@@ -578,20 +521,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 
 /* ===========================
    UPLOAD BANK STATEMENT(S) (EXCEL)
-
-   Accepts MULTIPLE files in one request via the "files" field. Each
-   file is parsed, enriched, and inserted independently by
-   processStatementFile(); one file failing (bad password,
-   unreadable, no valid rows) does not block the others. A same-named
-   file is auto-renamed (see getUniqueFileName) rather than rejected,
-   so it always ends up as its own separate section — files are never
-   merged together. The response returns a `files[]` array — one
-   section per uploaded file, keyed by file_name — so the frontend
-   can render a separate review section for each file, mirroring the
-   shape used by /statement-transactions.
-
-   Still works fine with a single file — `files` will just contain
-   one entry.
 =========================== */
 
 router.post(
@@ -622,10 +551,6 @@ router.post(
         });
       }
 
-      // Process every file independently — one file's failure doesn't
-      // block the others; each becomes its own section below. A
-      // same-named file is auto-renamed inside processStatementFile
-      // rather than rejected, so files are never merged.
       const results = [];
       for (const file of req.files) {
         try {
@@ -648,7 +573,7 @@ router.post(
       return res.status(anySucceeded ? 201 : 400).json({
         success: anySucceeded,
         file_count: results.length,
-        files: results   // <-- one section per uploaded file, by file_name
+        files: results
       });
 
     } catch (err) {
@@ -711,18 +636,18 @@ router.get("/statement-details", async (req, res) => {
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
 
-   CHANGED (per request): raw per-file data is now FULL — every row
-   for every file, never filtered by group membership — and stays
-   separated by file_name under `files[]`.
-
-   The "AI suggestion" groups (merchant/group_key clusters) are now
-   built ONCE, across ALL files combined — not per file. So if the
-   same group_key shows up in two different uploaded files, it comes
-   back as a SINGLE merged group (combined count/totals/transactions)
-   in the top-level `groups[]` array, instead of two separate groups
-   nested under two different files. Each transaction inside a group
-   still carries its own `file_name` so you can trace which file it
-   came from.
+   ★★★ FIX APPLIED HERE ★★★
+   Added `id` to the SELECT and to toTxn(). Previously this route never
+   selected the row's real primary key, so the frontend fell back to
+   using cheque_ref (instrument_number) as a pseudo-id. That's a bank
+   reference string, NOT a real numeric voucher id — it caused React key
+   collisions on shared placeholder refs (e.g. "000000000000000") AND,
+   far worse, caused the frontend to send that string as `id` in
+   PUT /voucher/bulk-party-ledger, which crashed Postgres with
+   "invalid input syntax for type bigint" (or, if a ref ever happened
+   to parse as a number, could silently update the WRONG voucher row).
+   `id` is now included so the frontend has a real, stable, numeric
+   identifier to use for both React keys and any write-back calls.
 =========================== */
 
 router.get("/statement-transactions", async (req, res) => {
@@ -736,31 +661,17 @@ router.get("/statement-transactions", async (req, res) => {
       });
     }
 
-    let targetFileName = file_name;
-
-    if (!targetFileName) {
-      const latest = await db.query(
-        `SELECT file_name
-         FROM ${DB_SCHEMA}.contra_vouchers
-         WHERE company_id = $1
-           AND file_name IS NOT NULL
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [company_id]
-      );
-
-      if (!latest.rows.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No statement found for this company"
-        });
-      }
-
-      targetFileName = latest.rows[0].file_name;
+    const params = [company_id];
+    let fileFilterClause = "";
+    if (file_name) {
+      fileFilterClause = "AND file_name = $2";
+      params.push(file_name);
     }
 
     const result = await db.query(
       `SELECT
+        id,
+        status,
         voucher_date,
         narration,
         instrument_number,
@@ -768,7 +679,8 @@ router.get("/statement-transactions", async (req, res) => {
         debit_credit,
         merchant_name,
         group_key,
-        file_name
+        file_name,
+        bank_ledger
        FROM ${DB_SCHEMA}.contra_vouchers
        WHERE company_id = $1
          AND file_name IS NOT NULL
@@ -791,6 +703,8 @@ router.get("/statement-transactions", async (req, res) => {
     }
 
     const toTxn = (r) => ({
+      id: r.id,
+      status: r.status,
       transaction_date: r.voucher_date
         ? new Date(r.voucher_date).toISOString().split("T")[0]
         : "",
@@ -803,8 +717,6 @@ router.get("/statement-transactions", async (req, res) => {
       file_name: r.file_name
     });
 
-    // ---- FULL per-file data (every row, every file — no group filtering,
-    //      never merged/filtered by file_name across files) ----
     const fileMap = new Map();
     for (const r of result.rows) {
       if (!fileMap.has(r.file_name)) {
@@ -817,14 +729,16 @@ router.get("/statement-transactions", async (req, res) => {
       total: f.transactions.length
     }));
 
-    // ---- AI suggestion groups: merged ACROSS all files by group_key ----
     const groupsMap = new Map();
     for (const r of result.rows) {
-      const key = r.group_key || "__ungrouped__";
+      const groupKey = r.group_key || "__ungrouped__";
+      const key = `${r.file_name}||${groupKey}`;
+
       if (!groupsMap.has(key)) {
         groupsMap.set(key, {
           group_key: r.group_key || null,
           merchant_name: r.merchant_name || null,
+          file_name: r.file_name,
           count: 0,
           total_withdrawal: 0,
           total_deposit: 0,
@@ -839,8 +753,7 @@ router.get("/statement-transactions", async (req, res) => {
         r.instrument_number || "",
         r.debit_credit,
         Number(r.amount),
-        r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : "",
-        r.file_name   // keeps identical txns in two different files from deduping into one
+        r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : ""
       ].join("|");
 
       bucket.distinctNarrations.add((r.narration || "").trim().toLowerCase());
@@ -863,9 +776,9 @@ router.get("/statement-transactions", async (req, res) => {
     return res.status(200).json({
       success: true,
       file_count: files.length,
-      files,          // full raw data, still separated by file_name
+      files,
       group_count: groups.length,
-      groups          // AI suggestion — merged across all files by group_key
+      groups
     });
 
   } catch (err) {
@@ -879,19 +792,6 @@ router.get("/statement-transactions", async (req, res) => {
 
 /* ===========================
    SUGGEST PARTY LEDGER
-
-   Matches by company_name only (contra_vouchers has both company_id
-   and company_name — using company_name so both tables use the same
-   key). company_id no longer required or used.
-
-   PERFORMANCE: app_test.vouchers is ~14M rows. That side of the query
-   only runs when narration is passed, and always filters by
-   company_name + narration ILIKE together. Make sure you have:
-     CREATE EXTENSION IF NOT EXISTS pg_trgm;
-     CREATE INDEX IF NOT EXISTS idx_vouchers_narration_trgm
-       ON app_test.vouchers USING gin (narration gin_trgm_ops);
-     CREATE INDEX IF NOT EXISTS idx_vouchers_company_name
-       ON app_test.vouchers (company_name);
 =========================== */
 
 router.get("/suggest-party-ledger", async (req, res) => {
@@ -909,10 +809,6 @@ router.get("/suggest-party-ledger", async (req, res) => {
     const normalizedNarration = trimmedNarration ? trimmedNarration.toLowerCase() : null;
     const narrationPattern = trimmedNarration ? `%${trimmedNarration}%` : null;
 
-    // Only bring the 14M-row `vouchers` table into the plan when a
-    // narration filter is actually supplied. With no narration, the
-    // "no narration" branch is a compile-time no-op — Postgres never
-    // even considers scanning `vouchers`.
     const vouchersBranch = narrationPattern
       ? `
         UNION ALL
@@ -990,16 +886,6 @@ router.get("/suggest-party-ledger", async (req, res) => {
 
 /* ===========================
    SUGGEST PARTY LEDGER BY GROUP KEY (embedding similarity)
-
-   Separate from /suggest-party-ledger on purpose — that route does
-   pure SQL (exact/ILIKE narration matching) against contra_vouchers
-   + vouchers (14M rows). This one spawns a Python process per call
-   to embed the incoming group_key, so it's kept as its own endpoint
-   rather than adding that latency to the existing route.
-
-   Only returns a suggestion when similarity >= 0.8 (SIMILARITY_THRESHOLD
-   in ledgerEmbedding.js). Below that, suggested: false — frontend
-   should leave the ledger field for manual selection, same as today.
 =========================== */
 
 router.get("/suggest-ledger-by-group-key", async (req, res) => {
@@ -1013,11 +899,14 @@ router.get("/suggest-ledger-by-group-key", async (req, res) => {
       });
     }
 
-    const result = await suggestLedgerByGroupKey({ companyName: company_name, groupKey: group_key });
+    const suggestionMap = await suggestLedgersForGroupKeys(company_name, [group_key]);
+    const suggestion = suggestionMap.get(group_key) || null;
 
     return res.status(200).json({
       success: true,
-      ...result
+      suggested: !!suggestion?.suggested,
+      ledger_name: suggestion?.suggested ? suggestion.ledger_name : null,
+      similarity: suggestion?.suggested ? suggestion.similarity : null
     });
 
   } catch (err) {
@@ -1032,10 +921,17 @@ router.get("/suggest-ledger-by-group-key", async (req, res) => {
 
 router.get("/waiting-ledger", async (req, res) => {
   try {
-    const { company_id } = req.query;
+    const { company_id, file_name } = req.query;
 
     if (!company_id) {
       return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const params = [company_id];
+    let fileFilterClause = "";
+    if (file_name) {
+      fileFilterClause = "AND file_name = $2";
+      params.push(file_name);
     }
 
     const result = await db.query(
@@ -1047,8 +943,9 @@ router.get("/waiting-ledger", async (req, res) => {
        FROM ${DB_SCHEMA}.contra_vouchers
        WHERE status = 'WAITING_LEDGER'
          AND company_id = $1
+         ${fileFilterClause}
        ORDER BY voucher_date ASC, id ASC`,
-      [company_id]
+      params
     );
 
     const rows = result.rows;
@@ -1158,6 +1055,12 @@ router.get("/filter", async (req, res) => {
 
 /* ===========================
    ASSIGN party_ledger + voucher_type — CORE LOGIC (shared)
+
+   Also hardened: v.id is now validated as numeric before being used in
+   the UPDATE below. This is a defensive backstop, not the root fix —
+   the real fix is that /statement-transactions now returns a real id —
+   but this stops a bad/non-numeric id from ever reaching Postgres and
+   throwing a raw 500 again, from ANY caller, not just this one bug.
 =========================== */
 
 async function assignPartyLedger(vouchers, forcePushFlag) {
@@ -1174,6 +1077,12 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
       invalid.push({ id: v.id ?? null, reason: "Missing id, party_ledger, or voucher_type", input: v });
       continue;
     }
+
+    if (!Number.isInteger(Number(v.id))) {
+      invalid.push({ id: v.id, reason: `id must be a numeric voucher id, got "${v.id}"` });
+      continue;
+    }
+
     if (!allowed.includes(v.voucher_type.toLowerCase())) {
       invalid.push({ id: v.id, reason: `Invalid voucher_type "${v.voucher_type}". Allowed: payment, receipt, contra` });
       continue;
@@ -1181,19 +1090,19 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
 
     const isContra = v.voucher_type.toLowerCase() === "contra";
 
-      const result = await db.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers
-         SET
-           party_ledger  = $1,
-           voucher_type  = $2,
-           transfer_bank = $3,
-           status        = 'PENDING'
-         WHERE id = $4
-           AND status IN ('WAITING_LEDGER', 'FAILED')
-         RETURNING id`,
-        [v.party_ledger, v.voucher_type.toLowerCase(),
-         isContra ? v.party_ledger : null, v.id]
-      );
+    const result = await db.query(
+      `UPDATE ${DB_SCHEMA}.contra_vouchers
+       SET
+         party_ledger  = $1,
+         voucher_type  = $2,
+         transfer_bank = $3,
+         status        = 'PENDING'
+       WHERE id = $4
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+       RETURNING *`,
+      [v.party_ledger, v.voucher_type.toLowerCase(),
+       isContra ? v.party_ledger : null, v.id]
+    );
 
     if (result.rows.length === 0) {
       notFound.push(v.id);
@@ -1207,7 +1116,7 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
 
       if (duplicateOutcome.tallyUnreachable) {
         await db.query(
-          `UPDATE app_test.contra_vouchers SET status = 'WAITING_LEDGER' WHERE id = $1`,
+          `UPDATE ${DB_SCHEMA}.contra_vouchers SET status = 'WAITING_LEDGER' WHERE id = $1`,
           [v.id]
         );
         tallyUnreachable.push({ id: v.id, message: duplicateOutcome.message });
@@ -1368,13 +1277,9 @@ router.post("/:id/confirm-push", async (req, res) => {
 
     const result = await db.query(
       `UPDATE ${DB_SCHEMA}.contra_vouchers
-       SET
-         party_ledger  = $1,
-         voucher_type  = $2,
-         transfer_bank = $3,
-         status        = 'PENDING'
-       WHERE id = $4
-         AND status IN ('WAITING_LEDGER', 'FAILED')
+       SET status = 'PENDING'
+       WHERE id = $1
+         AND status IN ('WAITING_LEDGER', 'FAILED', 'DUPLICATE_FOUND')
        RETURNING *`,
       [voucherId]
     );
@@ -1421,7 +1326,7 @@ router.post("/:id/cancel-push", async (req, res) => {
     }
 
     const result = await db.query(
-      `UPDATE app_test.contra_vouchers
+      `UPDATE ${DB_SCHEMA}.contra_vouchers
        SET status = 'CANCELLED'
        WHERE id = $1
          AND status IN ('DUPLICATE_FOUND', 'PENDING', 'WAITING_LEDGER')

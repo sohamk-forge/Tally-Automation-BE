@@ -171,6 +171,9 @@ import purchaseValidationRoutes
 
 import voucherPdfRoutes from "./api/voucherPdf.routes.js";
 
+import partyTransactionsRoutes
+ from "./api/party-transactions.routes.js";
+
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -511,6 +514,9 @@ app.use(
   ...requireSessionOrApiKey(),
   voucherPdfRoutes
 );
+
+app.use("/api/v1/party-transactions", ...requireSessionOrApiKey(), partyTransactionsRoutes);
+
 
 
 /* =================================

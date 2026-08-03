@@ -8,6 +8,8 @@
 // So the check is (CREATED + ALTERED) > 0, with EXCEPTIONS/ERRORS at 0.
 // Requiring CREATED > 0 alone graded every alter job as failed even when
 // Tally had accepted it.
+import { storeLedgerEmbedding } from "./ledgerEmbedding.js";
+
 function resolveTallyOutcome(responseXml) {
   let finalStatus = "failed";
   let errorMessage = null;
@@ -197,6 +199,50 @@ export async function processConnectorJobResult(client, job) {
         );
         break;
       }
+
+      case "voucher": {
+  const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
+  const voucherResult = await client.query(
+    `
+    UPDATE app_test.contra_vouchers
+    SET
+      status = $1,
+      tally_response = $2,
+      err_message = $3,
+      duplicate_message = NULL,
+      updated_at = NOW()
+    WHERE id = $4
+    RETURNING *
+    `,
+    [
+      finalStatus === "success" ? "SUCCESS" : "FAILED",
+      response_xml || null,
+      errorMessage,
+      payload.voucher_id
+    ]
+  );
+
+  console.log(`✅ Voucher ${payload.voucher_id} marked ${finalStatus.toUpperCase()}`);
+
+  // Fire-and-forget embedding on success only — same behavior as the
+  // old direct-push worker. Runs inside the same DB transaction client
+  // as the status update, but storeLedgerEmbedding talks to a separate
+  // embedding store, not this transaction, so it can't roll it back.
+  if (finalStatus === "success" && voucherResult.rows[0]) {
+    const voucher = voucherResult.rows[0];
+    const embedResult = await storeLedgerEmbedding({
+      companyName: voucher.company_name,
+      groupKey: voucher.group_key,
+      ledgerName: voucher.party_ledger
+    });
+    if (!embedResult.stored) {
+      console.log(`ℹ️ Embedding not stored for voucher ${payload.voucher_id}: ${embedResult.reason}`);
+    }
+  }
+
+  break;
+}
 
       default:
         console.log(

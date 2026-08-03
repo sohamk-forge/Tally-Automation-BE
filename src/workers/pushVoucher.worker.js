@@ -1,11 +1,9 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { spawn } from "child_process";
-import axios from "axios";
 import path from "path";
 
 import pool from "../db/index.js";
-import { DB_SCHEMA } from "../config/db.js";
 import {
   voucherQueue,
   VOUCHER_QUEUE_NAME,
@@ -14,16 +12,17 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
-// CHANGED: no longer imports/uses refreshVoucherDataForDay — the
-// pre-push duplicate re-check no longer syncs before checking. Only
-// formatVoucherDate, TALLY_URL, and checkDuplicateFromDb are needed.
+// CHANGED: no longer imports/uses TALLY_URL or axios — this worker no
+// longer pushes to Tally directly. It only needs formatVoucherDate and
+// checkDuplicateFromDb. Delivering the generated XML to the user's own
+// local Tally is now the connector app's job (same split used by
+// stockItem.worker.js).
 import {
   formatVoucherDate,
-  TALLY_URL,
   checkDuplicateFromDb
 } from "../api/voucher.js";
 
-import { storeLedgerEmbedding } from "../services/ledgerEmbedding.js";
+import { createConnectorJob } from "../services/connectorJob.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -31,7 +30,12 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
-const TALLY_PUSH_TIMEOUT_MS = Number(process.env.TALLY_PUSH_TIMEOUT_MS || 8000);
+// ── NEW: how long to wait for the connector to finish THIS voucher's
+// job before giving up. Combined with concurrency:1 below, this is what
+// stops multiple connector jobs for the same user landing in Tally at
+// the same time during bulk pushes.
+const CONNECTOR_POLL_MS = 1000;
+const CONNECTOR_MAX_WAIT_MS = 90000; // 90s per voucher — tune as needed
 
 function isTemporaryVoucherError(error) {
   const code = String(error?.code || "").toUpperCase();
@@ -42,8 +46,6 @@ function isTemporaryVoucherError(error) {
   ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
-    message.includes("tally server unavailable") ||
-    message.includes("server unavailable") ||
     message.includes("network") ||
     message.includes("fetch failed") ||
     message.includes("socket hang up") ||
@@ -86,7 +88,11 @@ function buildLedgers(voucher, amount) {
   throw new Error(`Unknown voucher_type: ${voucher.voucher_type}`);
 }
 
-function runPythonAndSendToTally(payload) {
+// CHANGED: renamed from runPythonAndSendToTally — this now ONLY runs the
+// Python generator and returns the XML string. It no longer posts
+// anything to Tally itself; that happens on the user's machine via the
+// connector app after it claims the job created below.
+function runPythonForXml(payload) {
   return new Promise((resolve, reject) => {
     const pythonFile = path.join(process.cwd(), "src", "python", "VoucherGenerator.py");
     const python = spawn("python", [pythonFile, JSON.stringify(payload)]);
@@ -97,19 +103,11 @@ function runPythonAndSendToTally(payload) {
     python.stdout.on("data", (data) => { xmlData += data.toString(); });
     python.stderr.on("data", (data) => { errorData += data.toString(); });
 
-    python.on("close", async (code) => {
+    python.on("close", (code) => {
       if (code !== 0) {
         return reject(Object.assign(new Error(errorData || "Python process failed"), { isPythonError: true, errorData }));
       }
-      try {
-        const response = await axios.post(TALLY_URL, xmlData, {
-          headers: { "Content-Type": "application/xml" },
-          timeout: TALLY_PUSH_TIMEOUT_MS
-        });
-        resolve(response.data);
-      } catch (err) {
-        reject(err);
-      }
+      resolve(xmlData);
     });
 
     python.on("error", reject);
@@ -118,13 +116,9 @@ function runPythonAndSendToTally(payload) {
 
 async function markStalePendingAsFailed() {
   const result = await pool.query(
-    `UPDATE ${DB_SCHEMA}.contra_vouchers
-     SET
-       status = 'FAILED',
-       tally_response = 'Upload interrupted / Worker restarted',
-       updated_at = NOW()
-     WHERE status = 'PENDING'
-       AND updated_at < NOW() - INTERVAL '5 minutes'
+    `UPDATE app_test.contra_vouchers
+     SET status = 'FAILED', tally_response = 'Upload interrupted / Worker restarted', updated_at = NOW()
+     WHERE status = 'PENDING' AND updated_at < NOW() - INTERVAL '5 minutes'
      RETURNING id`
   );
   console.log(`Marked ${result.rowCount} stale pending vouchers as failed`);
@@ -132,9 +126,7 @@ async function markStalePendingAsFailed() {
 
 async function enqueuePendingVoucherJobs() {
   const result = await pool.query(
-    `SELECT id FROM ${DB_SCHEMA}.contra_vouchers
-     WHERE status = 'PENDING'
-     ORDER BY id ASC`
+    `SELECT id FROM app_test.contra_vouchers WHERE status = 'PENDING' ORDER BY id ASC`
   );
   let enqueuedCount = 0;
   for (const row of result.rows) {
@@ -144,16 +136,47 @@ async function enqueuePendingVoucherJobs() {
   console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending voucher jobs`);
 }
 
+// ── NEW: blocks until the connector reports completed/failed for this
+// specific connector job, or until CONNECTOR_MAX_WAIT_MS elapses.
+// Combined with concurrency:1, this guarantees only one connector job
+// per user is ever 'pending'/'processing' at a time — so the connector
+// app can never receive more than one voucher XML per poll, without
+// changing anything in the connector app or connector services.
+async function waitForConnectorJob(connectorJobId, voucherId) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < CONNECTOR_MAX_WAIT_MS) {
+    await new Promise((r) => setTimeout(r, CONNECTOR_POLL_MS));
+
+    const { rows } = await pool.query(
+      `SELECT status FROM app_test.connector_jobs WHERE id = $1`,
+      [connectorJobId]
+    );
+    const jobStatus = rows[0]?.status;
+
+    if (jobStatus === "completed" || jobStatus === "success") {
+      console.log(`✅ Connector finished voucher ${voucherId} (job ${connectorJobId})`);
+      return { outcome: "connector_completed" };
+    }
+
+    if (jobStatus === "failed") {
+      console.log(`💥 Connector reported failure for voucher ${voucherId} (job ${connectorJobId})`);
+      return { outcome: "connector_failed" };
+    }
+
+    // still 'pending' or 'processing' → keep waiting
+  }
+
+  console.warn(`⏳ Timed out waiting on connector job ${connectorJobId} for voucher ${voucherId}`);
+  return { outcome: "connector_timeout" };
+}
+
 const worker = new Worker(
   VOUCHER_QUEUE_NAME,
   async (job) => {
     const { voucherId } = job.data;
 
-    const result = await pool.query(
-      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`,
-      [voucherId]
-    );
-
+    const result = await pool.query(`SELECT * FROM app_test.contra_vouchers WHERE id = $1`, [voucherId]);
     const voucher = result.rows[0];
 
     if (!voucher) return { voucherId, status: "not_found" };
@@ -163,35 +186,14 @@ const worker = new Worker(
       return { voucherId, status: "cancelled" };
     }
 
-    console.log("");
-    console.log("================================");
-    console.log(`🚀 PROCESSING VOUCHER ID ${voucher.id}`);
-    console.log(`   Type: ${voucher.voucher_type} | Amount: ${voucher.amount}`);
-    console.log(`   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}`);
-    console.log("================================");
-
-    // Fast pre-check: don't even bother spawning python if Tally is closed.
-    const online = await isTallyOnline();
-    if (!online) {
-      await pool.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers
-         SET status = 'PENDING', tally_response = 'Tally is not open', updated_at = NOW()
-         WHERE id = $1`,
-        [voucherId]
-      );
-      console.log(`⏳ Voucher ${voucherId} left PENDING — Tally is not open`);
-      throw Object.assign(new Error("Tally server unavailable"), { code: "ECONNREFUSED" });
-    }
+    console.log(`\n================================\n🚀 PROCESSING VOUCHER ID ${voucher.id}\n   Type: ${voucher.voucher_type} | Amount: ${voucher.amount}\n   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}\n================================`);
 
     try {
       const amount = Number(voucher.amount);
       const formattedDate = formatVoucherDate(voucher.voucher_date, voucher.id);
 
-      // CHANGED: pre-push duplicate re-check now queries app_test.vouchers
-      // DIRECTLY — no refreshVoucherDataForDay()/sync call anymore. This
-      // means the check no longer depends on Tally being reachable at
-      // push time; it depends only on the DB being reasonably up to date
-      // via your existing periodic/manual sync.
+      // Pre-push duplicate re-check — queries app_test.vouchers DIRECTLY,
+      // no sync/Tally-reachability dependency at push time.
       if (!voucher.force_push) {
         const voucherDateStr =
           voucher.voucher_date instanceof Date
@@ -224,6 +226,9 @@ const worker = new Worker(
         );
       }
 
+      // ─────────────────────────────────────────────────────────────
+      // GENERATE XML ONLY. Do not push it anywhere from the server.
+      // ─────────────────────────────────────────────────────────────
       const ledgers = buildLedgers(voucher, amount);
       const payload = {
         company: voucher.company_name,
@@ -235,69 +240,107 @@ const worker = new Worker(
         ledgers
       };
 
-      console.log("📤 Sending Payload:", JSON.stringify(payload, null, 2));
+      console.log("📤 Generating XML for payload:", JSON.stringify(payload, null, 2));
 
-      const tallyResponse = await runPythonAndSendToTally(payload);
-      const created = tallyResponse.includes("<CREATED>1</CREATED>");
-      const altered = tallyResponse.includes("<ALTERED>1</ALTERED>");
-      const success = created || altered;
+      const xml = await runPythonForXml(payload);
 
-      if (success) {
-        await pool.query(
-          `UPDATE ${DB_SCHEMA}.contra_vouchers
-           SET status = 'SUCCESS', tally_response = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [tallyResponse, voucherId]
-        );
-        console.log(`✅ Voucher Success: ${voucherId}`);
+      // ─────────────────────────────────────────────────────────────
+      // FIND WHICH USER'S CONNECTOR (i.e. whose local Tally) THIS
+      // VOUCHER SHOULD GO TO. Same pairing pattern as
+      // stockItem.worker.js: is_used = TRUE, most recent pairing wins.
+      //
+      // ⚠️ INTERIM FIX ONLY — same caveat as stockItem.worker.js. If a
+      // company has multiple used pairing tokens, routing is ambiguous.
+      // The real fix is a user_id column on contra_vouchers set at
+      // insert/upload time so the owner never has to be inferred here.
+      // ─────────────────────────────────────────────────────────────
+      const pairingResult = await pool.query(
+        `SELECT user_id, COUNT(*) OVER () AS candidate_count
+         FROM app_test.connector_pairing_tokens
+         WHERE company_id = $1
+           AND is_used = TRUE
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [voucher.company_id]
+      );
 
-        // Learn from this confirmed voucher — fire-and-forget by design.
-        // storeLedgerEmbedding() catches its own errors internally and
-        // never throws, so an embedding-service hiccup can never fail
-        // this job or roll back the SUCCESS status already committed above.
-        const embedResult = await storeLedgerEmbedding({
-          companyName: voucher.company_name,
-          groupKey: voucher.group_key,
-          ledgerName: voucher.party_ledger
-        });
-        if (!embedResult.stored) {
-          console.log(`ℹ️ Embedding not stored for voucher ${voucherId}: ${embedResult.reason}`);
-        }
+      const pairing = pairingResult.rows[0];
 
-        return { voucherId, status: "success" };
+      if (!pairing) {
+        throw new Error(`No connector pairing found for voucher ${voucherId}`);
       }
 
+      if (Number(pairing.candidate_count) > 1) {
+        console.warn(
+          `⚠️ AMBIGUOUS PAIRING: company ${voucher.company_id} has ${pairing.candidate_count} used pairing tokens; routing voucher ${voucherId} to user ${pairing.user_id}`
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────
+      // CREATE CONNECTOR JOB. The frontend connector app polls
+      // GET /api/connector/jobs, claims this job, pushes the XML to
+      // the USER'S OWN local Tally, then reports the result back via
+      // the connector-result callback route.
+      // ─────────────────────────────────────────────────────────────
+      const connectorJob = await createConnectorJob({
+        userId: pairing.user_id,
+        jobType: "voucher",
+        requestXml: xml,
+        payload: {
+          voucher_id: voucherId,
+          company_id: voucher.company_id,
+          voucher_type: voucher.voucher_type
+        }
+      });
+
       await pool.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers
-         SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [tallyResponse, voucherId]
+        `UPDATE app_test.contra_vouchers
+         SET status = 'PENDING_CONNECTOR', tally_response = NULL, duplicate_message = NULL, updated_at = NOW()
+         WHERE id = $1`,
+        [voucherId]
       );
-      console.log(`❌ Voucher Rejected by Tally: ${voucherId}`);
-      return { voucherId, status: "failed" };
+
+      console.log(`✅ Voucher connector job created: ${voucherId}`, {
+        jobId: connectorJob.id,
+        userId: pairing.user_id
+      });
+
+      // ─────────────────────────────────────────────────────────────
+      // NEW: BLOCK HERE until the connector finishes THIS job.
+      // With concurrency:1 below, this is what prevents BullMQ from
+      // starting the next voucher in a bulk batch (and therefore
+      // creating a second connector job for the same user) until
+      // this one is fully resolved by the connector + Tally.
+      // ─────────────────────────────────────────────────────────────
+      const { outcome } = await waitForConnectorJob(connectorJob.id, voucherId);
+
+      return {
+        voucherId,
+        status: outcome,
+        connectorJobId: connectorJob.id
+      };
 
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
         await pool.query(
-          `UPDATE ${DB_SCHEMA}.contra_vouchers
-           SET status = 'PENDING', tally_response = $1, updated_at = NOW()
-           WHERE id = $2`,
+          `UPDATE app_test.contra_vouchers SET status = 'PENDING', tally_response = $1, updated_at = NOW() WHERE id = $2`,
           [error.message, voucherId]
         );
         throw error; // BullMQ retries per VOUCHER_JOB_OPTIONS
       }
 
       await pool.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers
-         SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
-         WHERE id = $2`,
+        `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
         [error.message, voucherId]
       );
       console.log(`💥 Voucher Failed: ${voucherId} — ${error.message}`);
       return { voucherId, status: "failed" };
     }
   },
-  { connection, concurrency: 5 }
+  // ── CHANGED: concurrency 5 → 1. Combined with waitForConnectorJob
+  // above, this serializes connector job creation per user so bulk
+  // pushes never hand the connector more than one voucher XML at once.
+  { connection, concurrency: 1 }
 );
 
 worker.on("completed", (job) => console.log(`Voucher job completed: ${job.id}`));
@@ -317,9 +360,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { voucherId } = job.data;
     await pool.query(
-      `UPDATE ${DB_SCHEMA}.contra_vouchers
-       SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
-       WHERE id = $2`,
+      `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
       [error.message, voucherId]
     );
   } catch (updateError) {
@@ -338,6 +379,6 @@ worker.on("error", (error) => console.error("Voucher worker error:", error.messa
   }
 })();
 
-console.log("✅ Push Voucher BullMQ Worker Started");
+console.log("✅ Push Voucher BullMQ Worker Started (routes via Connector)");
 
 export default worker;
