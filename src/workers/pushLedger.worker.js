@@ -41,7 +41,11 @@ function isTemporaryLedgerError(error) {
 const worker = new Worker(
   LEDGER_QUEUE_NAME,
   async (job) => {
-    const { ledgerId } = job.data;
+   const { ledgerId, userId } = job.data;
+
+if (!userId) {
+  throw new Error(`Missing userId for ledger job ${ledgerId}`);
+}
 
     console.log(`Processing ledger ID ${ledgerId}`);
 
@@ -98,38 +102,47 @@ const worker = new Worker(
       // ─────────────────────────────────────────────────────────────
       // STEP 2: Get connector pairing info for this ledger's company
       // ─────────────────────────────────────────────────────────────
-      const pairingResult = await pool.query(
+    // STEP 2: Find ACTIVE connector of the user who pushed this ledger
+const connectorResult = await pool.query(
   `
-  SELECT user_id
-  FROM ${DB_SCHEMA}.connector_pairing_tokens
-  WHERE company_id = $1
-    AND is_used = TRUE
-  ORDER BY created_at DESC
-  LIMIT 1;
+  SELECT user_id, machine_id
+  FROM ${DB_SCHEMA}.connector_api_keys
+  WHERE user_id = $1
+    AND revoked_at IS NULL
+    AND last_seen_at >= NOW() - INTERVAL '30 seconds'
+  ORDER BY last_seen_at DESC
+  LIMIT 1
   `,
-  [row.company_id]   // ✅ Correct
+  [userId]
 );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(
-          `No connector pairing found for ledger ${ledgerId}`
-        );
-      }
+const connector = connectorResult.rows[0];
+
+if (!connector) {
+  throw new Error(
+    `No active connector found for user ${userId}`
+  );
+}
+
+console.log(
+  `🔗 Active connector: user=${connector.user_id}, machine=${connector.machine_id}`
+);
 
       // ─────────────────────────────────────────────────────────────
       // STEP 3: Create connector job (moves Tally work to connector)
       // ─────────────────────────────────────────────────────────────
-      const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,  // ← From pairing token
-        jobType: 'ledger',
-        requestXml: xml,
-        payload: {
-          ledger_id: ledgerId,
-          company_id: row.company_id,
-          ledger_name: row.ledger_name
-        }
-      });
+   const connectorJob = await createConnectorJob({
+  userId: connector.user_id,
+  jobType: "ledger",
+  requestXml: xml,
+  payload: {
+    ledger_id: ledgerId,
+    company_id: row.company_id,
+    ledger_name: row.ledger_name,
+    requested_by_user_id: userId,
+    machine_id: connector.machine_id
+  }
+});
 
       // ─────────────────────────────────────────────────────────────
       // STEP 4: Mark as pending (waiting for connector result)
@@ -145,10 +158,11 @@ const worker = new Worker(
         [ledgerId]
       );
 
-      console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
-        jobId: connectorJob.id,
-        userId: pairing.user_id
-      });
+     console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
+  jobId: connectorJob.id,
+  userId: connector.user_id,
+  machineId: connector.machine_id
+});
 
       return {
         ledgerId,

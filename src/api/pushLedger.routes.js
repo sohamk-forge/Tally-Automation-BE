@@ -3,15 +3,15 @@
 // =========================================
 
 import express from "express";
-
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
-import { ledgerQueue }
-from "../queues/ledger.queue.js";
+import { ledgerQueue } from "../queues/ledger.queue.js";
 
-const router =
-  express.Router();
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
+
+const router = express.Router();
 
 /* =====================================
    PUSH LEDGER API
@@ -21,9 +21,22 @@ router.post(
 
   "/push/ledger",
 
+  verifySession(),
+
   async (req, res) => {
 
     try {
+
+      const userId = await getLocalUserId(
+        req.session.getUserId()
+      );
+
+      if (!userId) {
+        return res.status(404).json({
+          status: "error",
+          message: "No profile found for this account"
+        });
+      }
 
       const data =
         req.body;
@@ -226,7 +239,8 @@ router.post(
           "push-ledger",
 
           {
-            ledgerId
+            ledgerId,
+            userId
           },
 
           {
@@ -255,7 +269,7 @@ router.post(
 
       console.log(
 
-        `📥 QUEUED LEDGER ${ledgerId}`
+        `📥 QUEUED LEDGER ${ledgerId} by user ${userId}`
 
       );
 

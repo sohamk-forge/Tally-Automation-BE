@@ -6,12 +6,23 @@ import { DB_SCHEMA } from "../config/db.js";
     STOCK_ITEM_JOB_OPTIONS,
     getStockItemJobId
   } from "../queues/stockItem.queue.js";
+  import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+  import { getLocalUserId } from "../utils/getLocalUserId.js";
 
   const router = express.Router();
 
-    router.post("/push-stock-item", async (req, res) => {
+    router.post("/push-stock-item", verifySession(), async (req, res) => {
 
     try {
+      const userId = await getLocalUserId(req.session.getUserId());
+
+      if (!userId) {
+        return res.status(404).json({
+          status: "error",
+          message: "No profile found for this account"
+        });
+      }
+
       const data = req.body;
       console.log("Parent Group Received:", data.parent_group);
 
@@ -195,7 +206,10 @@ import { DB_SCHEMA } from "../config/db.js";
 
       await stockItemQueue.add(
         "push-stock-item",
-        { stockItemId: stockItemRecord.id },
+        {
+          stockItemId: stockItemRecord.id,
+          userId
+        },
         {
           ...STOCK_ITEM_JOB_OPTIONS,
           jobId
@@ -221,7 +235,10 @@ import { DB_SCHEMA } from "../config/db.js";
 
 
   // Optional: Get status by specific item name
-router.get("/push/stock-item/status/:companyId", async (req, res) => {
+router.get(
+  "/push/stock-item/status/:companyId",
+  verifySession(),
+  async (req, res) => {
   try {
     console.log("STATUS API HIT");
 

@@ -3,6 +3,7 @@ console.log("🚀 pushSalesInvoice.worker.js loaded");
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import { SALES_QUEUE_NAME } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { generateSalesXml } from "../services/xmlGenerator.js";
@@ -27,6 +28,7 @@ function isTemporarySalesError(error) {
     ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
+    message.includes("no active connector") ||
     message.includes("tally server unavailable") ||
     message.includes("server unavailable") ||
     message.includes("network") ||
@@ -41,11 +43,11 @@ async function ledgerExists(companyId, ledgerName) {
   const found = await pool.query(
     `
     SELECT 1
-    FROM app_test.all_ledger_details
+    FROM ${DB_SCHEMA}.all_ledger_details
     WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
     UNION
     SELECT 1
-    FROM app_test.push_ledger
+    FROM ${DB_SCHEMA}.push_ledger
     WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND status = 'success'
     LIMIT 1
     `,
@@ -61,11 +63,11 @@ async function stockItemExists(companyId, stockItemName) {
   const found = await pool.query(
     `
     SELECT 1
-    FROM app_test.stock_group_summary
+    FROM ${DB_SCHEMA}.stock_group_summary
     WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2))
     UNION
     SELECT 1
-    FROM app_test.push_stock_item
+    FROM ${DB_SCHEMA}.push_stock_item
     WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2)) AND status = 'success'
     LIMIT 1
     `,
@@ -176,12 +178,19 @@ function formatValidationError(validation) {
 const worker = new Worker(
   SALES_QUEUE_NAME,
   async (job) => {
-    const { salesId } = job.data;
+    const { salesId, userId } = job.data;
 
-    console.log("Processing sales invoice", { salesId });
+    if (!userId) {
+      throw new Error(`Missing userId for sales invoice job ${salesId}`);
+    }
+
+    console.log("Processing sales invoice", {
+      salesId,
+      userId
+    });
 
     const result = await pool.query(
-      `SELECT * FROM app_test.sales_invoice_extractions WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.sales_invoice_extractions WHERE id = $1`,
       [salesId]
     );
 
@@ -199,7 +208,7 @@ const worker = new Worker(
     const existingJobResult = await pool.query(
       `
       SELECT id, status
-      FROM app_test.connector_jobs
+      FROM ${DB_SCHEMA}.connector_jobs
       WHERE job_type = 'sales_invoice'
         AND payload->>'invoice_id' = $1
         AND status IN ('pending', 'processing')
@@ -225,7 +234,7 @@ const worker = new Worker(
     }
 
     await pool.query(
-      `UPDATE app_test.sales_invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
+      `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [salesId]
     );
 
@@ -238,7 +247,7 @@ const worker = new Worker(
       // was silently falling back to a hardcoded "Sales" literal — which
       // doesn't exist in Tally, hence the rejection.
       const mappingResult = await pool.query(
-        `SELECT * FROM app_test.company_sales_ledger_mappings WHERE company_id = $1`,
+        `SELECT * FROM ${DB_SCHEMA}.company_sales_ledger_mappings WHERE company_id = $1`,
         [row.company_id]
       );
 
@@ -293,7 +302,7 @@ const worker = new Worker(
         // would fail. No schema change needed this way.
         await pool.query(
           `
-          UPDATE app_test.sales_invoice_extractions
+          UPDATE ${DB_SCHEMA}.sales_invoice_extractions
           SET
             sync_status = 'failed',
             error_message = $1,
@@ -332,43 +341,45 @@ const worker = new Worker(
 
       console.log("📤 Sales invoice XML generated", logCtx);
 
-      const pairingResult = await pool.query(
+      const connectorResult = await pool.query(
         `
         SELECT user_id
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
+        FROM ${DB_SCHEMA}.connector_api_keys
+        WHERE user_id = $1
+          AND revoked_at IS NULL
+          AND last_seen_at >= NOW() - INTERVAL '30 seconds'
+        ORDER BY last_seen_at DESC
         LIMIT 1
         `,
-        [row.company_id]
+        [userId]
       );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(`No connector pairing found for sales invoice ${salesId}`);
+      const connector = connectorResult.rows[0];
+      if (!connector) {
+        throw new Error(`No active connector found for user ${userId}`);
       }
 
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
-        jobType: 'sales_invoice',
+        userId: connector.user_id,
+        jobType: "sales_invoice",
         requestXml: xml,
         payload: {
           invoice_id: salesId,
           company_id: row.company_id,
-          invoice_no: row.invoice_no
+          invoice_no: row.invoice_no,
+          requested_by_user_id: userId
         }
       });
 
       await pool.query(
-        `UPDATE app_test.sales_invoice_extractions SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+        `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
         [salesId]
       );
 
       console.log("✅ Sales invoice job created for connector", {
         ...logCtx,
         connectorJobId: connectorJob.id,
-        userId: pairing.user_id
+        userId: connector.user_id
       });
 
       return {
@@ -382,14 +393,14 @@ const worker = new Worker(
 
       if (isTemporarySalesError(error)) {
         await pool.query(
-          `UPDATE app_test.sales_invoice_extractions SET sync_status = 'pending', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'pending', error_message = $1, updated_at = NOW() WHERE id = $2`,
           [error.message, salesId]
         );
         throw error;
       }
 
       await pool.query(
-        `UPDATE app_test.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
         [error.message, salesId]
       );
 
@@ -421,7 +432,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { salesId } = job.data;
     await pool.query(
-      `UPDATE app_test.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
       [error.message, salesId]
     );
     console.error("Sales invoice final failure recorded", { salesId });
