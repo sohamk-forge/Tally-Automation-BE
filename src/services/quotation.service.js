@@ -35,6 +35,17 @@ function toNum(v, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
+// Normalizes an optional date field so it never reaches Postgres as "".
+// Default parameters (`= null`) only fire on `undefined`, NOT on an
+// empty string — and Postgres' `date` column rejects "" outright with
+// "invalid input syntax for type date: ''". Any blank/whitespace-only
+// value is coerced to a real null here instead.
+function normalizeDate(v) {
+  if (v === undefined || v === null) return null;
+  const trimmed = String(v).trim();
+  return trimmed === "" ? null : trimmed;
+}
+
 function formatQuotationNo(seq) {
   return String(seq).padStart(QUOTATION_PAD_LENGTH, "0");
 }
@@ -142,13 +153,19 @@ export async function peekNextQuotationNumber(companyId) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: createQuotation
+//
+// FIX APPLIED: quotation_date and valid_until are now passed through
+// normalizeDate() before hitting the INSERT. Previously, a blank date
+// input on the frontend sent valid_until: "" — which slips past the
+// `= null` default (defaults only apply to `undefined`) and gets
+// inserted as a literal empty string into a Postgres `date` column,
+// which Postgres rejects with:
+//   invalid input syntax for type date: ""
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function createQuotation(data) {
   const {
     company_id,
-    quotation_date,
-    valid_until      = null,
     customer_name    = null,
     customer_gstin   = null,
     customer_address = null,
@@ -156,6 +173,9 @@ export async function createQuotation(data) {
     supply_type      = "intrastate",
     items            = [],
   } = data;
+
+  const quotation_date = normalizeDate(data.quotation_date);
+  const valid_until     = normalizeDate(data.valid_until);
 
   let company_name = data.company_name || null;
 

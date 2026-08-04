@@ -455,10 +455,8 @@ router.get("/sales-invoices", async (req, res) => {
     });
   }
 });
-
-router.delete("/sales-invoices/:id", async (req, res) => {
+router.delete("/sales-invoice-delete", async (req, res) => {
   try {
-
     const userId = req.session
       ? await getLocalUserId(req.session.getUserId())
       : req.connectorMachine?.userId;
@@ -470,59 +468,74 @@ router.delete("/sales-invoices/:id", async (req, res) => {
       });
     }
 
-    const { id } = req.params;
+    const { invoice_ids } = req.body;
 
-    if (!id || isNaN(Number(id))) {
+    if (!Array.isArray(invoice_ids) || invoice_ids.length === 0) {
       return res.status(400).json({
         status: "error",
-        message: "Valid invoice id required"
+        message: "invoice_ids array is required"
       });
     }
 
-    // Optional: fetch first to confirm it exists (and to get company_id for access check)
+    // Validate IDs
+    const invalidIds = invoice_ids.filter(id => isNaN(Number(id)));
+
+    if (invalidIds.length > 0) {
+      return res.status(400).json({
+        status: "error",
+        message: "All invoice ids must be valid numbers"
+      });
+    }
+
+    // Check existing invoices
     const existing = await pool.query(
-      `SELECT id, company_id FROM app_test.sales_invoice_extractions WHERE id = $1`,
-      [id]
+      `
+      SELECT id 
+      FROM app_test.sales_invoice_extractions
+      WHERE id = ANY($1)
+      `,
+      [invoice_ids]
     );
 
     if (existing.rows.length === 0) {
       return res.status(404).json({
         status: "error",
-        message: "Invoice not found"
+        message: "No invoices found"
       });
     }
 
-    // const hasAccess = await checkCompanyAccess(userId, existing.rows[0].company_id);
-    // if (!hasAccess) {
-    //   return res.status(403).json({
-    //     status: "error",
-    //     message: "You don't have access to this company"
-    //   });
-    // }
+    // Remove queued jobs
+    for (const invoice of existing.rows) {
+      const jobId = getSalesJobId(invoice.id);
 
-    // Remove any queued job for this invoice so it doesn't get processed after deletion
-    const jobId = getSalesJobId(id);
-    const existingJob = await salesQueue.getJob(jobId);
-    if (existingJob) {
-      await existingJob.remove();
-      console.log(`Old job removed for deleted invoice: ${jobId}`);
+      const existingJob = await salesQueue.getJob(jobId);
+
+      if (existingJob) {
+        await existingJob.remove();
+        console.log(`Removed job: ${jobId}`);
+      }
     }
 
+    // Bulk delete
     await pool.query(
-      `DELETE FROM app_test.sales_invoice_extractions WHERE id = $1`,
-      [id]
+      `
+      DELETE FROM app_test.sales_invoice_extractions
+      WHERE id = ANY($1)
+      `,
+      [invoice_ids]
     );
 
-    console.log(`Invoice deleted: ${id}`);
+    console.log(`Deleted invoices: ${invoice_ids.join(", ")}`);
 
     return res.status(200).json({
       status: "success",
-      message: "Invoice deleted successfully",
-      invoice_id: Number(id)
+      message: "Invoices deleted successfully",
+      deleted_invoice_ids: invoice_ids.map(Number)
     });
 
   } catch (err) {
-    console.error("DELETE invoice error:", err);
+    console.error("DELETE invoices error:", err);
+
     return res.status(500).json({
       status: "error",
       message: err.message

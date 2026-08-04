@@ -4,18 +4,12 @@
  * Standalone router — mount it separately from challan.routes.js:
  *
  *   import challanPdfRoutes from "./api/challanpdf.routes.js";
- *   app.use("/api/v1/challan", challanPdfRoutes);
+ *   app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanPdfRoutes);
  *
  * (Mounted on the same "/api/v1/challan" prefix as challan.routes.js —
  * Express is fine with two routers sharing a prefix as long as the
  * sub-paths don't collide, and ":id/pdf" doesn't collide with anything
  * in challan.routes.js.)
- *
- * Party-transactions.routes.js needs no changes — as you noted, it never
- * needs to render anything, it just mirrors data that already lives on
- * the challan. This PDF is generated straight from challan.service.js's
- * getChallanById(), which already returns items[].
- * ─────────────────────────────────────────────────────────────────────
  */
 
 import express from "express";
@@ -41,7 +35,18 @@ router.get("/:id/pdf", async (req, res) => {
     const { company_id } = req.query;
     if (!company_id) return errRes(res, 400, "company_id is required");
 
-    const challan = await getChallanById(Number(req.params.id), Number(company_id));
+    const challanId = Number(req.params.id);
+    if (!Number.isInteger(challanId)) {
+      // Catches "undefined", "", non-numeric ids, etc. before they ever
+      // reach the DB query or Puppeteer. This is almost always caused by
+      // the frontend calling this endpoint for a row that has no real
+      // challan id — e.g. a Sales/voucher row mistaken for a Challan row
+      // in a merged transactions table. Returns a clean 400 with the bad
+      // value included, instead of a raw, unexplained 500.
+      return errRes(res, 400, `Invalid challan id: "${req.params.id}"`);
+    }
+
+    const challan = await getChallanById(challanId, Number(company_id));
     if (!challan) return errRes(res, 404, "Challan not found");
 
     const pdfBytes = await buildChallanPdf(challan);
