@@ -754,19 +754,6 @@ router.get("/statement-details", async (req, res) => {
 
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
-
-   ★★★ FIX APPLIED HERE ★★★
-   Added `id` to the SELECT and to toTxn(). Previously this route never
-   selected the row's real primary key, so the frontend fell back to
-   using cheque_ref (instrument_number) as a pseudo-id. That's a bank
-   reference string, NOT a real numeric voucher id — it caused React key
-   collisions on shared placeholder refs (e.g. "000000000000000") AND,
-   far worse, caused the frontend to send that string as `id` in
-   PUT /voucher/bulk-party-ledger, which crashed Postgres with
-   "invalid input syntax for type bigint" (or, if a ref ever happened
-   to parse as a number, could silently update the WRONG voucher row).
-   `id` is now included so the frontend has a real, stable, numeric
-   identifier to use for both React keys and any write-back calls.
 =========================== */
 
 router.get("/statement-transactions", async (req, res) => {
@@ -1175,11 +1162,14 @@ router.get("/filter", async (req, res) => {
 /* ===========================
    ASSIGN party_ledger + voucher_type — CORE LOGIC (shared)
 
-   Also hardened: v.id is now validated as numeric before being used in
-   the UPDATE below. This is a defensive backstop, not the root fix —
-   the real fix is that /statement-transactions now returns a real id —
-   but this stops a bad/non-numeric id from ever reaching Postgres and
-   throwing a raw 500 again, from ANY caller, not just this one bug.
+   ★ CHANGED: the UPDATE now also writes force_push = forcePushFlag.
+   Previously forcePushFlag only skipped the duplicate check on THIS
+   request — it never persisted anything, so when the job actually
+   ran on the worker, voucher.force_push was still falsy and the
+   worker re-ran checkDuplicateFromDb from scratch, undoing the force.
+   Explicitly writing it either way (true OR false) also means a
+   voucher that was previously force-pushed and later bounces back to
+   WAITING_LEDGER/FAILED doesn't silently keep a stale force_push=true.
 =========================== */
 
 async function assignPartyLedger(vouchers, forcePushFlag) {
@@ -1215,12 +1205,13 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
          party_ledger  = $1,
          voucher_type  = $2,
          transfer_bank = $3,
+         force_push    = $4,
          status        = 'PENDING'
-       WHERE id = $4
+       WHERE id = $5
          AND status IN ('WAITING_LEDGER', 'FAILED')
        RETURNING *`,
       [v.party_ledger, v.voucher_type.toLowerCase(),
-       isContra ? v.party_ledger : null, v.id]
+       isContra ? v.party_ledger : null, forcePushFlag, v.id]
     );
 
     if (result.rows.length === 0) {
@@ -1388,6 +1379,12 @@ router.put("/:id/party-ledger", async (req, res) => {
 
 /* ===========================
    CONFIRM PUSH
+
+   ★ CHANGED: now also sets force_push = true in the same UPDATE that
+   flips status → PENDING. This is the actual fix for the infinite
+   duplicate loop — without it, the worker re-ran checkDuplicateFromDb
+   once the queued job started and flipped the voucher straight back
+   to DUPLICATE_FOUND.
 =========================== */
 
 router.post("/:id/confirm-push", async (req, res) => {
@@ -1396,7 +1393,8 @@ router.post("/:id/confirm-push", async (req, res) => {
 
     const result = await db.query(
       `UPDATE ${DB_SCHEMA}.contra_vouchers
-       SET status = 'PENDING'
+       SET status = 'PENDING',
+           force_push = true
        WHERE id = $1
          AND status IN ('WAITING_LEDGER', 'FAILED', 'DUPLICATE_FOUND')
        RETURNING *`,
