@@ -98,11 +98,13 @@ const worker = new Worker(
         const unitName = String(getValue(row, [
           "unit",
           "unit name",
-          "uom"
+          "uom",
+          "unit of measure"
         ])).trim();
 
         const gstApplicableRaw = String(getValue(row, [
-          "gst applicable"
+          "gst applicable",
+          "gst applicability"
         ])).trim();
 
         const gstApplicable =
@@ -110,20 +112,32 @@ const worker = new Worker(
             ? (gstApplicableRaw.toLowerCase() === "applicable" ? "Applicable" : "Not Applicable")
             : "Applicable";
 
+        // The sheet gives one combined "GST RATE" (e.g. 18%), not separate
+        // CGST/SGST/IGST columns. pushXmlBuilder always writes all three rate
+        // blocks regardless of transaction type (see getStockItemCreateXML),
+        // so we split the standard way: CGST = SGST = half the rate, IGST =
+        // the full rate. Tally applies whichever pair is relevant per voucher.
+        const gstRate = safeNumber(getValue(row, [
+          "gst rate",
+          "gst rate details",
+          "gst %",
+          "gst percentage"
+        ]));
+
         const itemData = {
           item_name: itemName,
           alias_name: String(getValue(row, ["alias", "alias name"])).trim(),
           unit_name: unitName,
           description: String(getValue(row, ["description"])).trim(),
-          hsn_code: String(getValue(row, ["hsn code", "hsn"])).trim(),
-          cgst_rate: safeNumber(getValue(row, ["cgst", "cgst rate", "cgst %"])),
-          sgst_rate: safeNumber(getValue(row, ["sgst", "sgst rate", "sgst %"])),
-          igst_rate: safeNumber(getValue(row, ["igst", "igst rate", "igst %"])),
+          hsn_code: String(getValue(row, ["hsn code", "hsn", "hsn/sac details", "hsn/sac"])).trim(),
+          cgst_rate: Number((gstRate / 2).toFixed(2)),
+          sgst_rate: Number((gstRate / 2).toFixed(2)),
+          igst_rate: gstRate,
           gst_applicable: gstApplicable,
-          parent_group: String(getValue(row, ["parent group", "group", "stock group"])).trim(),
-          opening_quantity: safeNumber(getValue(row, ["opening quantity", "opening qty"])),
-          opening_rate: safeNumber(getValue(row, ["opening rate"])),
-          opening_value: safeNumber(getValue(row, ["opening value", "opening amount"]))
+          parent_group: String(getValue(row, ["parent group", "group", "stock group", "group/category"])).trim(),
+          opening_quantity: safeNumber(getValue(row, ["opening quantity", "opening qty", "quantity", "qty"])),
+          opening_rate: safeNumber(getValue(row, ["opening rate", "rate"])),
+          opening_value: safeNumber(getValue(row, ["opening value", "opening amount", "amount"]))
         };
 
         if (!unitName) {
