@@ -1,6 +1,9 @@
 import express from "express";
 import multer from "multer";
+import fs from "fs";
 import pool from "../db/index.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -11,19 +14,65 @@ import {
 
 const router = express.Router();
 
+const UPLOAD_DIR = "uploads/bulk-stock-item";
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
 const upload = multer({
-  dest: "uploads/"
+  dest: UPLOAD_DIR,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10 MB max
+  },
+  fileFilter: (req, file, cb) => {
+    const allowed = [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+      "application/vnd.ms-excel"                                            // .xls
+    ];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only Excel files (.xlsx, .xls) are allowed"));
+    }
+  }
 });
+
+/* =========================================
+   BULK STOCK ITEM UPLOAD
+
+   Mirrors bulk-sales-upload: verifySession() runs before multer so an
+   unauthenticated request is rejected before a file is written to disk,
+   and userId comes from the session (never req.body) so bulkStockItem.worker
+   can route each item to the uploader's own connector instead of falling
+   back to whichever connector for the company happens to be live.
+========================================= */
 
 router.post(
   "/bulk-stock-upload",
+  verifySession(),
   upload.single("file"),
   async (req, res) => {
     try {
+      const userId = await getLocalUserId(req.session.getUserId());
 
-      const { company } = req.body;
+      if (!userId) {
+        if (req.file?.path) {
+          fs.unlink(req.file.path, () => {});
+        }
+
+        return res.status(404).json({
+          status: "error",
+          message: "No profile found for this account"
+        });
+      }
+
+      const company = req.body.company?.trim();
 
       if (!company) {
+        if (req.file?.path) {
+          fs.unlink(req.file.path, () => {});
+        }
+
         return res.status(400).json({
           status: "error",
           message: "company is required"
@@ -50,6 +99,8 @@ router.post(
         companyResult.rows[0]?.id;
 
       if (!companyId) {
+        fs.unlink(req.file.path, () => {});
+
         return res.status(400).json({
           status: "error",
           message: "Company not found"
@@ -64,7 +115,12 @@ router.post(
           batchId,
           company,
           companyId,
-          filePath: req.file.path
+          filePath: req.file.path,
+
+          // Authenticated user who requested this bulk push. bulkStockItem.worker
+          // MUST forward this onto every stockItemQueue job it creates, or the
+          // individual items lose their owner and get routed by fallback.
+          userId
         },
         {
           ...BULK_STOCK_ITEM_JOB_OPTIONS,
@@ -73,13 +129,24 @@ router.post(
         }
       );
 
+      console.log("Bulk stock item upload queued", {
+        batchId,
+        companyId,
+        userId,
+        filename: req.file.originalname
+      });
+
       return res.json({
         status: "success",
         message:
-          "Bulk upload queued successfully"
+          "Bulk upload queued successfully",
+        batchId
       });
 
     } catch (error) {
+      if (req.file?.path) {
+        fs.unlink(req.file.path, () => {});
+      }
 
       return res.status(500).json({
         status: "error",
