@@ -81,9 +81,20 @@ import { DB_SCHEMA } from "../config/db.js";
 
     async (job) => {
 
-      const { company, filePath } = job.data;
+      // userId comes from the upload route's verifySession() and must be
+      // forwarded onto every salesQueue job below. Without it,
+      // pushSalesInvoice.worker calls resolveConnectorForCompany() with no
+      // acting user, the acting-user-first branch is skipped, and every
+      // invoice from this upload routes by fallback — i.e. into whichever
+      // connector for that company happens to be live, which may be someone
+      // else's Tally entirely.
+      const { company, filePath, userId } = job.data;
 
-      console.log(`Reading Sales Excel : ${filePath}`);
+      if (!userId) {
+        throw new Error(`Missing userId for bulk sales job ${job.id}`);
+      }
+
+      console.log(`Reading Sales Excel : ${filePath}`, { userId });
 
       const workbook = XLSX.readFile(filePath);
       const sheetName = workbook.SheetNames[0];
@@ -394,6 +405,25 @@ import { DB_SCHEMA } from "../config/db.js";
       grand_total: invoice.grand_total
     });
   });
+
+  // Resolve the company once, not once per invoice — the name never changes
+  // inside a single upload.
+  const companyResult = await pool.query(
+    `
+    SELECT id
+    FROM ${DB_SCHEMA}.companies
+    WHERE TRIM(name) = TRIM($1)
+    LIMIT 1
+    `,
+    [company]
+  );
+
+  const companyId = companyResult.rows[0]?.id;
+
+  if (!companyId) {
+    throw new Error(`Company not found: ${company}`);
+  }
+
   let successCount = 0;
   let failCount = 0;
       for (const invoiceNo of Object.keys(invoices)) {
@@ -410,21 +440,6 @@ import { DB_SCHEMA } from "../config/db.js";
           if (!invoiceData.invoice_date) {
             console.log(`⚠️ Warning: Invoice ${invoiceNo} has no invoice date`);
           }
-          const companyResult = await pool.query(
-    `
-    SELECT id
-    FROM ${DB_SCHEMA}.companies
-    WHERE TRIM(name) = TRIM($1)
-    LIMIT 1
-    `,
-    [company]
-  );
-
-  const companyId = companyResult.rows[0]?.id;
-
-  if (!companyId) {
-    throw new Error(`Company not found: ${company}`);
-  }
 
     const insertResult = await pool.query(
     `
@@ -461,24 +476,30 @@ import { DB_SCHEMA } from "../config/db.js";
 
   const salesId = insertResult.rows[0].id;
 
-  const jobId = getSalesJobId(salesId);
-
-  // Remove old job if it exists
-  const oldJob = await salesQueue.getJob(jobId);
-
-  if (oldJob) {
-    await oldJob.remove();
-    console.log(`🗑 Removed old job: ${jobId}`);
-  }
-
-  // Queue again
+  // The job id MUST be unique per push.
+  //
+  // This used to be getSalesJobId(salesId) — a fixed id per invoice — with a
+  // getJob()/remove() dance in front of it. BullMQ SILENTLY IGNORES add() when
+  // a job with that id already exists, and removeOnComplete keeps recent
+  // completed jobs around, so re-uploading a spreadsheet enqueued nothing at
+  // all for any invoice already pushed once: this worker logged "Sales Queued"
+  // and the sales worker never ran.
+  //
+  // Duplicate processing is not a risk: pushSalesInvoice.worker skips when a
+  // 'pending' or 'processing' connector job already exists for the invoice.
   await salesQueue.add(
     "sales-invoice",
-    { salesId },
-    { jobId }
+    {
+      salesId,
+
+      // Owner of this upload — carried through so the sales worker can route
+      // to THIS user's connector rather than falling back to any live one.
+      userId
+    },
+    { jobId: `${salesId}-${Date.now()}` }
   );
 
-  console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date})`);
+  console.log(`✅ Sales Queued : ${salesId} (Invoice: ${invoiceNo}, Date: ${invoiceData.invoice_date}, User: ${userId})`);
   successCount++;
 
         } catch (error) {

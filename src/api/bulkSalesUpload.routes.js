@@ -3,6 +3,8 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import pool from "../db/index.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -37,16 +39,59 @@ const upload = multer({
   }
 });
 
+/* =========================================
+   BULK SALES UPLOAD
+
+   verifySession() runs BEFORE multer on purpose: an unauthenticated request
+   is rejected before a file is ever written to disk, so there is no orphan
+   temp file to clean up.
+
+   userId comes from the session, never from req.body. Accepting it from the
+   client would let anyone route work to another user's connector — which is
+   exactly the failure this whole ownership chain exists to prevent.
+
+   The identity has to survive two queue hops to be useful:
+
+     upload (userId from session)
+       -> bulkSalesQueue { ..., userId }
+       -> bulkSales.worker: extracts the Excel, inserts rows
+       -> salesQueue { salesId, userId }          <- worker must pass it on
+       -> pushSalesInvoice.worker
+       -> resolveConnectorForCompany(companyId, userId)
+       -> connector_jobs.user_id = the uploader's own live connector
+
+   Dropping userId at any hop puts the invoices in whichever connector the
+   fallback happens to pick — i.e. someone else's Tally.
+========================================= */
+
 router.post(
   "/bulk-sales-upload",
+  verifySession(),
   upload.single("file"),
   async (req, res) => {
 
     try {
 
+      const userId = await getLocalUserId(req.session.getUserId());
+
+      if (!userId) {
+        if (req.file?.path) {
+          fs.unlink(req.file.path, () => {});
+        }
+
+        return res.status(404).json({
+          status: "error",
+          message: "No profile found for this account"
+        });
+      }
+
       const company = req.body.company?.trim();
 
       if (!company) {
+        if (req.file?.path) {
+          fs.unlink(req.file.path, () => {});
+        }
+
         return res.status(400).json({
           status: "error",
           message: "company is required"
@@ -88,13 +133,25 @@ router.post(
           company,
           companyId,
           filePath:         req.file.path,
-          originalFilename: req.file.originalname
+          originalFilename: req.file.originalname,
+
+          // Authenticated user who requested this bulk push. bulkSales.worker
+          // MUST forward this onto every salesQueue job it creates, or the
+          // individual invoices lose their owner and get routed by fallback.
+          userId
         },
         {
           ...BULK_SALES_JOB_OPTIONS,
           jobId: getBulkSalesJobId(batchId)
         }
       );
+
+      console.log("Bulk sales upload queued", {
+        batchId,
+        companyId,
+        userId,
+        filename: req.file.originalname
+      });
 
       return res.status(200).json({
         status:   "success",

@@ -232,17 +232,23 @@ const worker = new Worker(
       companyId: row.company_id
     };
 
+    // Duplicate-in-flight guard now also scoped to the requesting user —
+    // without payload->>'requested_by_user_id', an old in-flight job
+    // belonging to a DIFFERENT user (e.g. a stale retry from before this
+    // invoice was reassigned, or two users independently touching the same
+    // invoice_id) could incorrectly block this user's push.
     const existingJobResult = await pool.query(
       `
       SELECT id, status
       FROM ${DB_SCHEMA}.connector_jobs
       WHERE job_type = 'sales_invoice'
         AND payload->>'invoice_id' = $1
+        AND payload->>'requested_by_user_id' = $2
         AND status IN ('pending', 'processing')
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      [String(salesId)]
+      [String(salesId), String(userId)]
     );
 
     if (existingJobResult.rows.length > 0) {
@@ -396,12 +402,27 @@ const worker = new Worker(
 
       console.log("📤 Sales invoice XML generated", logCtx);
 
-      // Routed by company, not the acting user's own connector — an invited
-      // teammate pushing to a shared company has no connector of their own.
-      const connector = await resolveConnectorForCompany(row.company_id);
+      // Routed by company, with userId passed through so
+      // resolveConnectorForCompany() can prefer the requesting user's own
+      // connector when it's online — but an invited teammate pushing to a
+      // shared company still resolves to any active connector for that
+      // company, since they may have no connector of their own.
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
+      );
+
       if (!connector) {
-        throw new Error(`No active connector found for company ${row.company_id}`);
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
+        );
       }
+
+      console.log("🔗 Sales connector resolved", {
+        companyId: row.company_id,
+        actingUserId: userId,
+        connectorUserId: connector.user_id
+      });
 
       const connectorJob = await createConnectorJob({
         userId: connector.user_id,
@@ -423,7 +444,8 @@ const worker = new Worker(
       console.log("✅ Sales invoice job created for connector", {
         ...logCtx,
         connectorJobId: connectorJob.id,
-        userId: connector.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {

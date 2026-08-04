@@ -1,8 +1,10 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import { STOCK_ITEM_QUEUE_NAME } from "../queues/stockItem.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { getStockItemCreateXML } from "../services/pushXmlBuilder.js";
 
 const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`;
@@ -27,6 +29,7 @@ function isTemporaryStockItemError(error) {
     ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
+    message.includes("no active connector") ||
     message.includes("tally server unavailable") ||
     message.includes("server unavailable") ||
     message.includes("network") ||
@@ -38,14 +41,20 @@ function isTemporaryStockItemError(error) {
 const worker = new Worker(
   STOCK_ITEM_QUEUE_NAME,
   async (job) => {
-    const { stockItemId } = job.data;
+    const { stockItemId, userId } = job.data;
 
-    console.log(`Processing stock item ID ${stockItemId}`);
+    if (!userId) {
+      throw new Error(`Missing userId for stock item job ${stockItemId}`);
+    }
+
+    console.log(
+      `Processing stock item ID ${stockItemId} requested by user ${userId}`
+    );
 
     const result = await pool.query(
       `
       SELECT *
-      FROM app_test.push_stock_item
+      FROM ${DB_SCHEMA}.push_stock_item
       WHERE id = $1
       `,
       [stockItemId]
@@ -59,7 +68,7 @@ const worker = new Worker(
 
     await pool.query(
       `
-      UPDATE app_test.push_stock_item
+      UPDATE ${DB_SCHEMA}.push_stock_item
       SET
         status = 'processing',
         updated_at = NOW()
@@ -78,7 +87,7 @@ const worker = new Worker(
       let parentGroupExists = await pool.query(
         `
         SELECT 1
-        FROM app_test.stock_group_summary
+        FROM ${DB_SCHEMA}.stock_group_summary
         WHERE company_id = $1
         AND LOWER(TRIM(group_name)) = LOWER(TRIM($2))
         LIMIT 1
@@ -128,7 +137,7 @@ const worker = new Worker(
         parentGroupExists = await pool.query(
           `
           SELECT 1
-          FROM app_test.stock_group_summary
+          FROM ${DB_SCHEMA}.stock_group_summary
           WHERE company_id = $1
           AND LOWER(TRIM(group_name)) = LOWER(TRIM($2))
           LIMIT 1
@@ -144,7 +153,7 @@ const worker = new Worker(
       if (!parentGroupExists.rows.length) {
         await pool.query(
           `
-          UPDATE app_test.push_stock_item
+          UPDATE ${DB_SCHEMA}.push_stock_item
           SET
             status = 'failed',
             last_error = $1,
@@ -190,63 +199,45 @@ const worker = new Worker(
       console.log(`📤 Stock item XML generated: ${row.item_name}`);
 
       // ─────────────────────────────────────────────────────────────
-      // STEP 6: GET CONNECTOR PAIRING
+      // STEP 6: RESOLVE CONNECTOR FOR THIS COMPANY
       // ─────────────────────────────────────────────────────────────
       //
-      // Query connector_pairing_tokens directly by company_id, filtered to used
-      // tokens and ordered to the most recent pairing — same approach as the
-      // pushBank / pushLedger / pushSalesInvoice workers.
-      //
-      // The old join (companies -> connector_pairing_tokens) had no is_used
-      // filter, no ORDER BY and no LIMIT, so rows[0] was an arbitrary user
-      // whenever a company had more than one pairing token.
-      //
-      // ⚠️ INTERIM FIX ONLY. This makes the choice deterministic, not correct:
-      // if two different logins share a company_id, every job for that company
-      // routes to whoever paired most recently. The real fix is a user_id
-      // column on push_stock_item, written from req.user.id at insert time, so
-      // the job owner never has to be inferred. The candidate_count warning
-      // below exists to tell you whether that migration is urgent.
+      // Routed by company, not strictly by the requesting user — multiple
+      // users can share one company's Tally/connector. userId is passed
+      // through so resolveConnectorForCompany() can prefer that user's own
+      // connector if it's online, but it is not a hard requirement for
+      // routing to succeed. requested_by_user_id is still recorded on the
+      // connector job below for audit trail.
       // ─────────────────────────────────────────────────────────────
 
-      const pairingResult = await pool.query(
-        `
-        SELECT user_id, COUNT(*) OVER () AS candidate_count
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [row.company_id]
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
       );
 
-      const pairing = pairingResult.rows[0];
-
-      if (!pairing) {
+      if (!connector) {
         throw new Error(
-          `No connector pairing found for stock item ${stockItemId}`
+          `No active connector found for company ${row.company_id} and user ${userId}`
         );
       }
 
-      if (Number(pairing.candidate_count) > 1) {
-        console.warn(
-          `⚠️ AMBIGUOUS PAIRING: company ${row.company_id} has ${pairing.candidate_count} used pairing tokens; routing stock item ${stockItemId} to user ${pairing.user_id}`
-        );
-      }
+      console.log(
+        `🔗 Stock item connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
 
       // ─────────────────────────────────────────────────────────────
       // STEP 7: CREATE CONNECTOR JOB ✅
       // ─────────────────────────────────────────────────────────────
 
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
-        jobType: 'stock_item',
+        userId: connector.user_id,
+        jobType: "stock_item",
         requestXml: xml,
         payload: {
           stock_item_id: stockItemId,
           company_id: row.company_id,
-          item_name: row.item_name
+          item_name: row.item_name,
+          requested_by_user_id: userId
         }
       });
 
@@ -256,7 +247,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.push_stock_item
+        UPDATE ${DB_SCHEMA}.push_stock_item
         SET
           status = 'pending',
           updated_at = NOW()
@@ -267,7 +258,8 @@ const worker = new Worker(
 
       console.log(`✅ Stock item job created for connector: ${row.item_name}`, {
         jobId: connectorJob.id,
-        userId: pairing.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {
@@ -286,7 +278,7 @@ const worker = new Worker(
         // Mark as pending for retry
         await pool.query(
           `
-          UPDATE app_test.push_stock_item
+          UPDATE ${DB_SCHEMA}.push_stock_item
           SET
             status = 'pending',
             last_error = $1,
@@ -305,7 +297,7 @@ const worker = new Worker(
       // Permanent failure
       await pool.query(
         `
-        UPDATE app_test.push_stock_item
+        UPDATE ${DB_SCHEMA}.push_stock_item
         SET
           status = 'failed',
           last_error = $1,
@@ -358,7 +350,7 @@ worker.on("failed", async (job, error) => {
 
     await pool.query(
       `
-      UPDATE app_test.push_stock_item
+      UPDATE ${DB_SCHEMA}.push_stock_item
       SET
         status = 'failed',
         last_error = $1,
