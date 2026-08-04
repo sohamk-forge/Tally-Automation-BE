@@ -62,6 +62,32 @@ reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("customer_name", "")
 party_gstin    = invoice.get("customer_gstin") or invoice.get("gstin") or ""
 
+GST_STATE_MAP = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+    "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana",
+    "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
+    "13": "Nagaland", "14": "Manipur", "15": "Mizoram",
+    "16": "Tripura", "17": "Meghalaya", "18": "Assam",
+    "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
+    "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu",
+    "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
+    "34": "Puducherry", "35": "Andaman & Nicobar Islands",
+    "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+    "97": "Other Territory",
+}
+
+party_state = invoice.get("customer_state") or invoice.get("state") or ""
+party_country = invoice.get("customer_country") or invoice.get("country") or "India"
+
+# Fall back to the GSTIN prefix when the frontend did not send a state
+if not party_state and party_gstin:
+    party_state = GST_STATE_MAP.get(party_gstin[:2], "")
+
+place_of_supply = invoice.get("place_of_supply") or party_state or ""
+
 line_items   = invoice.get("line_items", [])
 sales_amount = round(
     sum(abs(float(i.get("amount", 0))) for i in line_items),
@@ -177,8 +203,23 @@ sub(vch, "VOUCHERTYPENAME", "Sales")
 sub(vch, "REFERENCE",       reference)
 sub(vch, "PARTYNAME",       party_name)
 sub(vch, "PARTYLEDGERNAME", party_name)
-sub(vch, "PARTYGSTIN",      party_gstin)
-sub(vch, "ISINVOICE",       "Yes")
+
+if party_gstin:
+    sub(vch, "PARTYGSTIN", party_gstin)
+    sub(vch, "CONSIGNEEGSTIN", party_gstin)
+
+if party_state:
+    sub(vch, "STATENAME", party_state)
+    sub(vch, "CONSIGNEESTATENAME", party_state)
+
+if party_country:
+    sub(vch, "COUNTRYOFRESIDENCE", party_country)
+    sub(vch, "CONSIGNEECOUNTRYNAME", party_country)
+
+if place_of_supply:
+    sub(vch, "PLACEOFSUPPLY", place_of_supply)
+
+sub(vch, "ISINVOICE", "Yes")
 
 narration = invoice.get("narration", "")
 if narration:
