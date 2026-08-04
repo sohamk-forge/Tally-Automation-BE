@@ -7,6 +7,10 @@ services:
       POSTGRESQL_CONNECTION_URI: "postgresql://${SUPERTOKENS_DB_USER}:${SUPERTOKENS_DB_PASSWORD}@host.docker.internal:${DB_PORT}/${DB_NAME}"
       POSTGRESQL_TABLE_SCHEMA: "supertokens_core"
       API_KEYS: "${SUPERTOKENS_API_KEY}"
+      # token (SuperTokens defaults are 1hr / 100 days — too loose for this).
+      # Units differ: access token is SECONDS, refresh token is MINUTES.
+      ACCESS_TOKEN_VALIDITY: "900"
+      REFRESH_TOKEN_VALIDITY: "720"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
