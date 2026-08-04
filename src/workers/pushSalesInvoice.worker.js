@@ -6,6 +6,7 @@ import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { SALES_QUEUE_NAME } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateSalesXml } from "../services/xmlGenerator.js";
 
 const connection = new IORedis({
@@ -395,22 +396,11 @@ const worker = new Worker(
 
       console.log("📤 Sales invoice XML generated", logCtx);
 
-      const connectorResult = await pool.query(
-        `
-        SELECT user_id
-        FROM ${DB_SCHEMA}.connector_api_keys
-        WHERE user_id = $1
-          AND revoked_at IS NULL
-          AND last_seen_at >= NOW() - INTERVAL '30 seconds'
-        ORDER BY last_seen_at DESC
-        LIMIT 1
-        `,
-        [userId]
-      );
-
-      const connector = connectorResult.rows[0];
+      // Routed by company, not the acting user's own connector — an invited
+      // teammate pushing to a shared company has no connector of their own.
+      const connector = await resolveConnectorForCompany(row.company_id);
       if (!connector) {
-        throw new Error(`No active connector found for user ${userId}`);
+        throw new Error(`No active connector found for company ${row.company_id}`);
       }
 
       const connectorJob = await createConnectorJob({

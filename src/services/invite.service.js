@@ -114,11 +114,11 @@ export const approveInvite = async (inviteId, approverUserId) => {
     await pool.query(
       `
       INSERT INTO ${DB_SCHEMA}.connector_pairing_tokens
-      (id, user_id, company_id, token, expires_at, is_used)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, TRUE)
+      (id, user_id, company_id, token, expires_at, is_used, invite_id)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, TRUE, $5)
       ON CONFLICT DO NOTHING
       `,
-      [invite.invitee_user_id, company_id, token, expiresAt]
+      [invite.invitee_user_id, company_id, token, expiresAt, inviteId]
     );
   }
 
@@ -132,4 +132,48 @@ export const approveInvite = async (inviteId, approverUserId) => {
   );
 
   return { companiesGranted: pairingResult.rows.length };
+};
+
+/**
+ * Revokes an invite at any active stage. For an approved invite this deletes
+ * exactly the connector_pairing_tokens rows that invite created (tagged via
+ * invite_id at approval time) — never anything the invitee has independent
+ * of this invite. Only the original inviter may revoke.
+ */
+export const revokeInvite = async (inviteId, requesterUserId) => {
+  const inviteResult = await pool.query(
+    `
+    SELECT id, invited_by_user_id, status
+    FROM ${DB_SCHEMA}.invites
+    WHERE id = $1
+    `,
+    [inviteId]
+  );
+
+  const invite = inviteResult.rows[0];
+  if (!invite) {
+    return { error: "not_found" };
+  }
+  if (invite.invited_by_user_id !== requesterUserId) {
+    return { error: "forbidden" };
+  }
+  if (!["invited", "pending_approval", "approved"].includes(invite.status)) {
+    return { error: "invalid_status" };
+  }
+
+  const revokedResult = await pool.query(
+    `DELETE FROM ${DB_SCHEMA}.connector_pairing_tokens WHERE invite_id = $1`,
+    [inviteId]
+  );
+
+  await pool.query(
+    `
+    UPDATE ${DB_SCHEMA}.invites
+    SET status = 'revoked', updated_at = now()
+    WHERE id = $1
+    `,
+    [inviteId]
+  );
+
+  return { companiesRevoked: revokedResult.rowCount };
 };

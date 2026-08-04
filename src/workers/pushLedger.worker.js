@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { LEDGER_QUEUE_NAME } from "../queues/ledger.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { createLedgerXML } from "../services/pushXmlBuilder.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -100,27 +101,16 @@ if (!userId) {
       });
 
       // ─────────────────────────────────────────────────────────────
-      // STEP 2: Get connector pairing info for this ledger's company
+      // STEP 2: Find the active connector paired to this ledger's company
+      // (not the acting user's own connector — an invited teammate pushing
+      // to a shared company has no connector of their own; the job must
+      // route to whoever actually paired a machine for this company).
       // ─────────────────────────────────────────────────────────────
-    // STEP 2: Find ACTIVE connector of the user who pushed this ledger
-const connectorResult = await pool.query(
-  `
-  SELECT user_id, machine_id
-  FROM ${DB_SCHEMA}.connector_api_keys
-  WHERE user_id = $1
-    AND revoked_at IS NULL
-    AND last_seen_at >= NOW() - INTERVAL '30 seconds'
-  ORDER BY last_seen_at DESC
-  LIMIT 1
-  `,
-  [userId]
-);
-
-const connector = connectorResult.rows[0];
+const connector = await resolveConnectorForCompany(row.company_id);
 
 if (!connector) {
   throw new Error(
-    `No active connector found for user ${userId}`
+    `No active connector found for company ${row.company_id}`
   );
 }
 

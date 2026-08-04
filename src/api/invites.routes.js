@@ -2,7 +2,7 @@ import express from "express";
 import Passwordless from "supertokens-node/recipe/passwordless/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { createInvite, listInvitesForUser, approveInvite } from "../services/invite.service.js";
+import { createInvite, listInvitesForUser, approveInvite, revokeInvite } from "../services/invite.service.js";
 import { sendInviteEmail } from "../services/mailer.service.js";
 
 const router = express.Router();
@@ -94,6 +94,42 @@ router.post("/:id/approve", verifySession(), async (req, res) => {
     });
   } catch (err) {
     console.log("INVITE APPROVE ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   REVOKE INVITE
+   Cancels a pending invite, or strips a previously-approved invitee's
+   access (deletes exactly the connector_pairing_tokens rows that invite
+   granted — nothing the invitee has independent of it).
+========================================= */
+router.post("/:id/revoke", verifySession(), async (req, res) => {
+  try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const result = await revokeInvite(req.params.id, userId);
+
+    if (result.error === "not_found") {
+      return res.status(404).json({ status: "error", message: "Invite not found" });
+    }
+    if (result.error === "forbidden") {
+      return res.status(403).json({ status: "error", message: "Only the inviter can revoke this invite" });
+    }
+    if (result.error === "invalid_status") {
+      return res.status(409).json({ status: "error", message: "Invite is already revoked" });
+    }
+
+    return res.json({
+      status: "success",
+      message: "Invite revoked",
+      companiesRevoked: result.companiesRevoked,
+    });
+  } catch (err) {
+    console.log("INVITE REVOKE ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
