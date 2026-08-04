@@ -1622,94 +1622,90 @@ for (const [name, item] of uniqueCompanies) {
     GROUP BALANCES SYNC (UPDATED WITH company_id)
   =================================================== */
 
-  router.get("/payable-debtors", async (req, res) => {
-    const company = req.query.company;
-    if (!company) {
-      return res.status(400).json({
-        status: "error",
-        message: "company query parameter required"
-      });
-    }
-    
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      
-      // Get company_id using helper
-      const companyId = await getCompanyId(company, client);
-      if (!companyId) {
-        throw new Error("Company not found");
-      }
-      
-      const getGroupData = async (groupName) => {
-        const xml = getGroupBalanceXML(company, groupName);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
-        const parsed = await parseXML(responseXML);
-        const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
-        
-        const originalGuid = group?.GUID || null;
-        const guid = originalGuid || generateFallbackGuid(company, groupName, 'groupbalance');
-        
-        return {
-          guid: guid,
-          masterId: group?.MASTERID || null,
-          alterId: group?.ALTERID || null,
-          group_name: clean(group?.$?.NAME || group?.["@NAME"] || groupName),
-          parent_group: clean(group?.PARENT),
-          opening_balance: parseAmount(group?.OPENINGBALANCE),
-          closing_balance: parseAmount(group?.CLOSINGBALANCE)
-        };
-      };
-      
-      const debtors = await getGroupData("Sundry Debtors");
-      const creditors = await getGroupData("Sundry Creditors");
-      
-      let inserted = 0, updated = 0, ignored = 0;
-      
-      const debtorsResult = await upsertRecord(
-        "app_test.group_balances", debtors.guid, debtors.masterId, debtors.alterId,
-        [companyId, company, debtors.group_name, debtors.parent_group, debtors.opening_balance, debtors.closing_balance],
-        ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
-        client
-      );
-      
-      if (debtorsResult.action === "inserted") inserted++;
-      else if (debtorsResult.action === "updated") updated++;
-      else ignored++;
-      
-      const creditorsResult = await upsertRecord(
-        "app_test.group_balances", creditors.guid, creditors.masterId, creditors.alterId,
-        [companyId, company, creditors.group_name, creditors.parent_group, creditors.opening_balance, creditors.closing_balance],
-        ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
-        client
-      );
-      
-      if (creditorsResult.action === "inserted") inserted++;
-      else if (creditorsResult.action === "updated") updated++;
-      else ignored++;
-      
-      await client.query("COMMIT");
-      
-      return res.status(200).json({
-        status: "success",
-        source: "tally",
-        message: "Group balances synced successfully",
-        company,
-        summary: { inserted, updated, ignored, total: 2 },
-        data: { debtors, creditors }
-      });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.log("❌ GROUP BALANCES ERROR:", err.message);
-      return res.status(500).json({
-        status: "error",
-        message: err.message
-      });
-    } finally {
-      client.release();
-    }
-  });
+ router.get("/payable-debtors", async (req, res) => {
+  const company = req.query.company;
+  if (!company) {
+    return res.status(400).json({ status: "error", message: "company query parameter required" });
+  }
 
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const companyId = await getCompanyId(company, client);
+    if (!companyId) throw new Error("Company not found");
+
+    const getGroupData = async (groupName) => {
+      const xml = getGroupBalanceXML(company, groupName);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+      const parsed = await parseXML(responseXML);
+      const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
+
+      const originalGuid = group?.GUID || null;
+      const guid = originalGuid || generateFallbackGuid(company, groupName, 'groupbalance');
+
+      return {
+        guid,
+        masterId: group?.MASTERID || null,
+        alterId: group?.ALTERID || null,
+        group_name: clean(group?.$?.NAME || group?.["@NAME"] || groupName),
+        parent_group: clean(group?.PARENT),
+        opening_balance: parseAmount(group?.OPENINGBALANCE),
+        closing_balance: parseAmount(group?.CLOSINGBALANCE)
+      };
+    };
+
+    const debtors   = await getGroupData("Sundry Debtors");
+    const creditors = await getGroupData("Sundry Creditors");
+
+    // ── NEW: fetch Stock-in-Hand the same way ──────────────────────
+    let stock = await getGroupData("Stock-in-Hand");
+
+    // Tally sometimes stores this group as "Stock-in-Hand" and sometimes
+    // as "Stock in Hand" (see getStockInHandXML's OR-filter for the same
+    // reason). If the first name comes back empty, retry the alt spelling
+    // before giving up — same defensive pattern as elsewhere in this file.
+    if (!stock.group_name || (!stock.opening_balance && !stock.closing_balance && !stock.guid)) {
+      stock = await getGroupData("Stock in Hand");
+    }
+    // ─────────────────────────────────────────────────────────────
+
+    let inserted = 0, updated = 0, ignored = 0;
+
+    const upsertGroup = async (g) => {
+      const result = await upsertRecord(
+        "app_test.group_balances", g.guid, g.masterId, g.alterId,
+        [companyId, company, g.group_name, g.parent_group, g.opening_balance, g.closing_balance],
+        ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
+        client
+      );
+      if (result.action === "inserted") inserted++;
+      else if (result.action === "updated") updated++;
+      else ignored++;
+    };
+
+    await upsertGroup(debtors);
+    await upsertGroup(creditors);
+    await upsertGroup(stock);   // ← NEW
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Group balances synced successfully",
+      company,
+      summary: { inserted, updated, ignored, total: 3 },   // was 2, now 3
+      data: { debtors, creditors, stock }                   // ← NEW
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.log("❌ GROUP BALANCES ERROR:", err.message);
+    return res.status(500).json({ status: "error", message: err.message });
+  } finally {
+    client.release();
+  }
+});
   /* ===================================================
     ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
   =================================================== */

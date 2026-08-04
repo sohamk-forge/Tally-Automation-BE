@@ -270,6 +270,15 @@ export async function createQuotation(data) {
 // PUBLIC: getAllQuotations
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: getAllQuotations
+//
+// Now returns items[] and item_count per quotation via a LATERAL join +
+// json_agg, so the list view can render everything the frontend needs
+// (item name, godown, HSN, qty, rate, gst%, disc%, line total) without a
+// second round-trip per row.
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function getAllQuotations(companyId, filters = {}) {
   const conditions = ["q.company_id = $1"];
   const values     = [companyId];
@@ -294,13 +303,35 @@ export async function getAllQuotations(companyId, filters = {}) {
 
   const quotationRes = await pool.query(
     `SELECT
-       q.id,
-       q.quotation_number,
-       q.quotation_date,
-       q.customer_name,
-       q.grand_total,
-       q.status
+       q.*,
+       COALESCE(items.item_count, 0)   AS item_count,
+       COALESCE(items.items, '[]'::json) AS items
      FROM ${DB_SCHEMA}.quotations q
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(*)::int AS item_count,
+         json_agg(
+           json_build_object(
+             'id',                qi.id,
+             'item_name',         qi.item_name,
+             'godown_name',       qi.godown_name,
+             'bin',               qi.bin,
+             'hsn_code',          qi.hsn_code,
+             'qty',               qi.qty,
+             'rate',              qi.rate,
+             'gst_rate',          qi.gst_rate,
+             'discount_percent',  qi.discount_percent,
+             'taxable_amount',    qi.taxable_amount,
+             'cgst_amount',       qi.cgst_amount,
+             'sgst_amount',       qi.sgst_amount,
+             'igst_amount',       qi.igst_amount,
+             'line_total',        qi.line_total,
+             'sort_order',        qi.sort_order
+           ) ORDER BY qi.sort_order ASC, qi.id ASC
+         ) AS items
+       FROM ${DB_SCHEMA}.quotation_items qi
+       WHERE qi.quotation_id = q.id
+     ) items ON true
      WHERE ${conditions.join(" AND ")}
      ORDER BY q.quotation_seq DESC`,
     values
@@ -308,7 +339,6 @@ export async function getAllQuotations(companyId, filters = {}) {
 
   return quotationRes.rows;
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getQuotationById
 // ─────────────────────────────────────────────────────────────────────────────
