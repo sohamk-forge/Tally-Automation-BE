@@ -58,7 +58,9 @@ const HEADER_ALIASES = {
   ],
   chequeRef: [
     "chq./ref.no.", "chq/ref no.", "chq no", "chq no.",
-    "ref no", "ref no.", "cheque number", "chqno", "cheque no"
+    "ref no", "ref no.", "cheque number", "chqno", "cheque no",
+    "cheque no.",       // IDFC First: "Cheque No." (with trailing period)
+    "chq /ref no."      // Kotak Mahindra: "Chq /Ref No."
   ],
   withdrawal: [
     "withdrawal amt.", "withdrawal amt", "debit", "dr",
@@ -70,7 +72,12 @@ const HEADER_ALIASES = {
   ],
   balance: [
     "closing balance", "balance", "balance(inr)", "bal"
-  ]
+  ],
+  // NEW: banks that report a single Amount column plus a separate
+  // Dr/Cr type flag instead of splitting into two amount columns
+  // (e.g. Kotak Mahindra's exports)
+  amount: ["amount", "transaction amount", "amount(inr)"],
+  drCr: ["dr / cr", "dr/cr", "cr/dr", "cr / dr", "type", "transaction type"]
 };
 
 // Header names used ONLY to *find* the header row (kept separate from
@@ -124,6 +131,11 @@ function findHeaderRowIndex(sheet) {
   return 0;
 }
 
+const MONTH_NAME_TO_NUM = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+
 function parseDate(raw) {
   if (!raw) return null;
   if (raw instanceof Date) return raw.toISOString().split("T")[0];
@@ -131,13 +143,28 @@ function parseDate(raw) {
     const date = new Date(Math.round((raw - 25569) * 86400 * 1000));
     return date.toISOString().split("T")[0];
   }
+
   const str = cleanString(String(raw));
-  const match = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (match) {
-    let [, d, m, y] = match;
+
+  // Numeric formats: DD/MM/YYYY, DD-MM-YYYY — optional trailing time
+  const numMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (numMatch) {
+    let [, d, m, y] = numMatch;
     if (y.length === 2) y = "20" + y;
     return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
+
+  // Month-name formats: DD-Mon-YYYY (e.g. IDFC First: "05-Apr-2025")
+  const monMatch = str.match(/^(\d{1,2})[\s\/\-]([A-Za-z]{3,})[\s\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (monMatch) {
+    const [, d, monName, yRaw] = monMatch;
+    const mNum = MONTH_NAME_TO_NUM[monName.slice(0, 3).toLowerCase()];
+    if (mNum) {
+      const y = yRaw.length === 2 ? "20" + yRaw : yRaw;
+      return `${y}-${String(mNum).padStart(2, "0")}-${d.padStart(2, "0")}`;
+    }
+  }
+
   return null;
 }
 
@@ -445,8 +472,19 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   for (const [i, row] of rawRows.entries()) {
     const normRow = normalizedRows[i];
 
-    const withdrawalAmt = parseAmount(pickField(normRow, "withdrawal"));
-    const depositAmt = parseAmount(pickField(normRow, "deposit"));
+    let withdrawalAmt = parseAmount(pickField(normRow, "withdrawal"));
+    let depositAmt = parseAmount(pickField(normRow, "deposit"));
+
+    // Fallback for banks using one Amount column + a Dr/Cr flag
+    // instead of separate debit/credit columns
+    if (withdrawalAmt === null && depositAmt === null) {
+      const combinedAmt = parseAmount(pickField(normRow, "amount"));
+      const flag = String(pickField(normRow, "drCr") ?? "").trim().toUpperCase();
+      if (combinedAmt !== null && flag) {
+        if (flag.startsWith("D")) withdrawalAmt = combinedAmt;
+        else if (flag.startsWith("C")) depositAmt = combinedAmt;
+      }
+    }
 
     if (withdrawalAmt === null && depositAmt === null) continue;
 

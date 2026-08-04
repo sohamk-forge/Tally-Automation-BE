@@ -297,6 +297,13 @@ export async function createChallan(data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getAllChallans
+//
+// UPDATED: now selects id, narration, status, and grand_total in addition
+// to the original challan_number / challan_date / customer_name fields.
+// These were being computed and stored on create, but were silently
+// dropped from this response. Every field is included explicitly — even
+// when null — so the frontend can always find the key on the row instead
+// of it being missing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getAllChallans(companyId, filters = {}) {
@@ -324,9 +331,13 @@ export async function getAllChallans(companyId, filters = {}) {
   // Fetch matching challans first
   const challanRes = await pool.query(
     `SELECT
+       c.id,
        c.challan_number,
        c.challan_date,
-       c.customer_name
+       c.customer_name,
+       c.narration,
+       c.status,
+       c.grand_total
      FROM ${DB_SCHEMA}.challans c
      WHERE ${conditions.join(" AND ")}
      ORDER BY c.challan_seq DESC`,
@@ -364,10 +375,113 @@ export async function getAllChallans(companyId, filters = {}) {
   }
 
   return challanRes.rows.map(c => ({
+    id:             c.id,
     challan_number: c.challan_number,
     challan_date:   c.challan_date,
     customer_name:  c.customer_name,
+    narration:      c.narration,
+    status:         c.status,
+    grand_total:    c.grand_total,
     items:          itemsMap[c.challan_number] || [],
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: getChallanTransactions
+//
+// Returns ONLY challans, using plain challan field names — no voucher-shape
+// remapping, no merging with app_test.vouchers. Every field defined on the
+// challan (including line items) is included explicitly; if a value is
+// missing in the DB it comes back as null rather than being left out of
+// the object.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getChallanTransactions(companyId, filters = {}) {
+  const conditions = ["c.company_id = $1"];
+  const values     = [companyId];
+  let   idx        = 2;
+
+  if (filters.from_date) {
+    conditions.push(`DATE(c.challan_date) >= $${idx++}`);
+    values.push(filters.from_date);
+  }
+  if (filters.to_date) {
+    conditions.push(`DATE(c.challan_date) <= $${idx++}`);
+    values.push(filters.to_date);
+  }
+  if (filters.party) {
+    conditions.push(`LOWER(c.customer_name) LIKE LOWER($${idx++})`);
+    values.push(`%${filters.party}%`);
+  }
+  if (filters.status) {
+    conditions.push(`c.status = $${idx++}`);
+    values.push(filters.status.toUpperCase());
+  }
+
+  const challanRes = await pool.query(
+    `SELECT
+       c.id,
+       c.company_id,
+       c.company_name,
+       c.challan_number,
+       c.challan_date,
+       c.customer_name,
+       c.customer_gstin,
+       c.customer_address,
+       c.narration,
+       c.status,
+       c.sub_total,
+       c.total_cgst,
+       c.total_sgst,
+       c.total_igst,
+       c.total_tax,
+       c.grand_total,
+       c.created_at,
+       c.updated_at
+     FROM ${DB_SCHEMA}.challans c
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY c.challan_date DESC, c.id DESC`,
+    values
+  );
+
+  if (!challanRes.rows.length) return [];
+
+  const challanIds = challanRes.rows.map((r) => r.id);
+
+  const itemsRes = await pool.query(
+    `SELECT *
+     FROM ${DB_SCHEMA}.challan_items
+     WHERE challan_id = ANY($1)
+     ORDER BY challan_id, sort_order ASC, id ASC`,
+    [challanIds]
+  );
+
+  const itemsMap = {};
+  for (const item of itemsRes.rows) {
+    if (!itemsMap[item.challan_id]) itemsMap[item.challan_id] = [];
+    itemsMap[item.challan_id].push(item);
+  }
+
+  return challanRes.rows.map((c) => ({
+    id:                c.id,
+    company_id:        c.company_id,
+    company_name:      c.company_name,
+    challan_number:    c.challan_number,
+    challan_date:      c.challan_date,
+    customer_name:     c.customer_name,
+    customer_gstin:    c.customer_gstin,
+    customer_address:  c.customer_address,
+    narration:         c.narration,
+    status:            c.status,
+    sub_total:         c.sub_total,
+    total_cgst:        c.total_cgst,
+    total_sgst:        c.total_sgst,
+    total_igst:        c.total_igst,
+    total_tax:         c.total_tax,
+    grand_total:       c.grand_total,
+    created_at:        c.created_at,
+    updated_at:        c.updated_at,
+    items:             itemsMap[c.id] || [],
   }));
 }
 
