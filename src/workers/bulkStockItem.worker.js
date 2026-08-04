@@ -47,7 +47,9 @@ const worker = new Worker(
       throw new Error(`Missing userId for stock item job ${stockItemId}`);
     }
 
-    console.log(`Processing stock item ID ${stockItemId}`, { userId });
+    console.log(
+      `Processing stock item ID ${stockItemId} requested by user ${userId}`
+    );
 
     const result = await pool.query(
       `
@@ -197,26 +199,31 @@ const worker = new Worker(
       console.log(`📤 Stock item XML generated: ${row.item_name}`);
 
       // ─────────────────────────────────────────────────────────────
-      // STEP 6: GET ACTIVE CONNECTOR FOR THIS COMPANY
+      // STEP 6: RESOLVE CONNECTOR FOR THIS COMPANY
       // ─────────────────────────────────────────────────────────────
       //
-      // Routed by company (resolveConnectorForCompany joins
-      // connector_pairing_tokens with connector_api_keys and picks the
-      // live, most-recently-active machine) rather than the acting user's
-      // own connector — an invited teammate pushing to a shared company
-      // has no connector of their own, so routing by their own userId
-      // would always fail. Ambiguity between multiple logins sharing a
-      // company is resolved by liveness (most recent heartbeat), not by
-      // whichever user happened to trigger the push.
+      // Routed by company, not strictly by the requesting user — multiple
+      // users can share one company's Tally/connector. userId is passed
+      // through so resolveConnectorForCompany() can prefer that user's own
+      // connector if it's online, but it is not a hard requirement for
+      // routing to succeed. requested_by_user_id is still recorded on the
+      // connector job below for audit trail.
       // ─────────────────────────────────────────────────────────────
 
-      const connector = await resolveConnectorForCompany(row.company_id);
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
+      );
 
       if (!connector) {
         throw new Error(
-          `No active connector found for company ${row.company_id}`
+          `No active connector found for company ${row.company_id} and user ${userId}`
         );
       }
+
+      console.log(
+        `🔗 Stock item connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
 
       // ─────────────────────────────────────────────────────────────
       // STEP 7: CREATE CONNECTOR JOB ✅
@@ -251,7 +258,8 @@ const worker = new Worker(
 
       console.log(`✅ Stock item job created for connector: ${row.item_name}`, {
         jobId: connectorJob.id,
-        userId: connector.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {
