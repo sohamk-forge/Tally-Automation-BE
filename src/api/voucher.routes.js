@@ -12,8 +12,7 @@ import {
   getVoucherJobId,
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
-
-import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
+import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
 
 
@@ -40,14 +39,83 @@ function cleanString(val) {
     .trim();
 }
 
+/* ============================================================
+   GENERAL BANK-STATEMENT COLUMN MAPPER
+
+   Every known header variant we've seen across bank exports.
+   To support a NEW bank format, just add its header text (any
+   case, any spacing) to the relevant array below — nothing else
+   in this file needs to change.
+   ============================================================ */
+const HEADER_ALIASES = {
+  date: [
+    "date", "txn date", "transaction date", "tran date",
+    "transaction dt", "value date", "value dt"
+  ],
+  narration: [
+    "narration", "description", "particulars",
+    "transaction remarks", "remarks", "transaction particulars"
+  ],
+  chequeRef: [
+    "chq./ref.no.", "chq/ref no.", "chq no", "chq no.",
+    "ref no", "ref no.", "cheque number", "chqno", "cheque no"
+  ],
+  withdrawal: [
+    "withdrawal amt.", "withdrawal amt", "debit", "dr",
+    "withdrawal amount(inr)", "withdrawal amount"
+  ],
+  deposit: [
+    "deposit amt.", "deposit amt", "credit", "cr",
+    "deposit amount(inr)", "deposit amount"
+  ],
+  balance: [
+    "closing balance", "balance", "balance(inr)", "bal"
+  ]
+};
+
+// Header names used ONLY to *find* the header row (kept separate from
+// HEADER_ALIASES.date since a couple of these, e.g. plain "particulars",
+// are too generic to safely double as a date match).
+const HEADER_ROW_DETECTORS = [
+  ...HEADER_ALIASES.date,
+  ...HEADER_ALIASES.withdrawal,
+  ...HEADER_ALIASES.deposit
+];
+
+function normalizeHeaderKey(key) {
+  return String(key || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Re-keys a sheet_to_json row (whose keys are the literal, possibly
+// whitespace-padded / inconsistently-cased header text) into a row
+// keyed by normalized header text. Done once per row instead of
+// normalizing on every lookup.
+function normalizeRow(row) {
+  const out = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[normalizeHeaderKey(key)] = value;
+  }
+  return out;
+}
+
+// Looks up a field on an already-normalized row using an alias list
+// from HEADER_ALIASES. Returns the first non-empty match.
+function pickField(normRow, aliasListKey) {
+  for (const alias of HEADER_ALIASES[aliasListKey]) {
+    const val = normRow[normalizeHeaderKey(alias)];
+    if (val !== undefined && val !== null && val !== "") return val;
+  }
+  return null;
+}
+
 function findHeaderRowIndex(sheet) {
   const range = xlsx.utils.decode_range(sheet["!ref"]);
-  for (let r = range.s.r; r <= Math.min(range.e.r, 20); r++) {
+  for (let r = range.s.r; r <= Math.min(range.e.r, 30); r++) {
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cell = sheet[xlsx.utils.encode_cell({ r, c })];
       if (cell && typeof cell.v === "string") {
-        const val = cell.v.trim().toLowerCase();
-        if (val === "date" || val === "txn date" || val === "transaction date") {
+        const val = normalizeHeaderKey(cell.v);
+        if (HEADER_ROW_DETECTORS.includes(val)) {
           return r;
         }
       }
@@ -326,6 +394,20 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  // ── Bank/ledger cross-check — BEFORE any row is touched ──
+  const bankCheck = validateBankMatchesLedger(sheet, bank_ledger, xlsx.utils);
+  if (!bankCheck.ok) {
+    return {
+      file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
+      success: false,
+      bank_mismatch: true,
+      detected_bank: bankCheck.detected,
+      expected_bank: bankCheck.expected,
+      message: bankCheck.message
+    };
+  }
   const headerRowIndex = findHeaderRowIndex(sheet);
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
@@ -346,10 +428,13 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     };
   }
 
-  const narrationInputs = rawRows.map((row) => ({
-    narration: String(
-      row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
-    ).trim()
+  // Normalize every raw row ONCE up front so every lookup below goes
+  // through the alias table instead of a hardcoded bracket key. This is
+  // what makes the parser bank-agnostic — see HEADER_ALIASES above.
+  const normalizedRows = rawRows.map(normalizeRow);
+
+  const narrationInputs = normalizedRows.map((normRow) => ({
+    narration: String(pickField(normRow, "narration") ?? "").trim()
   }));
 
   const enriched = await runSemanticEnrichment(narrationInputs);
@@ -358,23 +443,17 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   const transactions = [];
 
   for (const [i, row] of rawRows.entries()) {
-    const withdrawalAmt = parseAmount(
-      row["Withdrawal Amt."] ?? row["Withdrawal Amt"] ?? row["Debit"] ?? row["DR"]
-    );
-    const depositAmt = parseAmount(
-      row["Deposit Amt."] ?? row["Deposit Amt"] ?? row["Credit"] ?? row["CR"]
-    );
+    const normRow = normalizedRows[i];
+
+    const withdrawalAmt = parseAmount(pickField(normRow, "withdrawal"));
+    const depositAmt = parseAmount(pickField(normRow, "deposit"));
 
     if (withdrawalAmt === null && depositAmt === null) continue;
 
-    const txnDate = parseDate(
-      row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"]
-    );
+    const txnDate = parseDate(pickField(normRow, "date"));
     if (!txnDate) continue;
 
-    const narration = String(
-      row["Narration"] ?? row["Description"] ?? row["Particulars"] ?? ""
-    ).trim() || null;
+    const narration = String(pickField(normRow, "narration") ?? "").trim() || null;
 
     const merchantName = enriched[i]?.merchant_name || null;
     let groupKey = enriched[i]?.group_key || null;
@@ -386,17 +465,19 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
       }
     }
 
-    const rawRef = row["Chq./Ref.No."] ?? row["Chq/Ref No."] ?? row["Chq No"] ?? row["Ref No"] ?? "";
+    const rawRef = pickField(normRow, "chequeRef") ?? "";
     const chequeRef = cleanString(rawRef) || null;
 
     transactions.push({
-      transaction_date: String(row["Date"] ?? row["Txn Date"] ?? row["Transaction Date"] ?? "").trim(),
-      value_date: String(row["Value Dt"] ?? row["Value Date"] ?? row["VALUE DATE"] ?? row["Date"] ?? "").trim(),
+      transaction_date: String(pickField(normRow, "date") ?? "").trim(),
+      value_date: String(
+        normRow["value dt"] ?? normRow["value date"] ?? pickField(normRow, "date") ?? ""
+      ).trim(),
       narration: narration || "",
       cheque_ref: chequeRef || "",
       withdrawal: withdrawalAmt !== null ? String(withdrawalAmt) : "",
       deposit: depositAmt !== null ? String(depositAmt) : "",
-      balance: String(row["Closing Balance"] ?? row["Balance"] ?? "").trim(),
+      balance: String(pickField(normRow, "balance") ?? "").trim(),
       merchant_name: merchantName || "",
       group_key: groupKey || ""
     });

@@ -543,8 +543,11 @@ app.use(
   accountRoutes
 );
 
+app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanPdfRoutes); 
 
+app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationRoutes);
 
+app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationPdfRoutes);
 /* =================================
    DEFAULT API
 ================================= */

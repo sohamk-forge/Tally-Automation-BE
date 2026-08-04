@@ -23,11 +23,145 @@ Both voucher.routes.js and pushVoucher.worker.js import from THIS file.
 import axios from "axios";
 import { XMLParser } from "fast-xml-parser";
 import pool from "../db/index.js";
+/*
+====================================
+BANK DETECTION — statement upload validation
+Matches the frontend's fixed 20-bank dropdown. Confirms the uploaded
+statement's actual bank matches the selected bank_ledger BEFORE any
+row is inserted into contra_vouchers.
+====================================
+*/
 
+export const IFSC_PREFIX_TO_BANK = {
+  SBIN: "State Bank of India",
+  ICIC: "ICICI Bank",
+  UTIB: "Axis Bank",
+  PUNB: "Punjab National Bank",
+  BARB: "Bank of Baroda",
+  KKBK: "Kotak Mahindra Bank",
+  CNRB: "Canara Bank",
+  UBIN: "Union Bank of India",
+  IBKL: "IDBI Bank",
+  INDB: "IndusInd Bank",
+  YESB: "Yes Bank",
+  BKID: "Bank of India",
+  CBIN: "Central Bank of India",
+  IOBA: "Indian Overseas Bank",
+  UCBA: "UCO Bank",
+  MAHB: "Bank of Maharashtra",
+  PSIB: "Punjab & Sind Bank",
+  IDFB: "IDFC First Bank",
+  FDRL: "Federal Bank"
+  // NOTE: HDFC deliberately excluded here — its IFSC comes through
+  // mangled in .xls exports (e.g. "H0001782" instead of "HDFC0001782").
+  // HDFC is detected separately below via structural fingerprint.
+};
+
+const BANK_NAME_KEYWORDS = {
+  "State Bank of India": /\bsbi\b|state bank of india/i,
+  "ICICI Bank": /icici/i,
+  "Axis Bank": /\baxis\b/i,
+  "Punjab National Bank": /\bpnb\b|punjab national/i,
+  "Bank of Baroda": /bank of baroda|\bbob\b/i,
+  "Kotak Mahindra Bank": /kotak/i,
+  "Canara Bank": /canara/i,
+  "Union Bank of India": /union bank/i,
+  "IDBI Bank": /\bidbi\b/i,
+  "IndusInd Bank": /indusind/i,
+  "Yes Bank": /\byes bank\b/i,
+  "Bank of India": /\bbank of india\b(?!.{0,15}(central|overseas))/i,
+  "Central Bank of India": /central bank of india/i,
+  "Indian Overseas Bank": /indian overseas/i,
+  "UCO Bank": /\buco bank\b/i,
+  "Bank of Maharashtra": /bank of maharashtra/i,
+  "Punjab & Sind Bank": /punjab\s*&?\s*sind bank/i,
+  "IDFC First Bank": /idfc first/i,
+  "Federal Bank": /federal bank/i
+};
+
+// HDFC-specific fallback: its own .xls export renders the bank name/IFSC
+// with dropped letters (e.g. "H BANK Ltd.", "H0001782"), so we detect it
+// via the structural fingerprint of its statement layout instead.
+function looksLikeHdfc(allText) {
+  const hasBankLtd = /\bBANK Ltd\.?/i.test(allText);
+  const hasCustId = /Cust ID\s*:/i.test(allText);
+  const hasNomination = /Nomination\s*:/i.test(allText);
+  const hasOdLimit = /OD Limit\s*:/i.test(allText);
+  // Require at least 2 of these fingerprints to avoid false positives
+  const hits = [hasBankLtd, hasCustId, hasNomination, hasOdLimit].filter(Boolean).length;
+  return hits >= 2;
+}
+
+export function detectBankFromSheet(sheet, xlsxUtils) {
+  if (!sheet["!ref"]) return { detected: null, evidence: null };
+
+  const range = xlsxUtils.decode_range(sheet["!ref"]);
+  const scanRows = Math.min(range.e.r, 40);
+
+  let allText = "";
+  for (let r = range.s.r; r <= scanRows; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = sheet[xlsxUtils.encode_cell({ r, c })];
+      if (cell && cell.v != null) allText += " " + String(cell.v);
+    }
+  }
+
+  const ifscMatch = allText.match(/\b([A-Z]{4})0[A-Z0-9]{6}\b/);
+  if (ifscMatch && IFSC_PREFIX_TO_BANK[ifscMatch[1]]) {
+    return { detected: IFSC_PREFIX_TO_BANK[ifscMatch[1]], evidence: `IFSC ${ifscMatch[0]}` };
+  }
+
+  if (looksLikeHdfc(allText)) {
+    return { detected: "HDFC Bank", evidence: "HDFC statement layout fingerprint" };
+  }
+
+  for (const [label, pattern] of Object.entries(BANK_NAME_KEYWORDS)) {
+    if (pattern.test(allText)) {
+      return { detected: label, evidence: "bank name text match" };
+    }
+  }
+
+  return { detected: null, evidence: null };
+}
+
+export function validateBankMatchesLedger(sheet, bankLedgerName, xlsxUtils) {
+  const { detected, evidence } = detectBankFromSheet(sheet, xlsxUtils);
+
+  if (!detected) {
+    return { ok: true, verified: false };
+  }
+
+  const normalizedDetected = detected.trim().toLowerCase();
+  const normalizedLedger = String(bankLedgerName || "").trim().toLowerCase();
+
+  const isMatch =
+    normalizedLedger === normalizedDetected ||
+    normalizedLedger.includes(normalizedDetected) ||
+    normalizedDetected.includes(normalizedLedger);
+
+  if (!isMatch) {
+    return {
+      ok: false,
+      verified: true,
+      detected,
+      expected: bankLedgerName,
+      message:
+        `This looks like a ${detected} statement (${evidence}), but you selected ` +
+        `"${bankLedgerName}" as the bank ledger. Please select the correct bank or re-upload the correct statement.`
+    };
+  }
+
+  return { ok: true, verified: true, detected };
+}
 /*
 ====================================
 DATE FORMATTING
 ====================================
+*/
+/*
+==========================================================
+BANK DETECTION
+==========================================================
 */
 
 export function formatVoucherDate(rawDate, voucherId) {
