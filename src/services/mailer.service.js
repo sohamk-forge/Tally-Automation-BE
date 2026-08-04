@@ -13,6 +13,10 @@ const getTransporter = () => {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASSWORD,
     },
+    // This host can't route outbound IPv6 — without this, DNS sometimes
+    // resolves smtp.gmail.com to an IPv6 address and the connection fails
+    // with ENETUNREACH.
+    family: 4,
   });
 
   return transporter;
