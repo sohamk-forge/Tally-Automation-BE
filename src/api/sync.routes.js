@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
   import express from "express";
     import pool from "../db/index.js";
     import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
@@ -58,23 +59,23 @@
 
     const allowedTables = [
 
-      "app_test.companies",
-      "app_test.ledgers",
-      "app_test.sundry_creditors",
-      "app_test.sundry_debtors",
-      "app_test.bank_accounts",
-      "app_test.vouchers",
-      "app_test.parent_groups",
-      "app_test.group_balances",
-      "app_test.all_parent_groups",
-      "app_test.profit_loss",
-      "app_test.stock_group_summary",
-      "app_test.sales_items",
-      "app_test.units",
-      "app_test.all_ledger_details",
-      "app_test.profit_loss_summary",
-        "app_test.company_details",
-      "app_test.godown_details" 
+      `${DB_SCHEMA}.companies`,
+      `${DB_SCHEMA}.ledgers`,
+      `${DB_SCHEMA}.sundry_creditors`,
+      `${DB_SCHEMA}.sundry_debtors`,
+      `${DB_SCHEMA}.bank_accounts`,
+      `${DB_SCHEMA}.vouchers`,
+      `${DB_SCHEMA}.parent_groups`,
+      `${DB_SCHEMA}.group_balances`,
+      `${DB_SCHEMA}.all_parent_groups`,
+      `${DB_SCHEMA}.profit_loss`,
+      `${DB_SCHEMA}.stock_group_summary`,
+      `${DB_SCHEMA}.sales_items`,
+      `${DB_SCHEMA}.units`,
+      `${DB_SCHEMA}.all_ledger_details`,
+      `${DB_SCHEMA}.profit_loss_summary`,
+        `${DB_SCHEMA}.company_details`,
+      `${DB_SCHEMA}.godown_details` 
 
     ];
     /* ===================================================
@@ -113,7 +114,7 @@
     async function getCompanyId(company, client = null) {
       const dbClient = client || pool;
       const result = await dbClient.query(
-        `SELECT id FROM app_test.companies WHERE name = $1`,
+        `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
         [company]
       );
       return result.rows[0]?.id || null;
@@ -217,13 +218,13 @@
     
     // Generate stable fallback GUID if missing
     let finalGuid = guid;
-    if (!finalGuid && tableName !== 'app_test.profit_loss') {
+    if (!finalGuid && tableName !== `${DB_SCHEMA}.profit_loss`) {
       const companyIndex = columns.indexOf('company_name');
       const nameIndex = columns.indexOf('name') !== -1 ? columns.indexOf('name') : 
                         (columns.indexOf('ledger_name') !== -1 ? columns.indexOf('ledger_name') : -1);
       const uniqueValue = nameIndex !== -1 && data[nameIndex] ? data[nameIndex] : 
                         (columns.indexOf('group_name') !== -1 ? data[columns.indexOf('group_name')] : 'unknown');
-      finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace('app_test.', ''));
+      finalGuid = generateFallbackGuid(data[companyIndex] || 'unknown', uniqueValue, tableName.replace(`${DB_SCHEMA}.`, ''));
       console.log(`⚠️ Generated stable fallback GUID for ${tableName}: ${finalGuid}`);
     }
     
@@ -553,7 +554,7 @@
           const financial_year_end = item?.endingAt ? String(item.endingAt).slice(0, 4) : null;
 
           const result = await upsertRecord(
-            "app_test.companies", guid, masterId, alterId,
+            `${DB_SCHEMA}.companies`, guid, masterId, alterId,
             [name, financial_year_start, financial_year_end],
             ["name", "financial_year_start", "financial_year_end"],
             client
@@ -757,7 +758,7 @@
 
             // ✅ Only pass columns your table ACTUALLY has
             const result = await upsertRecord(
-              "app_test.ledgers",
+              `${DB_SCHEMA}.ledgers`,
               guid,
               null,
               null,
@@ -929,7 +930,7 @@
         : "Cr";
           
           const result = await upsertRecord(
-            "app_test.bank_accounts", guid, masterId, alterId,
+            `${DB_SCHEMA}.bank_accounts`, guid, masterId, alterId,
             [
               companyId,
               company,
@@ -1238,7 +1239,7 @@
       const upsertResult = await voucherClient.query(
 
         `
-        INSERT INTO app_test.vouchers (
+        INSERT INTO ${DB_SCHEMA}.vouchers (
 
           guid,
           master_id,
@@ -1353,7 +1354,7 @@
           await voucherClient.query(
 
             `
-            INSERT INTO app_test.sales_items (
+            INSERT INTO ${DB_SCHEMA}.sales_items (
 
               company_id,
               company_name,
@@ -1589,7 +1590,7 @@
           const alterId = group?.ALTERID || group?.$?.ALTERID || null;
           
           const result = await upsertRecord(
-            "app_test.parent_groups", guid, masterId, alterId,
+            `${DB_SCHEMA}.parent_groups`, guid, masterId, alterId,
             [companyId, company, groupName],
             ["company_id", "company_name", "group_name"],
             client
@@ -1677,7 +1678,7 @@
 
       const upsertGroup = async (g) => {
         const result = await upsertRecord(
-          "app_test.group_balances", g.guid, g.masterId, g.alterId,
+          `${DB_SCHEMA}.group_balances`, g.guid, g.masterId, g.alterId,
           [companyId, company, g.group_name, g.parent_group, g.opening_balance, g.closing_balance],
           ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
           client
@@ -1755,7 +1756,7 @@
           const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
           
           const result = await upsertRecord(
-            "app_test.all_parent_groups", guid, masterId, alterId,
+            `${DB_SCHEMA}.all_parent_groups`, guid, masterId, alterId,
             [
               companyId,
               company,
@@ -1847,7 +1848,7 @@
           GET COMPANY ID
         ===================================== */
         const companyResult = await client.query(
-          `SELECT id FROM app_test.companies WHERE name = $1`,
+          `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
           [company]
         );
 
@@ -2027,7 +2028,7 @@
         const alterId = 1;
 
         const result = await upsertRecord(
-          "app_test.profit_loss",
+          `${DB_SCHEMA}.profit_loss`,
           guid,
           null,
           alterId,
@@ -2248,7 +2249,7 @@
             const existing = await client.query(
               `
               SELECT id
-              FROM app_test.stock_group_summary
+              FROM ${DB_SCHEMA}.stock_group_summary
               WHERE company_name = $1
               AND item_name = $2
               `,
@@ -2261,7 +2262,7 @@
             if (existing.rows.length > 0) {
               await client.query(
                 `
-                UPDATE app_test.stock_group_summary
+                UPDATE ${DB_SCHEMA}.stock_group_summary
                 SET
                   company_id = $1,
                   group_name = $2,
@@ -2283,7 +2284,7 @@
             ================================= */
             await client.query(
               `
-              INSERT INTO app_test.stock_group_summary (
+              INSERT INTO ${DB_SCHEMA}.stock_group_summary (
                 company_id,
                 company_name,
                 group_name,
@@ -2425,7 +2426,7 @@
 
         await pool.query(
           `
-          INSERT INTO app_test.companies
+          INSERT INTO ${DB_SCHEMA}.companies
           (
             name,
             financial_year_start,
@@ -2454,7 +2455,7 @@
 
         const result = await pool.query(
           `
-          INSERT INTO app_test.job_logs
+          INSERT INTO ${DB_SCHEMA}.job_logs
           (
             job_type,
             status,
@@ -2543,7 +2544,7 @@
         /* =====================================
           FIND THIS USER'S SYNCED COMPANY
           Joins through connector_pairing_tokens since
-          app_test.companies has no user_id column —
+          ${DB_SCHEMA}.companies has no user_id column —
           the pairing token is the only reliable link
           between a user and the company they've synced.
         ===================================== */
@@ -2555,8 +2556,8 @@
             c.name,
             c.financial_year_start,
             c.financial_year_end
-          FROM app_test.companies c
-          JOIN app_test.connector_pairing_tokens cpt
+          FROM ${DB_SCHEMA}.companies c
+          JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
             ON cpt.company_id = c.id
           WHERE cpt.user_id = $1
             AND cpt.is_used = TRUE
@@ -2594,7 +2595,7 @@
 
         const result = await pool.query(
           `
-          INSERT INTO app_test.job_logs
+          INSERT INTO ${DB_SCHEMA}.job_logs
           (
               job_type,
               status,
@@ -2797,7 +2798,7 @@
             const result =
               await upsertRecord(
 
-                "app_test.units",
+                `${DB_SCHEMA}.units`,
 
                 guid,
 
@@ -3133,7 +3134,7 @@
           
           // Use upsertRecord like working APIs
           const result = await upsertRecord(
-            "app_test.all_ledger_details",
+            `${DB_SCHEMA}.all_ledger_details`,
             guid,
             masterId,
             alterId,
@@ -3315,7 +3316,7 @@
             const existing = await client.query(
               `
               SELECT id
-              FROM app_test.company_purchase_sales_ledgers
+              FROM ${DB_SCHEMA}.company_purchase_sales_ledgers
               WHERE company_id = $1
               AND ledger_name = $2
               `,
@@ -3329,7 +3330,7 @@
 
               await client.query(
                 `
-                UPDATE app_test.company_purchase_sales_ledgers
+                UPDATE ${DB_SCHEMA}.company_purchase_sales_ledgers
                 SET
                   parent_group = $1,
                   ledger_type  = $2,
@@ -3349,7 +3350,7 @@
               ================================ */
               await client.query(
                 `
-                INSERT INTO app_test.company_purchase_sales_ledgers
+                INSERT INTO ${DB_SCHEMA}.company_purchase_sales_ledgers
                 (
                   company_id,
                   ledger_name,
@@ -3487,7 +3488,7 @@
 
           const existing = await client.query(
             `SELECT id
-            FROM app_test.godown_details
+            FROM ${DB_SCHEMA}.godown_details
             WHERE company_id = $1
               AND LOWER(TRIM(godown_name)) = LOWER(TRIM($2))
             LIMIT 1`,
@@ -3497,7 +3498,7 @@
           if (existing.rows.length) {
 
             await client.query(
-              `UPDATE app_test.godown_details
+              `UPDATE ${DB_SCHEMA}.godown_details
               SET updated_at = NOW()
               WHERE id = $1`,
               [existing.rows[0].id]
@@ -3509,7 +3510,7 @@
           } else {
 
             await client.query(
-              `INSERT INTO app_test.godown_details
+              `INSERT INTO ${DB_SCHEMA}.godown_details
               (company_id, company_name, godown_name, created_at, updated_at)
               VALUES ($1, $2, $3, NOW(), NOW())`,
               [companyId, company, godownName]
@@ -3587,8 +3588,8 @@
             jl.error_message,
             c.id as company_id,
             c.name as company_name
-        FROM app_test.job_logs jl
-        JOIN app_test.companies c
+        FROM ${DB_SCHEMA}.job_logs jl
+        JOIN ${DB_SCHEMA}.companies c
           ON c.name = jl.payload->>'company'
         WHERE c.id = $1
         ORDER BY jl.id DESC
@@ -3635,7 +3636,7 @@
           error_message,
           started_at,
           completed_at
-        FROM app_test.job_logs
+        FROM ${DB_SCHEMA}.job_logs
         WHERE id = $1
         `,
         [jobId]
@@ -4120,7 +4121,7 @@
       // ============================================
       await client.query(
         `
-        INSERT INTO app_test.company_details
+        INSERT INTO ${DB_SCHEMA}.company_details
         (
           company_id,
           company_name,
@@ -4319,7 +4320,7 @@
       const companyResult = await client.query(
         `
         SELECT name AS company_name
-  FROM app_test.companies
+  FROM ${DB_SCHEMA}.companies
   WHERE id = $1
         `,
         [companyId]
@@ -4338,7 +4339,7 @@
       if (fromDate && toDate) {
         query = `
           SELECT *
-          FROM app_test.profit_loss_summary
+          FROM ${DB_SCHEMA}.profit_loss_summary
           WHERE company_id = $1
             AND from_date = $2
             AND to_date = $3
@@ -4347,7 +4348,7 @@
       } else {
         query = `
           SELECT *
-          FROM app_test.profit_loss_summary
+          FROM ${DB_SCHEMA}.profit_loss_summary
           WHERE company_id = $1
           ORDER BY updated_at DESC
           LIMIT 1
