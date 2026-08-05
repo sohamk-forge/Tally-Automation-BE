@@ -78,12 +78,10 @@ function buildHtml(quotation) {
     total_tax,
     grand_total,
     terms_conditions,
-    status,
     items = [],
   } = quotation;
 
   const isInterstate = Number(total_igst) > 0;
-  const supplyTypeLabel = isInterstate ? "Interstate (IGST)" : "Intrastate (CGST + SGST)";
 
   // Discount total derived from items (gross - taxable), since it isn't
   // persisted as its own column on the quotation header.
@@ -113,10 +111,13 @@ function buildHtml(quotation) {
       .page {
   box-sizing: border-box;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   border: 1.5px solid #374151;
   border-radius: 6px;
   padding: 40px 30px 24px 30px;
 }
+      .page-content { flex: 1 0 auto; }
 
       /* ---------- Header ---------- */
       .header-top { text-align: right; margin-bottom: 2px; }
@@ -194,8 +195,9 @@ function buildHtml(quotation) {
       .narration p { margin: 4px 0 0; color: #374151; font-size: 12px; }
 
       /* ---------- Footer ---------- */
-      .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 28px 0 12px; }
-      .footer { display: flex; justify-content: space-between; font-size: 11px; color: #9ca3af; }
+      .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 0 0 12px; }
+      .footer { text-align: center; font-size: 11px; color: #9ca3af; padding-bottom: 8px; }
+      .footer-wrap { margin-top: auto; padding-top: 28px; }
     </style>
   </head>
   <body>
@@ -227,7 +229,6 @@ function buildHtml(quotation) {
       <div class="bill-to-name">${escapeHtml(customer_name)}</div>
       ${customer_address ? `<div class="muted-line">${escapeHtml(customer_address)}</div>` : ""}
       ${customer_gstin ? `<div class="muted-line">GSTIN: ${escapeHtml(customer_gstin)}</div>` : ""}
-      <div class="muted-line">Supply Type: ${supplyTypeLabel}</div>
     </div>
 
     <table class="items">
@@ -261,10 +262,11 @@ function buildHtml(quotation) {
       <p>${escapeHtml(terms_conditions)}</p>
     </div>` : ""}
 
-    <div class="footer-divider"></div>
-    <div class="footer">
-      <div>Status: ${escapeHtml((status || "DRAFT").toUpperCase())}</div>
-      <div>This is a computer generated quotation.</div>
+    <div class="footer-wrap">
+      <div class="footer-divider"></div>
+      <div class="footer">
+        <div>This is a computer generated quotation.</div>
+      </div>
     </div>
 
   </div>

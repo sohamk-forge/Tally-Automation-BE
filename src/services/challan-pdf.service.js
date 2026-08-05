@@ -107,7 +107,6 @@ function buildHtml(challan) {
     customer_gstin,
     supply_type,
     narration,
-    status,
     items = [],
   } = challan;
 
@@ -121,7 +120,6 @@ function buildHtml(challan) {
   });
 
   const isInterstate = supply_type === "interstate";
-  const supplyTypeLabel = isInterstate ? "Interstate (IGST)" : "Intrastate (CGST + SGST)";
 
   return `
   <!DOCTYPE html>
@@ -144,10 +142,13 @@ function buildHtml(challan) {
       .page {
   box-sizing: border-box;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   border: 1.5px solid #374151;
   border-radius: 6px;
   padding: 40px 30px 24px 30px;
 }
+      .page-content { flex: 1 0 auto; }
 
       /* ---------- Header ---------- */
       .header-top { text-align: right; margin-bottom: 2px; }
@@ -225,8 +226,9 @@ function buildHtml(challan) {
       .narration p { margin: 4px 0 0; color: #374151; font-size: 12px; }
 
       /* ---------- Footer ---------- */
-      .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 28px 0 12px; }
-      .footer { display: flex; justify-content: space-between; font-size: 11px; color: #9ca3af; }
+      .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 0 0 12px; }
+      .footer { text-align: center; font-size: 11px; color: #9ca3af; padding-bottom: 8px; }
+      .footer-wrap { margin-top: auto; padding-top: 28px; }
     </style>
   </head>
   <body>
@@ -257,7 +259,6 @@ function buildHtml(challan) {
       <div class="bill-to-name">${esc(customer_name || "-")}</div>
       ${customer_address ? `<div class="muted-line">${esc(customer_address)}</div>` : ""}
       ${customer_gstin ? `<div class="muted-line">GSTIN: ${esc(customer_gstin)}</div>` : ""}
-      <div class="muted-line">Supply Type: ${supplyTypeLabel}</div>
     </div>
 
     <table class="items">
@@ -291,10 +292,11 @@ function buildHtml(challan) {
       <p>${esc(narration)}</p>
     </div>` : ""}
 
-    <div class="footer-divider"></div>
-    <div class="footer">
-      <div>Status: ${esc((status || "DRAFT").toUpperCase())}</div>
-      <div>This is a computer generated challan.</div>
+    <div class="footer-wrap">
+      <div class="footer-divider"></div>
+      <div class="footer">
+        <div>This is a computer generated challan.</div>
+      </div>
     </div>
 
   </div>

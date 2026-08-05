@@ -182,7 +182,8 @@ import challanPdfRoutes from "./api/challanpdf.routes.js";
 import quotationRoutes from "./api/quotation.routes.js";
 import quotationPdfRoutes from "./api/quotationpdf.routes.js";
 
-
+import companyLogoRoutes
+from "./api/companyLogo.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -550,6 +551,13 @@ app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanPdfRoutes);
 app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationRoutes);
 
 app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationPdfRoutes);
+
+
+app.use(
+  "/api/companies",
+  ...requireSessionOrApiKey(),
+  companyLogoRoutes
+);
 /* =================================
    DEFAULT API
 ================================= */
