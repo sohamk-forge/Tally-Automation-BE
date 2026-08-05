@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { OD_BANK_QUEUE_NAME } from "../queues/odBank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { createOdBankXML } from "../services/pushXmlBuilder.js";
 
 const connection = new IORedis({
@@ -36,15 +37,20 @@ function isTemporaryOdBankError(error) {
 const worker = new Worker(
   OD_BANK_QUEUE_NAME,
   async (job) => {
-    // Fixed: the producer (push-od-bank route) enqueues { odBankId }
-    // (capital B), but this was destructuring { odbankId } (lowercase b)
-    // — a case mismatch, so job.data.odbankId was always undefined even
-    // though the correct id was right there under a different key.
-    const { odBankId } = job.data;
+    const { odBankId, userId } = job.data;
 
-    console.log(`Processing OD/OC bank ID ${odBankId}`);
+    if (!odBankId) {
+      throw new Error("odBankId is required");
+    }
 
-    // STEP 1: GET OD/OC BANK FROM DB
+    if (!userId) {
+      throw new Error(`Missing userId for OD/OC bank ${odBankId}`);
+    }
+
+    console.log(
+      `Processing OD/OC bank ID ${odBankId} requested by user ${userId}`
+    );
+
     const result = await pool.query(
       `SELECT * FROM app_test.bank_od_accounts WHERE id = $1`,
       [odBankId]
@@ -55,14 +61,12 @@ const worker = new Worker(
       throw new Error(`OD/OC bank ${odBankId} not found`);
     }
 
-    // STEP 2: MARK AS PROCESSING
     await pool.query(
       `UPDATE app_test.bank_od_accounts SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [odBankId]
     );
 
     try {
-      // STEP 3: GENERATE XML
       const xml = createOdBankXML({
         company: row.company_name,
         ledger_name: row.ledger_name,
@@ -86,46 +90,53 @@ const worker = new Worker(
 
       console.log(`📤 OD/OC bank XML generated: ${row.bank_name}`);
 
-      // STEP 4: GET CONNECTOR PAIRING
-      const pairingResult = await pool.query(
-        `
-        SELECT user_id
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [row.company_id]
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
       );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(`No connector pairing found for OD/OC bank ${odBankId}`);
+      if (!connector) {
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
+        );
       }
 
-      // STEP 5: CREATE CONNECTOR JOB
+      console.log(
+        `🔗 OD/OC Bank connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
+
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
+        userId: connector.user_id,
         jobType: 'odbank',
         requestXml: xml,
         payload: {
           odbank_id: odBankId,
           company_id: row.company_id,
-          bank_name: row.bank_name
+          bank_name: row.bank_name,
+          requested_by_user_id: userId
         }
       });
 
-      // STEP 6: MARK AS PENDING
       await pool.query(
-        `UPDATE app_test.bank_od_accounts SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+        `
+        UPDATE app_test.bank_od_accounts
+        SET
+          sync_status = 'pending',
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1
+        `,
         [odBankId]
       );
 
-      console.log(`✅ OD/OC bank job created for connector: ${row.bank_name}`, {
-        jobId: connectorJob.id,
-        userId: pairing.user_id
-      });
+      console.log(
+        `✅ OD/OC bank job created for connector: ${row.bank_name}`,
+        {
+          jobId: connectorJob.id,
+          actingUserId: userId,
+          connectorUserId: connector.user_id
+        }
+      );
 
       return {
         odBankId,

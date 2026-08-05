@@ -306,6 +306,10 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
          can't silently skip the chain.
        - The opening_quantity > 0 guard stops plain item creations from
          queueing a pointless alter that pushes zeros to Tally.
+       - userId is carried forward from the original create job's payload
+         (requested_by_user_id), so pushAlterStockItem.worker.js can route
+         to the SAME user's connector as the create job — not an ambiguous
+         "most recently paired token" lookup.
        - Wrapped in its own try/catch: the result is already committed, so a
          Redis hiccup must not turn a recorded result into a 500 and make the
          connector retry a job that already succeeded.
@@ -314,6 +318,7 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     if (job.job_type === "stock_item") {
       try {
         const stockItemId = job.payload?.stock_item_id;
+        const requestedByUserId = job.payload?.requested_by_user_id;
 
         if (stockItemId) {
           const { rows } = await pool.query(
@@ -327,16 +332,26 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
           );
 
           if (Number(rows[0]?.opening_quantity) > 0) {
-            await alterStockItemQueue.add(
-              "push-alter-stock-item",
-              { stockItemId },
-              {
-                ...ALTER_STOCK_ITEM_JOB_OPTIONS,
-                jobId: `${stockItemId}-${Date.now()}`
-              }
-            );
 
-            console.log(`🔗 Opening stock chained for stock item ${stockItemId}`);
+            if (!requestedByUserId) {
+              console.error(
+                `⚠️ Cannot chain opening stock for item ${stockItemId} — original job payload missing requested_by_user_id`
+              );
+            } else {
+              await alterStockItemQueue.add(
+                "push-alter-stock-item",
+                {
+                  stockItemId,
+                  userId: requestedByUserId
+                },
+                {
+                  ...ALTER_STOCK_ITEM_JOB_OPTIONS,
+                  jobId: `${stockItemId}-${Date.now()}`
+                }
+              );
+
+              console.log(`🔗 Opening stock chained for stock item ${stockItemId} (User: ${requestedByUserId})`);
+            }
           }
         }
       } catch (chainError) {

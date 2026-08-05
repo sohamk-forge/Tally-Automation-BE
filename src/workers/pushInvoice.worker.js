@@ -5,6 +5,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { PURCHASE_QUEUE_NAME } from "../queues/purchase.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateXml } from "../services/xmlGenerator.js";
 
 const connection = new IORedis({
@@ -38,11 +39,18 @@ function isTemporaryInvoiceError(error) {
 const worker = new Worker(
   PURCHASE_QUEUE_NAME,
   async (job) => {
-    const { invoiceId } = job.data;
+    const { invoiceId, userId } = job.data;
 
-    console.log(`Processing purchase invoice ID ${invoiceId}`);
+    if (!invoiceId) {
+      throw new Error("invoiceId is required");
+    }
 
-    // STEP 1: GET INVOICE FROM DB
+    if (!userId) {
+      throw new Error(`Missing userId for purchase invoice ${invoiceId}`);
+    }
+
+    console.log(`Processing purchase invoice ID ${invoiceId} requested by user ${userId}`);
+
     const result = await pool.query(
       `SELECT * FROM app_test.invoice_extractions WHERE id = $1`,
       [invoiceId]
@@ -53,14 +61,12 @@ const worker = new Worker(
       throw new Error(`Invoice ${invoiceId} not found`);
     }
 
-    // STEP 2: MARK AS PROCESSING
     await pool.query(
       `UPDATE app_test.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [invoiceId]
     );
 
     try {
-      // STEP 3A: FETCH LEDGER MAPPING ✅
       const mappingResult = await pool.query(
         `SELECT * FROM app_test.company_ledger_mappings WHERE company_id = $1`,
         [row.company_id]
@@ -72,7 +78,7 @@ const worker = new Worker(
       }
 
       console.log(`📋 Ledger mapping loaded for company ${row.company_id}:`, {
-        purchase_ledger: mapping.purchase_ledger,        // ✅ FIXED!
+        purchase_ledger: mapping.purchase_ledger,
         invoice_parent_group: mapping.invoice_parent_group,
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
@@ -80,38 +86,30 @@ const worker = new Worker(
         rounded_off_ledger: mapping.rounded_off_ledger
       });
 
-      // STEP 3B: PARSE INVOICE DATA
       const invoice = typeof row.raw_json === "string"
         ? JSON.parse(row.raw_json)
         : row.raw_json;
 
-      // STEP 3C: GENERATE XML WITH ALL FIXES ✅
       const xml = await generateXml({
         ...invoice,
 
-        // ✅ Company
         company: row.company_name,
 
-        // ✅ Fix Bug 2: Python expects "vendor_name" but invoice has "customer_name"
         vendor_name: invoice.customer_name || invoice.vendor_name || "",
         vendor_gstin: invoice.gstin || invoice.vendor_gstin || "",
 
-        // ✅ Fix Bug 1: Use purchase_ledger from mapping (actual ledger, not group!)
         purchase_ledger: mapping.purchase_ledger,
 
-        // ✅ Fix Bug 3: Pass unit from item (no hardcoding!)
         line_items: (invoice.line_items || []).map(item => ({
           ...item,
           unit: item.unit || ""
         })),
 
-        // ✅ Tax ledgers from mapping
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
         igst_ledger: mapping.igst_ledger,
         rounded_off_ledger: mapping.rounded_off_ledger,
 
-        // ✅ Reference fields
         reference_date: row.invoice_date,
         reference_number: row.invoice_no,
         voucher_type: "Purchase Invoice"
@@ -120,52 +118,49 @@ const worker = new Worker(
       console.log(`📤 Purchase invoice XML generated: ${row.invoice_no}`);
       console.log(`🔍 XML:\n${xml}`);
 
-      // STEP 4: GET CONNECTOR PAIRING
-      // Fixed: query direct from connector_pairing_tokens by company_id,
-      // filtered to the used token, ordered to the most recent pairing —
-      // same fix already applied in pushLedger/pushSalesInvoice/
-      // pushStockItem/pushBank workers. The old join (invoice_extractions
-      // -> companies -> connector_pairing_tokens) had no ORDER BY/LIMIT/
-      // is_used filter, so with multiple pairing tokens sharing the same
-      // company_id it could return a stale user_id nondeterministically.
-      const pairingResult = await pool.query(
-        `
-        SELECT user_id
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [row.company_id]
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
       );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(`No connector pairing found for invoice ${invoiceId}`);
+      if (!connector) {
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
+        );
       }
 
-      // STEP 5: CREATE CONNECTOR JOB
+      console.log(
+        `🔗 Purchase invoice connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
+
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
+        userId: connector.user_id,
         jobType: 'purchase_invoice',
         requestXml: xml,
         payload: {
           invoice_id: invoiceId,
           company_id: row.company_id,
-          invoice_no: row.invoice_no
+          invoice_no: row.invoice_no,
+          requested_by_user_id: userId
         }
       });
 
-      // STEP 6: MARK AS PENDING
       await pool.query(
-        `UPDATE app_test.invoice_extractions SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+        `
+        UPDATE app_test.invoice_extractions
+        SET
+          sync_status = 'pending',
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1
+        `,
         [invoiceId]
       );
 
       console.log(`✅ Purchase invoice job created for connector: ${row.invoice_no}`, {
         jobId: connectorJob.id,
-        userId: pairing.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {

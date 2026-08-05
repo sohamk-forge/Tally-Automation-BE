@@ -1,6 +1,8 @@
 import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 import {
   odBankQueue,
   OD_BANK_JOB_OPTIONS,
@@ -9,8 +11,20 @@ import {
 
 const router = express.Router();
 
-router.post("/push-od-bank", async (req, res) => {
+router.post(
+  "/push-od-bank",
+  verifySession(),
+  async (req, res) => {
   try {
+    const userId = await getLocalUserId(req.session.getUserId());
+
+    if (!userId) {
+      return res.status(404).json({
+        status: "error",
+        message: "No profile found for this account"
+      });
+    }
+
     const {
       company,
       ledger_name,
@@ -32,10 +46,6 @@ router.post("/push-od-bank", async (req, res) => {
       email
     } = req.body;
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 1: VALIDATE REQUIRED FIELDS
-    // ─────────────────────────────────────────────────────────────
-
     if (!company?.trim()) {
       return res.status(400).json({
         error: "Company is required"
@@ -53,10 +63,6 @@ router.post("/push-od-bank", async (req, res) => {
         error: "Account type is required"
       });
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // STEP 2: GET COMPANY ID ✅
-    // ─────────────────────────────────────────────────────────────
 
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
@@ -79,10 +85,6 @@ router.post("/push-od-bank", async (req, res) => {
 
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
-
-    // ─────────────────────────────────────────────────────────────
-    // STEP 3: INSERT OD/OC BANK WITH COMPANY_ID ✅
-    // ─────────────────────────────────────────────────────────────
 
     console.log(`📝 Creating new OD/OC bank: ${bank_name}`);
 
@@ -141,39 +143,38 @@ router.post("/push-od-bank", async (req, res) => {
       RETURNING id
       `,
       [
-        companyId,                    // $1 ✅ COMPANY_ID
-        company?.trim(),              // $2
-        ledger_name?.trim(),          // $3
-        account_type?.trim(),         // $4
-        opening_balance || 0,         // $5
-        od_limit || 0,                // $6
-        bank_name || "",              // $7
-        branch_name || "",            // $8
-        account_holder || "",         // $9
-        account_number || "",         // $10
-        ifsc_code || "",              // $11
-        swift_code || "",             // $12
-        address || "",                // $13
-        state || "",                  // $14
-        country || "India",           // $15
-        pincode || "",                // $16
-        contact_person || "",         // $17
-        mobile || "",                 // $18
-        email || "",                  // $19
-        "pending"                     // $20
+        companyId,
+        company?.trim(),
+        ledger_name?.trim(),
+        account_type?.trim(),
+        opening_balance || 0,
+        od_limit || 0,
+        bank_name || "",
+        branch_name || "",
+        account_holder || "",
+        account_number || "",
+        ifsc_code || "",
+        swift_code || "",
+        address || "",
+        state || "",
+        country || "India",
+        pincode || "",
+        contact_person || "",
+        mobile || "",
+        email || "",
+        "pending"
       ]
     );
 
     const odBankId = insertResult.rows[0].id;
     console.log(`✅ OD/OC Bank created: ID ${odBankId}`);
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 4: QUEUE THE JOB
-    // ─────────────────────────────────────────────────────────────
-
     const job = await odBankQueue.add(
       "push-od-bank",
-      { odBankId },
+      {
+        odBankId,
+        userId
+      },
       {
         ...OD_BANK_JOB_OPTIONS,
         jobId: getOdBankJobId(odBankId)

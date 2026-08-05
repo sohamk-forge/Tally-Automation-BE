@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { BANK_QUEUE_NAME } from "../queues/bank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { createBankLedgerXML } from "../services/pushXmlBuilder.js";
 
 const connection = new IORedis({
@@ -36,11 +37,18 @@ function isTemporaryBankError(error) {
 const worker = new Worker(
   BANK_QUEUE_NAME,
   async (job) => {
-    const { bankId } = job.data;
+    const { bankId, userId } = job.data;
 
-    console.log(`Processing bank ID ${bankId}`);
+    if (!bankId) {
+      throw new Error("bankId is required");
+    }
 
-    // STEP 1: GET BANK FROM DB
+    if (!userId) {
+      throw new Error(`Missing userId for bank ${bankId}`);
+    }
+
+    console.log(`Processing bank ID ${bankId} requested by user ${userId}`);
+
     const result = await pool.query(
       `SELECT * FROM app_test.push_bank WHERE id = $1`,
       [bankId]
@@ -51,14 +59,12 @@ const worker = new Worker(
       throw new Error(`Bank ${bankId} not found`);
     }
 
-    // STEP 2: MARK AS PROCESSING
     await pool.query(
       `UPDATE app_test.push_bank SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [bankId]
     );
 
     try {
-      // STEP 3: GENERATE XML (no Tally calls here!) ✅
       const xml = createBankLedgerXML({
         company: row.company_name,
         ledger_name: row.ledger_name,
@@ -81,52 +87,49 @@ const worker = new Worker(
 
       console.log(`📤 Bank XML generated: ${row.bank_name}`);
 
-      // STEP 4: GET CONNECTOR PAIRING
-      // Fixed: query direct from connector_pairing_tokens by company_id,
-      // filtered to the used token, ordered to the most recent pairing —
-      // same fix already applied in pushLedger/pushSalesInvoice/pushStockItem
-      // workers. The old join (push_bank -> companies ->
-      // connector_pairing_tokens) had no ORDER BY/LIMIT/is_used filter, so
-      // with multiple pairing tokens sharing the same company_id it could
-      // return a stale user_id nondeterministically.
-      const pairingResult = await pool.query(
-        `
-        SELECT user_id
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [row.company_id]
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
       );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(`No connector pairing found for bank ${bankId}`);
+      if (!connector) {
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
+        );
       }
 
-      // STEP 5: CREATE CONNECTOR JOB (instead of calling Tally directly!) ✅
+      console.log(
+        `🔗 Bank connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
+
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
+        userId: connector.user_id,
         jobType: 'bank',
         requestXml: xml,
         payload: {
           bank_id: bankId,
           company_id: row.company_id,
-          bank_name: row.bank_name
+          bank_name: row.bank_name,
+          requested_by_user_id: userId
         }
       });
 
-      // STEP 6: MARK AS PENDING
       await pool.query(
-        `UPDATE app_test.push_bank SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+        `
+        UPDATE app_test.push_bank
+        SET
+          sync_status = 'pending',
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1
+        `,
         [bankId]
       );
 
       console.log(`✅ Bank job created for connector: ${row.bank_name}`, {
         jobId: connectorJob.id,
-        userId: pairing.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {

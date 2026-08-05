@@ -1117,43 +1117,66 @@ ${parentXML}
   openingValue
 }) => {
 
+  const qty = Number(openingQuantity) || 0;
+  const rate = Number(openingRate) || 0;
+  const value = Number(openingValue) || 0;
+
+  const finalUnit = String(unit || "Nos").trim();
+
   return `
 <ENVELOPE>
-    <HEADER>
-        <VERSION>1</VERSION>
-        <TALLYREQUEST>Import</TALLYREQUEST>
-        <TYPE>Data</TYPE>
-        <ID>All Masters</ID>
-    </HEADER>
 
-    <BODY>
-        <DESC>
-            <STATICVARIABLES>
-                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
-            </STATICVARIABLES>
-        </DESC>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
 
-        <DATA>
-            <TALLYMESSAGE xmlns:UDF="TallyUDF">
+  <BODY>
 
-                <STOCKITEM
-                    NAME="${itemName}"
-                    ACTION="Alter"
-                >
+    <IMPORTDATA>
 
-                    <NAME>${itemName}</NAME>
+      <REQUESTDESC>
 
-                    <OPENINGBALANCE>${openingQuantity}</OPENINGBALANCE>
+        <REPORTNAME>All Masters</REPORTNAME>
 
-                    <OPENINGRATE>${openingRate}/${unit}</OPENINGRATE>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+        </STATICVARIABLES>
 
-                    <OPENINGVALUE>${openingValue}</OPENINGVALUE>
+      </REQUESTDESC>
 
-                </STOCKITEM>
+      <REQUESTDATA>
 
-            </TALLYMESSAGE>
-        </DATA>
-    </BODY>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+          <STOCKITEM
+            NAME="${escapeXml(itemName)}"
+            ACTION="Alter"
+          >
+
+            <NAME>${escapeXml(itemName)}</NAME>
+
+            <OPENINGBALANCE>
+              ${qty} ${escapeXml(finalUnit)}
+            </OPENINGBALANCE>
+
+            <OPENINGRATE>
+              ${rate}/${escapeXml(finalUnit)}
+            </OPENINGRATE>
+
+            <OPENINGVALUE>
+              ${value}
+            </OPENINGVALUE>
+
+          </STOCKITEM>
+
+        </TALLYMESSAGE>
+
+      </REQUESTDATA>
+
+    </IMPORTDATA>
+
+  </BODY>
+
 </ENVELOPE>
 `;
 };

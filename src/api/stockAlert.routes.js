@@ -1,6 +1,9 @@
 import express from "express";
 
 import pool from "../db/index.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
+// import { checkCompanyAccess } from "../utils/companyAccess.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -20,9 +23,22 @@ router.post(
 
   "/push/stock-alert",
 
+  verifySession(),
+
   async (req, res) => {
 
     try {
+
+      const userId = await getLocalUserId(
+        req.session.getUserId()
+      );
+
+      if (!userId) {
+        return res.status(404).json({
+          status: "error",
+          message: "No profile found for this account"
+        });
+      }
 
       const data =
         req.body;
@@ -66,8 +82,22 @@ router.post(
 
         );
 
-      const companyId =
-        companyResult.rows[0]?.id || null;
+      if (companyResult.rows.length === 0) {
+        return res.status(404).json({
+          status: "error",
+          message: `Company not found: ${data.company}`
+        });
+      }
+
+      const companyId = companyResult.rows[0].id;
+
+      // const hasAccess = await checkCompanyAccess(userId, companyId);
+      // if (!hasAccess) {
+      //   return res.status(403).json({
+      //     status: "error",
+      //     message: "You don't have access to this company"
+      //   });
+      // }
 
       /* ==============================
          CHECK EXISTING ALERT
@@ -132,22 +162,22 @@ router.post(
 
         await stockAlertQueue.add(
 
-  "stock-alert",
+          "stock-alert",
 
-  {
-    companyId
-  },
+          {
+            companyId
+          },
 
-  {
+          {
 
-    ...STOCK_ALERT_JOB_OPTIONS,
+            ...STOCK_ALERT_JOB_OPTIONS,
 
-    jobId:
-      `${companyId}-${Date.now()}`
+            jobId:
+              `${companyId}-${Date.now()}`
 
-  }
+          }
 
-);
+        );
 
         return res.status(200).json({
 
@@ -221,24 +251,24 @@ router.post(
          TRIGGER WORKER
       ========================== */
 
-   await stockAlertQueue.add(
+      await stockAlertQueue.add(
 
-  "stock-alert",
+        "stock-alert",
 
-  {
-    companyId
-  },
+        {
+          companyId
+        },
 
-  {
+        {
 
-    ...STOCK_ALERT_JOB_OPTIONS,
+          ...STOCK_ALERT_JOB_OPTIONS,
 
-    jobId:
-      `${companyId}-${Date.now()}`
+          jobId:
+            `${companyId}-${Date.now()}`
 
-  }
+        }
 
-);
+      );
 
       /* ==============================
          RESPONSE

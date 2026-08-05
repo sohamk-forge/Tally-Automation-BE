@@ -42,13 +42,17 @@ function isTemporaryLedgerError(error) {
 const worker = new Worker(
   LEDGER_QUEUE_NAME,
   async (job) => {
-   const { ledgerId, userId } = job.data;
+    const { ledgerId, userId } = job.data;
 
-if (!userId) {
-  throw new Error(`Missing userId for ledger job ${ledgerId}`);
-}
+    if (!ledgerId) {
+      throw new Error("ledgerId is required");
+    }
 
-    console.log(`Processing ledger ID ${ledgerId}`);
+    if (!userId) {
+      throw new Error(`Missing userId for ledger job ${ledgerId}`);
+    }
+
+    console.log(`Processing ledger ID ${ledgerId} requested by user ${userId}`);
 
     const result = await pool.query(
       `
@@ -77,9 +81,6 @@ if (!userId) {
     );
 
     try {
-      // ─────────────────────────────────────────────────────────────
-      // STEP 1: Generate XML (stays in backend) ✅
-      // ─────────────────────────────────────────────────────────────
       const xml = createLedgerXML({
         company: row.company_name?.trim(),
         ledger_name: row.ledger_name,
@@ -100,59 +101,52 @@ if (!userId) {
         gst_registration_type: row.gst_registration_type
       });
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 2: Find the active connector paired to this ledger's company
-      // (not the acting user's own connector — an invited teammate pushing
-      // to a shared company has no connector of their own; the job must
-      // route to whoever actually paired a machine for this company).
-      // ─────────────────────────────────────────────────────────────
-const connector = await resolveConnectorForCompany(row.company_id);
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
+      );
 
-if (!connector) {
-  throw new Error(
-    `No active connector found for company ${row.company_id}`
-  );
-}
+      if (!connector) {
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
+        );
+      }
 
-console.log(
-  `🔗 Active connector: user=${connector.user_id}, machine=${connector.machine_id}`
-);
+      console.log(
+        `🔗 Ledger connector resolved: acting=${userId}, connector=${connector.user_id}, machine=${connector.machine_id}`
+      );
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 3: Create connector job (moves Tally work to connector)
-      // ─────────────────────────────────────────────────────────────
-   const connectorJob = await createConnectorJob({
-  userId: connector.user_id,
-  jobType: "ledger",
-  requestXml: xml,
-  payload: {
-    ledger_id: ledgerId,
-    company_id: row.company_id,
-    ledger_name: row.ledger_name,
-    requested_by_user_id: userId,
-    machine_id: connector.machine_id
-  }
-});
+      const connectorJob = await createConnectorJob({
+        userId: connector.user_id,
+        jobType: "ledger",
+        requestXml: xml,
+        payload: {
+          ledger_id: ledgerId,
+          company_id: row.company_id,
+          ledger_name: row.ledger_name,
+          requested_by_user_id: userId,
+          machine_id: connector.machine_id
+        }
+      });
 
-      // ─────────────────────────────────────────────────────────────
-      // STEP 4: Mark as pending (waiting for connector result)
-      // ─────────────────────────────────────────────────────────────
       await pool.query(
         `
         UPDATE ${DB_SCHEMA}.push_ledger
         SET
           status = 'pending',
+          error_message = NULL,
           updated_at = NOW()
         WHERE id = $1
         `,
         [ledgerId]
       );
 
-     console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
-  jobId: connectorJob.id,
-  userId: connector.user_id,
-  machineId: connector.machine_id
-});
+      console.log(`✅ Ledger job created for connector: ${row.ledger_name}`, {
+        jobId: connectorJob.id,
+        actingUserId: userId,
+        connectorUserId: connector.user_id,
+        machineId: connector.machine_id
+      });
 
       return {
         ledgerId,
@@ -167,7 +161,6 @@ console.log(
       );
 
       if (isTemporaryLedgerError(error)) {
-        // Mark as pending for retry
         await pool.query(
           `
           UPDATE ${DB_SCHEMA}.push_ledger
@@ -183,10 +176,9 @@ console.log(
           ]
         );
 
-        throw error;  // Let Bull retry
+        throw error;
       }
 
-      // Permanent failure
       await pool.query(
         `
         UPDATE ${DB_SCHEMA}.push_ledger

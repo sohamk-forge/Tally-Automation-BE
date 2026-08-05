@@ -1,5 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 import {
   bankQueue,
   BANK_JOB_OPTIONS,
@@ -8,8 +10,20 @@ import {
 
 const router = express.Router();
 
-router.post("/push-bank", async (req, res) => {
+router.post(
+  "/push-bank",
+  verifySession(),
+  async (req, res) => {
   try {
+    const userId = await getLocalUserId(req.session.getUserId());
+
+    if (!userId) {
+      return res.status(404).json({
+        status: "error",
+        message: "No profile found for this account"
+      });
+    }
+
     const {
       company,
       ledger_name,
@@ -30,10 +44,6 @@ router.post("/push-bank", async (req, res) => {
       email
     } = req.body;
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 1: VALIDATE REQUIRED FIELDS
-    // ─────────────────────────────────────────────────────────────
-
     if (!company?.trim()) {
       return res.status(400).json({
         error: "Company is required"
@@ -45,10 +55,6 @@ router.post("/push-bank", async (req, res) => {
         error: "Ledger name is required"
       });
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // STEP 2: GET COMPANY ID ✅ (NEW!)
-    // ─────────────────────────────────────────────────────────────
 
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
@@ -71,10 +77,6 @@ router.post("/push-bank", async (req, res) => {
 
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
-
-    // ─────────────────────────────────────────────────────────────
-    // STEP 3: INSERT BANK WITH COMPANY_ID ✅ (FIXED!)
-    // ─────────────────────────────────────────────────────────────
 
     console.log(`📝 Creating new bank: ${bank_name}`);
 
@@ -131,38 +133,37 @@ router.post("/push-bank", async (req, res) => {
       RETURNING id
       `,
       [
-        companyId,                    // $1
-        company?.trim(),              // $2
-        ledger_name?.trim(),          // $3
-        parent || "Bank Accounts",    // $4
-        opening_balance || 0,         // $5
-        bank_name || "",              // $6
-        branch_name || "",            // $7
-        account_holder || "",         // $8
-        account_number || "",         // $9
-        ifsc_code || "",              // $10
-        swift_code || "",             // $11
-        address || "",                // $12
-        state || "",                  // $13
-        country || "India",           // $14
-        pincode || "",                // $15
-        contact_person || "",         // $16
-        mobile || "",                 // $17
-        email || "",                  // $18
-        "pending"                     // $19
+        companyId,
+        company?.trim(),
+        ledger_name?.trim(),
+        parent || "Bank Accounts",
+        opening_balance || 0,
+        bank_name || "",
+        branch_name || "",
+        account_holder || "",
+        account_number || "",
+        ifsc_code || "",
+        swift_code || "",
+        address || "",
+        state || "",
+        country || "India",
+        pincode || "",
+        contact_person || "",
+        mobile || "",
+        email || "",
+        "pending"
       ]
     );
 
     const bankId = insertResult.rows[0].id;
     console.log(`✅ Bank created: ID ${bankId}`);
 
-    // ─────────────────────────────────────────────────────────────
-    // STEP 4: QUEUE THE JOB
-    // ─────────────────────────────────────────────────────────────
-
     const job = await bankQueue.add(
       "push-bank",
-      { bankId },
+      {
+        bankId,
+        userId
+      },
       {
         ...BANK_JOB_OPTIONS,
         jobId: getBankJobId(bankId)

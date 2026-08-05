@@ -95,7 +95,55 @@ invoice_no     = invoice.get("invoice_no", "")
 reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("vendor_name", "")
 party_gstin    = invoice.get("vendor_gstin") or invoice.get("gstin") or ""
-narration      = invoice.get("narration", f"Being purchase from {party_name} vide invoice {invoice_no} dated {invoice.get('invoice_date', '')}")
+
+# =========================================
+# PARTY STATE / COUNTRY / PLACE OF SUPPLY
+# =========================================
+GST_STATE_MAP = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+    "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana",
+    "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
+    "13": "Nagaland", "14": "Manipur", "15": "Mizoram",
+    "16": "Tripura", "17": "Meghalaya", "18": "Assam",
+    "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
+    "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu",
+    "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
+    "34": "Puducherry", "35": "Andaman & Nicobar Islands",
+    "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+    "97": "Other Territory",
+}
+
+party_state = (
+    invoice.get("vendor_state")
+    or invoice.get("customer_state")
+    or invoice.get("state")
+    or ""
+)
+
+party_country = (
+    invoice.get("vendor_country")
+    or invoice.get("customer_country")
+    or invoice.get("country")
+    or "India"
+)
+
+if not party_state and party_gstin:
+    party_state = GST_STATE_MAP.get(party_gstin[:2], "")
+
+place_of_supply = invoice.get("place_of_supply") or party_state or ""
+
+narration = invoice.get(
+    "narration",
+    f"Being purchase from {party_name} vide invoice {invoice_no} dated {invoice.get('invoice_date', '')}"
+)
+
+print(f"PARTY GSTIN      = {party_gstin}", file=sys.stderr)
+print(f"PARTY STATE      = {party_state}", file=sys.stderr)
+print(f"PARTY COUNTRY    = {party_country}", file=sys.stderr)
+print(f"PLACE OF SUPPLY  = {place_of_supply}", file=sys.stderr)
 
 # =========================================
 # AMOUNTS
@@ -152,12 +200,27 @@ sub(vch, "REFERENCEDATE",               ref_date)
 sub(vch, "VOUCHERTYPENAME",             "Purchase")
 # sub(vch, "VOUCHERNUMBER",               voucher_number)
 sub(vch, "REFERENCE",                   reference)
-sub(vch, "PARTYNAME",                   party_name)
-sub(vch, "PARTYLEDGERNAME",             party_name)
-sub(vch, "PARTYGSTIN",                  party_gstin)
-sub(vch, "ISINVOICE",                   "Yes")
-# sub(vch, "PURCHASELED",                 purchase_ledger)  # ✅ fills Purchase Ledger field
-sub(vch, "NARRATION",                   narration)        # ✅ fills Narration field
+sub(vch, "PARTYNAME",       party_name)
+sub(vch, "PARTYLEDGERNAME", party_name)
+
+# GSTIN
+if party_gstin:
+    sub(vch, "PARTYGSTIN", party_gstin)
+
+# State
+if party_state:
+    sub(vch, "STATENAME", party_state)
+
+# Country
+if party_country:
+    sub(vch, "COUNTRYOFRESIDENCE", party_country)
+
+# Place of Supply
+if place_of_supply:
+    sub(vch, "PLACEOFSUPPLY", place_of_supply)
+
+sub(vch, "ISINVOICE", "Yes")
+sub(vch, "NARRATION", narration)
 
 # =========================================
 # INVENTORY ENTRIES

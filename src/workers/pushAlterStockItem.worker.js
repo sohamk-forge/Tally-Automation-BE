@@ -5,6 +5,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { ALTER_STOCK_ITEM_QUEUE_NAME } from "../queues/alterStockItem.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { getStockItemOpeningXML } from "../services/pushXmlBuilder.js";
 
 const connection = new IORedis({
@@ -35,42 +36,21 @@ function isTemporaryAlterStockItemError(error) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚠️ TODO (needs a design decision, deliberately NOT changed here):
-//
-// 1. STATUS COLUMN COLLISION
-//    This worker and pushStockItem.worker.js both write
-//    push_stock_item.status on the SAME row. Once both have run,
-//    status = 'pending' does not say whether the create job or the opening
-//    job is outstanding, and whichever connector result lands last
-//    overwrites the other's outcome. Fix by splitting the column
-//    (create_status / opening_status) or using distinct values
-//    (awaiting_create / awaiting_opening).
-//
-// 2. CREATE → ALTER SEQUENCING
-//    The create worker only marks 'pending'; the item does not exist in
-//    Tally until the connector runs that job and reports back. If the route
-//    enqueues this alter job at the same time as the create job, this XML
-//    can reach Tally first and fail because the item is not there yet.
-//    Safe: enqueue from the create job's success callback. Unsafe: enqueue
-//    directly from the route. Verify which one you have.
-//
-// 3. PAYLOAD KEY MISMATCH
-//    Create sends payload.stock_item_id, this sends
-//    payload.alter_stock_item_id, both referring to push_stock_item.id.
-//    Confirm the connector result handler knows both job_type values
-//    ('stock_item', 'alter_stock_item') AND both payload keys.
-// ─────────────────────────────────────────────────────────────────────────────
-
 const worker = new Worker(
   ALTER_STOCK_ITEM_QUEUE_NAME,
   async (job) => {
-    // ✅ Fix: Route sends stockItemId not alterStockItemId
-    const { stockItemId } = job.data;
+    const { stockItemId, userId } = job.data;
 
-    console.log(`Processing alter stock item ID ${stockItemId}`);
+    if (!stockItemId) {
+      throw new Error("stockItemId is required");
+    }
 
-    // STEP 1: GET STOCK ITEM FROM DB ✅ (correct table: push_stock_item)
+    if (!userId) {
+      throw new Error(`Missing userId for alter stock item ${stockItemId}`);
+    }
+
+    console.log(`Processing alter stock item ID ${stockItemId} requested by user ${userId}`);
+
     const result = await pool.query(
       `SELECT * FROM app_test.push_stock_item WHERE id = $1`,
       [stockItemId]
@@ -81,19 +61,12 @@ const worker = new Worker(
       throw new Error(`Stock item ${stockItemId} not found`);
     }
 
-    // STEP 2: MARK AS PROCESSING
     await pool.query(
       `UPDATE app_test.push_stock_item SET status = 'processing', updated_at = NOW() WHERE id = $1`,
       [stockItemId]
     );
 
     try {
-      // STEP 3: GENERATE XML ✅ (using getStockItemOpeningXML)
-      //
-      // ✅ FIXED: was row.unit, but push_stock_item has no `unit` column —
-      // the column is `unit_name`. row.unit was always undefined, so every
-      // opening push silently fell back to "nos" regardless of the unit the
-      // user selected.
       const xml = getStockItemOpeningXML({
         company: row.company_name,
         itemName: row.item_name,
@@ -105,53 +78,33 @@ const worker = new Worker(
 
       console.log(`📤 Alter stock item XML generated: ${row.item_name}`);
 
-      // STEP 4: GET CONNECTOR PAIRING ✅
-      //
-      // Simplified: company_id already available on `row`, so the subquery
-      // back into push_stock_item is unnecessary. Matches the shape used in
-      // pushBank / pushLedger / pushSalesInvoice / pushStockItem.
-      //
-      // ⚠️ INTERIM FIX ONLY. Deterministic, not correct: if two logins share
-      // a company_id, every job for that company routes to whoever paired
-      // most recently. Real fix is a user_id column on push_stock_item,
-      // written from req.user.id at insert time. The candidate_count warning
-      // below tells you whether that migration is urgent.
-      const pairingResult = await pool.query(
-        `
-        SELECT user_id, COUNT(*) OVER () AS candidate_count
-        FROM app_test.connector_pairing_tokens
-        WHERE company_id = $1
-          AND is_used = TRUE
-        ORDER BY created_at DESC
-        LIMIT 1
-        `,
-        [row.company_id]
+      const connector = await resolveConnectorForCompany(
+        row.company_id,
+        userId
       );
 
-      const pairing = pairingResult.rows[0];
-      if (!pairing) {
-        throw new Error(`No connector pairing found for stock item ${stockItemId}`);
-      }
-
-      if (Number(pairing.candidate_count) > 1) {
-        console.warn(
-          `⚠️ AMBIGUOUS PAIRING: company ${row.company_id} has ${pairing.candidate_count} used pairing tokens; routing alter stock item ${stockItemId} to user ${pairing.user_id}`
+      if (!connector) {
+        throw new Error(
+          `No active connector found for company ${row.company_id} and user ${userId}`
         );
       }
 
-      // STEP 5: CREATE CONNECTOR JOB ✅
+      console.log(
+        `🔗 Alter stock item connector resolved: acting=${userId}, connector=${connector.user_id}`
+      );
+
       const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
+        userId: connector.user_id,
         jobType: 'alter_stock_item',
         requestXml: xml,
         payload: {
           alter_stock_item_id: stockItemId,
           company_id: row.company_id,
-          item_name: row.item_name
+          item_name: row.item_name,
+          requested_by_user_id: userId
         }
       });
 
-      // STEP 6: MARK AS PENDING ✅
       await pool.query(
         `UPDATE app_test.push_stock_item SET status = 'pending', updated_at = NOW() WHERE id = $1`,
         [stockItemId]
@@ -159,7 +112,8 @@ const worker = new Worker(
 
       console.log(`✅ Alter stock item job created for connector: ${row.item_name}`, {
         jobId: connectorJob.id,
-        userId: pairing.user_id
+        actingUserId: userId,
+        connectorUserId: connector.user_id
       });
 
       return {

@@ -1,7 +1,3 @@
-// =========================================
-// src/api/pushLedger.routes.js
-// =========================================
-
 import express from "express";
 import pool from "../db/index.js";
 
@@ -12,10 +8,6 @@ import { verifySession } from "supertokens-node/recipe/session/framework/express
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 
 const router = express.Router();
-
-/* =====================================
-   PUSH LEDGER API
-===================================== */
 
 router.post(
 
@@ -41,10 +33,6 @@ router.post(
       const data =
         req.body;
 
-      /* ==============================
-         VALIDATION
-      ============================== */
-
       if (
         !data.company ||
         !data.ledger_name ||
@@ -62,10 +50,6 @@ router.post(
 
       }
 
-      /* ==============================
-         COMPANY
-      ============================== */
-
       const companyResult =
         await pool.query(
 
@@ -80,12 +64,14 @@ router.post(
 
         );
 
-      const companyId =
-        companyResult.rows[0]?.id || null;
+      if (companyResult.rows.length === 0) {
+        return res.status(404).json({
+          status: "error",
+          message: `Company not found: ${data.company}`
+        });
+      }
 
-      /* ==============================
-         DUPLICATE CHECK
-      ============================== */
+      const companyId = companyResult.rows[0].id;
 
       const duplicateResult =
         await pool.query(
@@ -130,10 +116,6 @@ router.post(
         });
 
       }
-
-      /* ==============================
-         INSERT
-      ============================== */
 
       const insertResult =
         await pool.query(
@@ -229,10 +211,6 @@ router.post(
       const ledgerId =
         insertResult.rows[0].id;
 
-      /* ==============================
-         ADD TO BULLMQ
-      ============================== */
-
       const job =
         await ledgerQueue.add(
 
@@ -272,10 +250,6 @@ router.post(
         `📥 QUEUED LEDGER ${ledgerId} by user ${userId}`
 
       );
-
-      /* ==============================
-         RESPONSE
-      ============================== */
 
       return res.status(200).json({
 
