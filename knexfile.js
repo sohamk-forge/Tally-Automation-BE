@@ -36,7 +36,12 @@ export default {
 
   extension: "js",
 
-  tableName: "knex_migrations_v2"
+  tableName: "knex_migrations_v2",
+
+  // Without this, the tracking table lives in `public` and is shared across
+  // every DB_SCHEMA value — a fresh schema would be treated as "already
+  // migrated" (since the same table says so) and nothing would get created.
+  schemaName: process.env.DB_SCHEMA || "app_test"
 
 },
 
