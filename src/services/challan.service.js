@@ -6,6 +6,10 @@
  * - Starts from 0001 automatically
  * - If DB is cleared, resets to 0001
  * - User never inputs the number
+ *
+ * GST handling: gst_enabled is read once per create/update from
+ * app_test.company_details and applied to every line item. Non-GST
+ * companies get zeroed tax fields instead of computed CGST/SGST/IGST.
  */
 
 import pool from "../db/index.js";
@@ -34,16 +38,35 @@ function formatChallanNo(seq) {
   return String(seq).padStart(CHALLAN_PAD_LENGTH, "0");
 }
 
-function computeItem(item, supplyType = "intrastate") {
+function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
   const qty        = toNum(item.qty);
   const rate       = toNum(item.rate);
   const discPct    = toNum(item.discount_percent);
-  const gstRateStr = String(item.gst_rate || "0%").replace("%", "");
-  const gstRate    = toNum(gstRateStr);
 
   const grossAmt   = round2(qty * rate);
   const discAmt    = round2(grossAmt * discPct / 100);
   const taxableAmt = round2(grossAmt - discAmt);
+
+  if (!gstEnabled) {
+    return {
+      item_name:        String(item.item_name || "").trim(),
+      godown_name:      String(item.godown_name || "").trim() || null,
+      hsn_code:         String(item.hsn_code   || "").trim() || null,
+      qty,
+      rate,
+      gst_rate:         "0%",
+      discount_percent: discPct,
+      taxable_amount:   taxableAmt,
+      cgst_amount:      0,
+      sgst_amount:      0,
+      igst_amount:      0,
+      line_total:       taxableAmt,
+      sort_order:       toNum(item.sort_order, 0),
+    };
+  }
+
+  const gstRateStr = String(item.gst_rate || "0%").replace("%", "");
+  const gstRate    = toNum(gstRateStr);
   const totalTax   = round2(taxableAmt * gstRate / 100);
 
   let cgst = 0, sgst = 0, igst = 0;
@@ -98,7 +121,6 @@ function computeTotals(computedItems) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function getOrInitSettings(client, companyId) {
-  // Try to get existing row with lock
   const settingsRes = await client.query(
     `SELECT * FROM ${DB_SCHEMA}.challan_settings
      WHERE company_id = $1
@@ -107,8 +129,6 @@ async function getOrInitSettings(client, companyId) {
   );
 
   if (settingsRes.rows.length) {
-    // Settings exist — but check if challans table was cleared
-    // If last_number > 0 but no challans exist, reset counter to 0
     const challanCount = await client.query(
       `SELECT COUNT(*) FROM ${DB_SCHEMA}.challans WHERE company_id = $1`,
       [companyId]
@@ -117,7 +137,6 @@ async function getOrInitSettings(client, companyId) {
     const count = parseInt(challanCount.rows[0].count, 10);
 
     if (count === 0 && Number(settingsRes.rows[0].last_number) > 0) {
-      // DB was cleared — reset counter back to 0 so next challan = 0001
       const resetRes = await client.query(
         `UPDATE ${DB_SCHEMA}.challan_settings
          SET last_number = 0, updated_at = NOW()
@@ -131,7 +150,6 @@ async function getOrInitSettings(client, companyId) {
     return settingsRes.rows[0];
   }
 
-  // No settings row yet — create fresh starting from 0
   const insertRes = await client.query(
     `INSERT INTO ${DB_SCHEMA}.challan_settings
        (company_id, prefix, pad_length, last_number, updated_at)
@@ -159,6 +177,18 @@ async function allocateNextChallanNumber(client, companyId) {
   );
 
   return { challanNo: formatChallanNo(nextSeq), seq: nextSeq };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL: getGstEnabled  (runs inside transaction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getGstEnabled(client, companyId) {
+  const res = await client.query(
+    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+    [companyId]
+  );
+  return res.rows[0]?.gst_enabled ?? false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,9 +243,6 @@ export async function createChallan(data) {
     if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
   }
 
-  const computedItems = items.map((it) => computeItem(it, supply_type));
-  const totals        = computeTotals(computedItems);
-
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -227,6 +254,12 @@ export async function createChallan(data) {
       );
       if (compRes.rows.length) company_name = compRes.rows[0].name;
     }
+
+    // Determine GST status once, apply to every line item
+    const gstEnabled = await getGstEnabled(client, company_id);
+
+    const computedItems = items.map((it) => computeItem(it, supply_type, gstEnabled));
+    const totals        = computeTotals(computedItems);
 
     const { challanNo, seq } = await allocateNextChallanNumber(client, company_id);
 
@@ -279,7 +312,7 @@ export async function createChallan(data) {
     }
 
     await client.query("COMMIT");
-    return { ...challan, items: insertedItems };
+    return { ...challan, items: insertedItems, gst_enabled: gstEnabled };
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -313,9 +346,6 @@ export async function updateChallan(challanId, companyId, data) {
     if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
   }
 
-  const computedItems = items.map((it) => computeItem(it, supply_type));
-  const totals        = computeTotals(computedItems);
-
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -331,6 +361,11 @@ export async function updateChallan(challanId, companyId, data) {
       await client.query("ROLLBACK");
       return null;
     }
+
+    const gstEnabled = await getGstEnabled(client, companyId);
+
+    const computedItems = items.map((it) => computeItem(it, supply_type, gstEnabled));
+    const totals        = computeTotals(computedItems);
 
     const updateRes = await client.query(
       `UPDATE ${DB_SCHEMA}.challans SET
@@ -388,7 +423,7 @@ export async function updateChallan(challanId, companyId, data) {
     }
 
     await client.query("COMMIT");
-    return { ...challan, items: insertedItems };
+    return { ...challan, items: insertedItems, gst_enabled: gstEnabled };
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -400,13 +435,6 @@ export async function updateChallan(challanId, companyId, data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getAllChallans
-//
-// UPDATED: now selects id, narration, status, and grand_total in addition
-// to the original challan_number / challan_date / customer_name fields.
-// These were being computed and stored on create, but were silently
-// dropped from this response. Every field is included explicitly — even
-// when null — so the frontend can always find the key on the row instead
-// of it being missing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getAllChallans(companyId, filters = {}) {
@@ -490,12 +518,6 @@ export async function getAllChallans(companyId, filters = {}) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getChallanTransactions
-//
-// Returns ONLY challans, using plain challan field names — no voucher-shape
-// remapping, no merging with app_test.vouchers. Every field defined on the
-// challan (including line items) is included explicitly; if a value is
-// missing in the DB it comes back as null rather than being left out of
-// the object.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getChallanTransactions(companyId, filters = {}) {
@@ -605,7 +627,13 @@ export async function getChallanById(challanId, companyId) {
     [challanId]
   );
 
-  return { ...challanRes.rows[0], items: itemsRes.rows };
+  const gstStatusRes = await pool.query(
+    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+    [companyId]
+  );
+  const gstEnabled = gstStatusRes.rows[0]?.gst_enabled ?? false;
+
+  return { ...challanRes.rows[0], items: itemsRes.rows, gst_enabled: gstEnabled };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

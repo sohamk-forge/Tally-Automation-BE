@@ -1,4 +1,9 @@
 // src/services/quotation-pdf.service.js
+//
+// GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
+// quotation.gst_enabled is true — set upstream in quotation.service.js
+// from app_test.company_details.
+
 import puppeteer from "puppeteer";
 
 let browserPromise = null;
@@ -38,7 +43,7 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function buildItemRows(items = []) {
+function buildItemRows(items = [], gstEnabled = true) {
   return items
     .map(
       (it, idx) => `
@@ -53,7 +58,7 @@ function buildItemRows(items = []) {
         <td class="num">${formatQty(it.qty)}</td>
         <td class="num">${formatCurrency(it.rate)}</td>
         <td class="num">${Number(it.discount_percent) > 0 ? Number(it.discount_percent).toFixed(2).replace(/\.00$/, "") + "%" : "-"}</td>
-        <td class="num">${escapeHtml(it.gst_rate)}</td>
+        ${gstEnabled ? `<td class="num">${escapeHtml(it.gst_rate)}</td>` : ""}
         <td class="num">${formatCurrency(it.line_total)}</td>
       </tr>`
     )
@@ -81,10 +86,9 @@ function buildHtml(quotation) {
     items = [],
   } = quotation;
 
+  const gstEnabled = quotation.gst_enabled ?? true;
   const isInterstate = Number(total_igst) > 0;
 
-  // Discount total derived from items (gross - taxable), since it isn't
-  // persisted as its own column on the quotation header.
   const totalDiscount = items.reduce((sum, it) => {
     const gross = (Number(it.qty) || 0) * (Number(it.rate) || 0);
     return sum + (gross - (Number(it.taxable_amount) || 0));
@@ -104,22 +108,17 @@ function buildHtml(quotation) {
         font-size: 13px;
       }
 
-      /* ---------- Page frame ----------
-         Border is now the outer boundary of the whole printable page (the
-         physical margin from the paper edge is handled by the margin
-         option in page.pdf() itself), not just a box around the content. */
       .page {
-  box-sizing: border-box;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  border: 1.5px solid #374151;
-  border-radius: 6px;
-  padding: 40px 30px 24px 30px;
-}
+        box-sizing: border-box;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        border: 1.5px solid #374151;
+        border-radius: 6px;
+        padding: 40px 30px 24px 30px;
+      }
       .page-content { flex: 1 0 auto; }
 
-      /* ---------- Header ---------- */
       .header-top { text-align: right; margin-bottom: 2px; }
       .doc-title { font-size: 18px; font-weight: 700; color: #2563eb; letter-spacing: 0.03em; }
 
@@ -131,11 +130,7 @@ function buildHtml(quotation) {
         gap: 12px;
       }
 
-      .company-block {
-        flex: 1 1 auto;
-        min-width: 0;
-      }
-
+      .company-block { flex: 1 1 auto; min-width: 0; }
       .company-name {
         font-size: 19px;
         font-weight: 700;
@@ -154,7 +149,6 @@ function buildHtml(quotation) {
 
       .divider { border-bottom: 1px solid #e5e7eb; margin: 20px 0; }
 
-      /* ---------- Bill To ---------- */
       .section-label {
         font-size: 11px; text-transform: uppercase; color: #9ca3af;
         letter-spacing: 0.05em; margin-bottom: 4px;
@@ -163,7 +157,6 @@ function buildHtml(quotation) {
       .bill-to .section-label { color: #6b7280; }
       .bill-to .muted-line { margin-top: 2px; color: #4b5563; }
 
-      /* ---------- Table ---------- */
       table.items { width: 100%; border-collapse: collapse; margin: 22px 0 18px; }
       table.items th {
         background: #eef2f8; color: #374151; text-align: left;
@@ -177,7 +170,6 @@ function buildHtml(quotation) {
       .item-name { font-weight: 600; color: #1f2937; }
       .item-sub { font-size: 10.5px; color: #9ca3af; margin-top: 1px; }
 
-      /* ---------- Totals ---------- */
       .totals { width: 300px; margin-left: auto; }
       .totals table { width: 100%; border-collapse: collapse; }
       .totals td { padding: 5px 4px; font-size: 12.5px; }
@@ -190,11 +182,9 @@ function buildHtml(quotation) {
       .totals .grand-row td:first-child { border-radius: 4px 0 0 4px; padding-left: 10px; }
       .totals .grand-row td:last-child { border-radius: 0 4px 4px 0; padding-right: 10px; }
 
-      /* ---------- Narration / Terms ---------- */
       .narration { margin-top: 8px; }
       .narration p { margin: 4px 0 0; color: #374151; font-size: 12px; }
 
-      /* ---------- Footer ---------- */
       .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 0 0 12px; }
       .footer { text-align: center; font-size: 11px; color: #9ca3af; padding-bottom: 8px; }
       .footer-wrap { margin-top: auto; padding-top: 28px; }
@@ -236,22 +226,25 @@ function buildHtml(quotation) {
         <tr>
           <th>#</th><th>Item</th><th>HSN</th>
           <th class="num">Qty</th><th class="num">Rate</th><th class="num">Disc %</th>
-          <th class="num">GST %</th><th class="num">Amount</th>
+          ${gstEnabled ? '<th class="num">GST %</th>' : ""}
+          <th class="num">Amount</th>
         </tr>
       </thead>
-      <tbody>${buildItemRows(items)}</tbody>
+      <tbody>${buildItemRows(items, gstEnabled)}</tbody>
     </table>
 
     <div class="totals">
       <table>
         <tr><td class="label">Subtotal</td><td class="value">Rs. ${formatCurrency(sub_total)}</td></tr>
         ${totalDiscount > 0 ? `<tr><td class="label">Discount</td><td class="value">- Rs. ${formatCurrency(totalDiscount)}</td></tr>` : ""}
-        ${!isInterstate ? `
-        <tr><td class="label">CGST</td><td class="value">Rs. ${formatCurrency(total_cgst)}</td></tr>
-        <tr><td class="label">SGST</td><td class="value">Rs. ${formatCurrency(total_sgst)}</td></tr>
-        ` : `
-        <tr><td class="label">IGST</td><td class="value">Rs. ${formatCurrency(total_igst)}</td></tr>
-        `}
+        ${gstEnabled ? (
+          !isInterstate ? `
+          <tr><td class="label">CGST</td><td class="value">Rs. ${formatCurrency(total_cgst)}</td></tr>
+          <tr><td class="label">SGST</td><td class="value">Rs. ${formatCurrency(total_sgst)}</td></tr>
+          ` : `
+          <tr><td class="label">IGST</td><td class="value">Rs. ${formatCurrency(total_igst)}</td></tr>
+          `
+        ) : ""}
         <tr class="grand-row"><td>Total Payable</td><td class="value">Rs. ${formatCurrency(grand_total)}</td></tr>
       </table>
     </div>

@@ -3851,16 +3851,25 @@ router.get("/company-details", async (req, res) => {
     // ============================================
     // 5. FIND COMPANY OBJECT
     // ============================================
-    const companyData =
+    // ============================================
+    // 5. FIND COMPANY OBJECT
+    // ============================================
+    let companyData =
       companyParsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.COMPANY ||
       companyParsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
+
+    // New XML uses a filtered Collection, which xml2js may return
+    // as a single object OR a one-item array depending on the parser
+    // config — normalize either way.
+    if (Array.isArray(companyData)) {
+      companyData = companyData[0];
+    }
 
     if (!companyData) {
       throw new Error(
         "No company details found in Tally response"
       );
     }
-
 
     // ============================================
     // HELPER FOR TALLY VALUES
@@ -3908,30 +3917,26 @@ router.get("/company-details", async (req, res) => {
 
 
     // ============================================
-    // 7. ADDRESS
-    // ============================================
-    let address = null;
+// 7. ADDRESS
+// ============================================
+let address = null;
 
-    let addressList =
-      companyData?.["ADDRESS.LIST"];
+let rawAddresses =
+  companyData?.["ADDRESS.LIST"]?.ADDRESS ||
+  companyData?.ADDRESS ||
+  companyData?.["ADDRESS.LIST"];
 
-    if (Array.isArray(addressList)) {
-      addressList = addressList[0];
-    }
+if (rawAddresses) {
 
-    const rawAddresses =
-      addressList?.ADDRESS;
+  if (!Array.isArray(rawAddresses)) {
+    rawAddresses = [rawAddresses];
+  }
 
-    if (rawAddresses) {
-      const addresses = Array.isArray(rawAddresses)
-        ? rawAddresses
-        : [rawAddresses];
-
-      address = addresses
-        .map((item) => readTallyValue(item))
-        .filter(Boolean)
-        .join(", ");
-    }
+  address = rawAddresses
+    .map((item) => readTallyValue(item))
+    .filter(Boolean)
+    .join(", ");
+}
 
 
     // ============================================
@@ -4013,8 +4018,9 @@ router.get("/company-details", async (req, res) => {
 
     console.log("\n📦 PARSED GST RESPONSE");
     console.log(
-      JSON.stringify(gstParsed, null, 2)
-    );
+  "ADDRESS DEBUG:",
+  JSON.stringify(companyData?.["ADDRESS.LIST"], null, 2)
+);
 
 
     // ============================================
@@ -4193,65 +4199,51 @@ router.get("/company-details", async (req, res) => {
     // 24. SAVE TO DATABASE
     // ============================================
     await client.query(
-      `
-      INSERT INTO app_test.company_details
-      (
-        company_id,
-        company_name,
-        address,
-        state,
-        email,
-        gstin,
-        last_synced_at,
-        created_at,
-        updated_at
-      )
-      VALUES
-      (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        NOW(),
-        NOW(),
-        NOW()
-      )
+  `
+  INSERT INTO app_test.company_details
+  (
+    company_id,
+    company_name,
+    address,
+    state,
+    email,
+    gstin,
+    gst_enabled,
+    gst_registration_type,
+    last_synced_at,
+    created_at,
+    updated_at
+  )
+  VALUES
+  (
+    $1, $2, $3, $4, $5, $6, $7, $8,
+    NOW(), NOW(), NOW()
+  )
 
-      ON CONFLICT (company_id)
-      DO UPDATE SET
+  ON CONFLICT (company_id)
+  DO UPDATE SET
 
-        company_name =
-          EXCLUDED.company_name,
-
-        address =
-          EXCLUDED.address,
-
-        state =
-          EXCLUDED.state,
-
-        email =
-          EXCLUDED.email,
-
-        gstin =
-          EXCLUDED.gstin,
-
-        last_synced_at =
-          NOW(),
-
-        updated_at =
-          NOW()
-      `,
-      [
-        companyId,
-        name,
-        address,
-        gstState || state,
-        email,
-        gstin
-      ]
-    );
+    company_name           = EXCLUDED.company_name,
+    address                = EXCLUDED.address,
+    state                  = EXCLUDED.state,
+    email                  = EXCLUDED.email,
+    gstin                  = EXCLUDED.gstin,
+    gst_enabled            = EXCLUDED.gst_enabled,
+    gst_registration_type  = EXCLUDED.gst_registration_type,
+    last_synced_at         = NOW(),
+    updated_at              = NOW()
+  `,
+  [
+    companyId,
+    name,
+    address,
+    gstState || state,
+    email,
+    gstin,
+    gstEnabled,          // ← already computed above in this route
+    registrationType,    // ← already computed above in this route
+  ]
+);
 
 
     // ============================================
@@ -4264,23 +4256,23 @@ router.get("/company-details", async (req, res) => {
     // 26. FINAL API RESPONSE
     // ============================================
     return res.status(200).json({
-      status: "success",
-      source: "tally",
-      company,
+  status: "success",
+  source: "tally",
+  company,
 
-      data: {
-        name,
-        address,
-        email,
-        state: gstState || state,
-        gstEnabled,
-        gstin,
-        registrationType,
-        placeOfSupply,
-        effectiveFrom,
-        gstr1Periodicity
-      }
-    });
+  data: {
+    name,
+    address,
+    email,
+    state: gstState || state,
+    gstEnabled,
+    gstin,
+    registrationType,
+    placeOfSupply,
+    effectiveFrom,
+    gstr1Periodicity
+  }
+});
 
   } catch (err) {
 
@@ -4473,4 +4465,5 @@ WHERE id = $1
     client.release();
   }
 });
+
   export default router;

@@ -2,20 +2,11 @@
  * src/services/challan-pdf.service.js
  *
  * Renders a single challan (fetched via getChallanById) into a printable
- * PDF buffer using Puppeteer (HTML -> PDF). No new dependency needed —
- * this uses the puppeteer you already have installed.
+ * PDF buffer using Puppeteer (HTML -> PDF).
  *
- * Usage (see src/api/challanpdf.routes.js):
- *   const pdfBuffer = await buildChallanPdf(challan);
- *   res.setHeader("Content-Type", "application/pdf");
- *   res.send(pdfBuffer);
- *
- * Note on Puppeteer + nodemon/dev servers:
- *   Puppeteer launches a headless Chromium process per call. For a
- *   low/medium traffic internal tool that's fine as-is. If you start
- *   generating a lot of PDFs, switch to a single shared browser instance
- *   (launch once at server startup, reuse `browser.newPage()` per request,
- *   close on process exit) instead of launch/close every call.
+ * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
+ * challan.gst_enabled is true — set upstream in challan.service.js from
+ * app_test.company_details.
  */
 
 import puppeteer from "puppeteer";
@@ -68,11 +59,10 @@ function formatQty(n) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// HTML template — mirrors quotation-pdf.service.js's header/layout exactly
-// so the two documents look like a matched set.
+// HTML template
 // ─────────────────────────────────────────────────────────────────────────
 
-function buildItemRows(items = []) {
+function buildItemRows(items = [], gstEnabled = true) {
   return items
     .map((it, idx) => {
       const amt = lineAmounts(it);
@@ -88,7 +78,7 @@ function buildItemRows(items = []) {
         <td class="num">${formatQty(amt.qty)}</td>
         <td class="num">${amt.rate.toFixed(2)}</td>
         <td class="num">${amt.discPct > 0 ? amt.discPct.toFixed(2).replace(/\.00$/, "") + "%" : "-"}</td>
-        <td class="num">${it.gst_rate ? esc(it.gst_rate) : "-"}</td>
+        ${gstEnabled ? `<td class="num">${it.gst_rate ? esc(it.gst_rate) : "-"}</td>` : ""}
         <td class="num">${amt.lineTotal.toFixed(2)}</td>
       </tr>`;
     })
@@ -109,6 +99,8 @@ function buildHtml(challan) {
     narration,
     items = [],
   } = challan;
+
+  const gstEnabled = challan.gst_enabled ?? true;
 
   let subTotal = 0, totalDiscount = 0, totalGst = 0, grandTotal = 0;
   items.forEach((it) => {
@@ -135,22 +127,17 @@ function buildHtml(challan) {
         font-size: 13px;
       }
 
-      /* ---------- Page frame ----------
-         Border is now the outer boundary of the whole printable page (the
-         physical margin from the paper edge is handled by the margin
-         option in page.pdf() itself), not just a box around the content. */
       .page {
-  box-sizing: border-box;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  border: 1.5px solid #374151;
-  border-radius: 6px;
-  padding: 40px 30px 24px 30px;
-}
+        box-sizing: border-box;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        border: 1.5px solid #374151;
+        border-radius: 6px;
+        padding: 40px 30px 24px 30px;
+      }
       .page-content { flex: 1 0 auto; }
 
-      /* ---------- Header ---------- */
       .header-top { text-align: right; margin-bottom: 2px; }
       .doc-title { font-size: 18px; font-weight: 700; color: #2563eb; letter-spacing: 0.03em; }
 
@@ -162,11 +149,7 @@ function buildHtml(challan) {
         gap: 12px;
       }
 
-      .company-block {
-        flex: 1 1 auto;
-        min-width: 0;
-      }
-
+      .company-block { flex: 1 1 auto; min-width: 0; }
       .company-name {
         font-size: 19px;
         font-weight: 700;
@@ -185,7 +168,6 @@ function buildHtml(challan) {
 
       .divider { border-bottom: 1px solid #e5e7eb; margin: 20px 0; }
 
-      /* ---------- Bill To ---------- */
       .section-label {
         font-size: 11px; text-transform: uppercase; color: #9ca3af;
         letter-spacing: 0.05em; margin-bottom: 4px;
@@ -194,7 +176,6 @@ function buildHtml(challan) {
       .bill-to .section-label { color: #6b7280; }
       .bill-to .muted-line { margin-top: 2px; color: #4b5563; }
 
-      /* ---------- Table ---------- */
       table.items { width: 100%; border-collapse: collapse; margin: 22px 0 18px; }
       table.items th {
         background: #eef2f8; color: #374151; text-align: left;
@@ -208,7 +189,6 @@ function buildHtml(challan) {
       .item-name { font-weight: 600; color: #1f2937; }
       .item-sub { font-size: 10.5px; color: #9ca3af; margin-top: 1px; }
 
-      /* ---------- Totals ---------- */
       .totals { width: 300px; margin-left: auto; }
       .totals table { width: 100%; border-collapse: collapse; }
       .totals td { padding: 5px 4px; font-size: 12.5px; }
@@ -221,11 +201,9 @@ function buildHtml(challan) {
       .totals .grand-row td:first-child { border-radius: 4px 0 0 4px; padding-left: 10px; }
       .totals .grand-row td:last-child { border-radius: 0 4px 4px 0; padding-right: 10px; }
 
-      /* ---------- Narration / Terms ---------- */
       .narration { margin-top: 8px; }
       .narration p { margin: 4px 0 0; color: #374151; font-size: 12px; }
 
-      /* ---------- Footer ---------- */
       .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 0 0 12px; }
       .footer { text-align: center; font-size: 11px; color: #9ca3af; padding-bottom: 8px; }
       .footer-wrap { margin-top: auto; padding-top: 28px; }
@@ -266,22 +244,25 @@ function buildHtml(challan) {
         <tr>
           <th>#</th><th>Item</th><th>HSN</th>
           <th class="num">Qty</th><th class="num">Rate</th><th class="num">Disc %</th>
-          <th class="num">GST %</th><th class="num">Amount</th>
+          ${gstEnabled ? '<th class="num">GST %</th>' : ""}
+          <th class="num">Amount</th>
         </tr>
       </thead>
-      <tbody>${buildItemRows(items) || `<tr><td colspan="8" style="text-align:center;color:#9ca3af;padding:16px;">No items</td></tr>`}</tbody>
+      <tbody>${buildItemRows(items, gstEnabled) || `<tr><td colspan="${gstEnabled ? 8 : 7}" style="text-align:center;color:#9ca3af;padding:16px;">No items</td></tr>`}</tbody>
     </table>
 
     <div class="totals">
       <table>
         <tr><td class="label">Subtotal</td><td class="value">${money(subTotal)}</td></tr>
         ${totalDiscount > 0 ? `<tr><td class="label">Discount</td><td class="value">- ${money(totalDiscount)}</td></tr>` : ""}
-        ${!isInterstate ? `
-        <tr><td class="label">CGST</td><td class="value">${money(totalGst / 2)}</td></tr>
-        <tr><td class="label">SGST</td><td class="value">${money(totalGst / 2)}</td></tr>
-        ` : `
-        <tr><td class="label">IGST</td><td class="value">${money(totalGst)}</td></tr>
-        `}
+        ${gstEnabled ? (
+          !isInterstate ? `
+          <tr><td class="label">CGST</td><td class="value">${money(totalGst / 2)}</td></tr>
+          <tr><td class="label">SGST</td><td class="value">${money(totalGst / 2)}</td></tr>
+          ` : `
+          <tr><td class="label">IGST</td><td class="value">${money(totalGst)}</td></tr>
+          `
+        ) : ""}
         <tr class="grand-row"><td>Total Payable</td><td class="value">${money(grandTotal)}</td></tr>
       </table>
     </div>

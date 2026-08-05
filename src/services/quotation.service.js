@@ -11,6 +11,9 @@
  * MAX(quotation_seq) on the quotations table itself, guarded by a
  * Postgres transaction-scoped advisory lock (per company_id) so two
  * concurrent creates can't grab the same number.
+ *
+ * GST handling: gst_enabled is read once per create from
+ * app_test.company_details and applied to every line item.
  */
 
 import pool from "../db/index.js";
@@ -35,11 +38,6 @@ function toNum(v, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
-// Normalizes an optional date field so it never reaches Postgres as "".
-// Default parameters (`= null`) only fire on `undefined`, NOT on an
-// empty string — and Postgres' `date` column rejects "" outright with
-// "invalid input syntax for type date: ''". Any blank/whitespace-only
-// value is coerced to a real null here instead.
 function normalizeDate(v) {
   if (v === undefined || v === null) return null;
   const trimmed = String(v).trim();
@@ -50,16 +48,36 @@ function formatQuotationNo(seq) {
   return String(seq).padStart(QUOTATION_PAD_LENGTH, "0");
 }
 
-function computeItem(item, supplyType = "intrastate") {
+function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
   const qty        = toNum(item.qty);
   const rate       = toNum(item.rate);
   const discPct    = toNum(item.discount_percent);
-  const gstRateStr = String(item.gst_rate || "0%").replace("%", "");
-  const gstRate    = toNum(gstRateStr);
 
   const grossAmt   = round2(qty * rate);
   const discAmt    = round2(grossAmt * discPct / 100);
   const taxableAmt = round2(grossAmt - discAmt);
+
+  if (!gstEnabled) {
+    return {
+      item_name:        String(item.item_name || "").trim(),
+      godown_name:      String(item.godown_name || "").trim() || null,
+      bin:              String(item.bin || "").trim() || null,
+      hsn_code:         String(item.hsn_code   || "").trim() || null,
+      qty,
+      rate,
+      gst_rate:         "0%",
+      discount_percent: discPct,
+      taxable_amount:   taxableAmt,
+      cgst_amount:      0,
+      sgst_amount:      0,
+      igst_amount:      0,
+      line_total:       taxableAmt,
+      sort_order:       toNum(item.sort_order, 0),
+    };
+  }
+
+  const gstRateStr = String(item.gst_rate || "0%").replace("%", "");
+  const gstRate    = toNum(gstRateStr);
   const totalTax   = round2(taxableAmt * gstRate / 100);
 
   let cgst = 0, sgst = 0, igst = 0;
@@ -110,11 +128,6 @@ function computeTotals(computedItems) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL: allocateNextQuotationNumber  (runs inside transaction)
-//
-// pg_advisory_xact_lock is scoped to the current transaction and released
-// automatically on COMMIT/ROLLBACK — no separate table or row to manage.
-// Locking per company_id means quotations for different companies never
-// block each other.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function allocateNextQuotationNumber(client, companyId) {
@@ -129,6 +142,18 @@ async function allocateNextQuotationNumber(client, companyId) {
 
   const nextSeq = Number(maxRes.rows[0].max_seq) + 1;
   return { quotationNo: formatQuotationNo(nextSeq), seq: nextSeq };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL: getGstEnabled  (runs inside transaction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getGstEnabled(client, companyId) {
+  const res = await client.query(
+    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+    [companyId]
+  );
+  return res.rows[0]?.gst_enabled ?? false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,14 +178,6 @@ export async function peekNextQuotationNumber(companyId) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: createQuotation
-//
-// FIX APPLIED: quotation_date and valid_until are now passed through
-// normalizeDate() before hitting the INSERT. Previously, a blank date
-// input on the frontend sent valid_until: "" — which slips past the
-// `= null` default (defaults only apply to `undefined`) and gets
-// inserted as a literal empty string into a Postgres `date` column,
-// which Postgres rejects with:
-//   invalid input syntax for type date: ""
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function createQuotation(data) {
@@ -187,9 +204,6 @@ export async function createQuotation(data) {
     if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
   }
 
-  const computedItems = items.map((it) => computeItem(it, supply_type));
-  const totals        = computeTotals(computedItems);
-
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -201,6 +215,12 @@ export async function createQuotation(data) {
       );
       if (compRes.rows.length) company_name = compRes.rows[0].name;
     }
+
+    // Determine GST status once, apply to every line item
+    const gstEnabled = await getGstEnabled(client, company_id);
+
+    const computedItems = items.map((it) => computeItem(it, supply_type, gstEnabled));
+    const totals        = computeTotals(computedItems);
 
     // Atomically claim next number (0001, 0002, ...)
     const { quotationNo, seq } = await allocateNextQuotationNumber(client, company_id);
@@ -256,7 +276,7 @@ export async function createQuotation(data) {
     }
 
     await client.query("COMMIT");
-    return { ...quotation, items: insertedItems };
+    return { ...quotation, items: insertedItems, gst_enabled: gstEnabled };
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -268,15 +288,10 @@ export async function createQuotation(data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getAllQuotations
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: getAllQuotations
 //
-// Now returns items[] and item_count per quotation via a LATERAL join +
+// Returns items[] and item_count per quotation via a LATERAL join +
 // json_agg, so the list view can render everything the frontend needs
-// (item name, godown, HSN, qty, rate, gst%, disc%, line total) without a
-// second round-trip per row.
+// without a second round-trip per row.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getAllQuotations(companyId, filters = {}) {
@@ -339,6 +354,7 @@ export async function getAllQuotations(companyId, filters = {}) {
 
   return quotationRes.rows;
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getQuotationById
 // ─────────────────────────────────────────────────────────────────────────────
@@ -357,7 +373,13 @@ export async function getQuotationById(quotationId, companyId) {
     [quotationId]
   );
 
-  return { ...quotationRes.rows[0], items: itemsRes.rows };
+  const gstStatusRes = await pool.query(
+    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+    [companyId]
+  );
+  const gstEnabled = gstStatusRes.rows[0]?.gst_enabled ?? false;
+
+  return { ...quotationRes.rows[0], items: itemsRes.rows, gst_enabled: gstEnabled };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

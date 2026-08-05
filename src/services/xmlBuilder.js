@@ -1543,13 +1543,13 @@ export const getCompanyDetailsXML = (company) => {
                 <FETCH>EMAIL</FETCH>
                 <FETCH>STATENAME</FETCH>
                 <FETCH>ISGSTON</FETCH>
+                <FETCH>GSTREGISTRATIONTYPE</FETCH>
             </FETCHLIST>
         </DESC>
     </BODY>
 </ENVELOPE>
 `;
 };
-
 export const getCompanyGSTDetailsXML = (company) => {
   return `
 <ENVELOPE>
