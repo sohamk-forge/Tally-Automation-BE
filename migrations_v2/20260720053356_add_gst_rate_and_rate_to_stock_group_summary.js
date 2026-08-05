@@ -1,6 +1,7 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("stock_group_summary", (table) => {
       table.decimal("gst_rate", null)
         .notNullable()
@@ -16,7 +17,7 @@ export async function up(knex) {
 
 export async function down(knex) {
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("stock_group_summary", (table) => {
       table.decimal("gst_rate", 5, 2)
         .notNullable()

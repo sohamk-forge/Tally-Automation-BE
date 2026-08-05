@@ -4,6 +4,8 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { SYNC_QUEUE_NAME } from "../queues/sync.queue.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -36,7 +38,7 @@ async function processJob(job) {
 
   const claimResult = await pool.query(
     `
-    UPDATE app_test.job_logs
+    UPDATE ${DB_SCHEMA}.job_logs
     SET
       status = 'running',
       started_at = NOW()
@@ -127,7 +129,7 @@ async function processJob(job) {
 
       await pool.query(
         `
-        UPDATE app_test.job_logs
+        UPDATE ${DB_SCHEMA}.job_logs
         SET
           status = 'failed',
           error_message = $1,
@@ -149,7 +151,7 @@ async function processJob(job) {
 
     await pool.query(
       `
-      UPDATE app_test.job_logs
+      UPDATE ${DB_SCHEMA}.job_logs
       SET
         status = 'completed',
         error_message = NULL,
@@ -170,7 +172,7 @@ async function processJob(job) {
 
   } catch (err) {
     await pool.query(
-      `UPDATE app_test.job_logs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2`,
+      `UPDATE ${DB_SCHEMA}.job_logs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2`,
       [`${err.message}`, id]
     );
     throw err;

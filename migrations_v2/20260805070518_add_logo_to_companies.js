@@ -1,8 +1,9 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 // migrations/xxxxxxxxxxxxxx_add_logo_to_companies.js
 
 export async function up(knex) {
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("companies", (table) => {
       // Raw bytes of the logo image (already converted from PDF -> PNG
       // before it reaches this column). Stored once at upload time and
@@ -21,7 +22,7 @@ export async function up(knex) {
 
 export async function down(knex) {
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("companies", (table) => {
       table.dropColumn("logo_data");
       table.dropColumn("logo_mime_type");

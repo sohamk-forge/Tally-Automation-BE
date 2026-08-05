@@ -1,7 +1,8 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
     await knex.schema
-        .withSchema("app_test")
+        .withSchema(DB_SCHEMA)
         .table("connector_pairing_tokens", (table) => {
 
             // Add company_id column
@@ -9,7 +10,7 @@ export async function up(knex) {
                 .unsigned()
                 .nullable()
                 .references("id")
-                .inTable("app_test.companies")
+                .inTable(`${DB_SCHEMA}.companies`)
                 .onDelete("CASCADE");
 
             // Add index for faster lookups
@@ -25,7 +26,7 @@ export async function up(knex) {
 export async function down(knex) {
 
     await knex.schema
-        .withSchema("app_test")
+        .withSchema(DB_SCHEMA)
         .table("connector_pairing_tokens", (table) => {
 
             // Drop the foreign key and column

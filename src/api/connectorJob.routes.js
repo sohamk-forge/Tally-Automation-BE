@@ -1,6 +1,8 @@
 import express from "express";
 import pool from "../db/index.js";
 import authMiddleware from "../middleware/auth.middleware.js";
+import { DB_SCHEMA } from "../config/db.js";
+
 import {
   applyConnectorJobResult,
   ConnectorJobNotFoundError
@@ -26,7 +28,7 @@ async function resolveConnectorCompanyId(req) {
   const result = await pool.query(
     `
     SELECT company_id
-    FROM app_test.connector_machines
+    FROM ${DB_SCHEMA}.connector_machines
     WHERE user_id = $1
       AND machine_id = $2
       AND tally_connected = true
@@ -64,11 +66,11 @@ router.post("/jobs/poll", authMiddleware, async (req, res) => {
 
     const claimResult = await pool.query(
       `
-      UPDATE app_test.job_logs
+      UPDATE ${DB_SCHEMA}.job_logs
       SET status = 'in_progress', claimed_at = NOW()
       WHERE id = (
         SELECT id
-        FROM app_test.job_logs
+        FROM ${DB_SCHEMA}.job_logs
         WHERE status = 'pending'
           AND company_id = $1
         ORDER BY created_at ASC

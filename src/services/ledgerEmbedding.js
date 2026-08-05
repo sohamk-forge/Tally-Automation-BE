@@ -29,6 +29,8 @@ import { spawn } from "child_process";
 import path from "path";
 import db from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const SIMILARITY_THRESHOLD = 0.8;
 
 /*
@@ -86,7 +88,7 @@ export async function storeLedgerEmbedding({ companyName, groupKey, ledgerName }
   try {
     const [vector] = await embedGroupKeysBatch([groupKey]);
     await db.query(
-      `INSERT INTO app_test.ledger_embeddings (company_name, group_key, ledger_name, embedding)
+      `INSERT INTO ${DB_SCHEMA}.ledger_embeddings (company_name, group_key, ledger_name, embedding)
        VALUES ($1, $2, $3, $4)`,
       [companyName, groupKey, ledgerName, JSON.stringify(vector)]
     );
@@ -102,7 +104,7 @@ export async function storeLedgerEmbedding({ companyName, groupKey, ledgerName }
 READ PATH — BATCHED — given a company and a de-duplicated list of
 group_keys, embed all of them in ONE python call, then run one
 cosine-similarity lookup per distinct group_key against
-app_test.ledger_embeddings, scoped to company_name.
+${DB_SCHEMA}.ledger_embeddings, scoped to company_name.
 
 Returns a Map keyed by group_key:
   { suggested: true,  ledger_name: "...", similarity: 0.87 }
@@ -135,7 +137,7 @@ export async function suggestLedgersForGroupKeys(companyName, groupKeys) {
     try {
       const result = await db.query(
         `SELECT ledger_name, 1 - (embedding <=> $2) AS similarity
-         FROM app_test.ledger_embeddings
+         FROM ${DB_SCHEMA}.ledger_embeddings
          WHERE company_name = $1
          ORDER BY embedding <=> $2
          LIMIT 1`,

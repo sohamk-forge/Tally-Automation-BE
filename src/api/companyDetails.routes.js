@@ -1,3 +1,4 @@
+import { DB_SCHEMA } from "../config/db.js";
 /* ===================================================
     COMPANY DETAILS SYNC (address, email, GSTIN, state)
     Writes into the separate `company_details` table
@@ -18,7 +19,7 @@
         hasn't been synced at all yet)
       ===================================== */
       const companiesResult = await client.query(
-        `SELECT id, name FROM app_test.companies`
+        `SELECT id, name FROM ${DB_SCHEMA}.companies`
       );
 
       if (companiesResult.rows.length === 0) {
@@ -84,7 +85,7 @@
           ================================= */
           await client.query(
             `
-            INSERT INTO app_test.company_details
+            INSERT INTO ${DB_SCHEMA}.company_details
               (company_id, company_name, address, state, email, gstin, last_synced_at, created_at, updated_at)
             VALUES
               ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())

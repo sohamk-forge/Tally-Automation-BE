@@ -13,7 +13,7 @@
  * concurrent creates can't grab the same number.
  *
  * GST handling: gst_enabled is read once per create from
- * app_test.company_details and applied to every line item.
+ * ${DB_SCHEMA}.company_details and applied to every line item.
  */
 
 import pool from "../db/index.js";

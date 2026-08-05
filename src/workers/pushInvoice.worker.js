@@ -8,6 +8,8 @@ import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateXml } from "../services/xmlGenerator.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -52,7 +54,7 @@ const worker = new Worker(
     console.log(`Processing purchase invoice ID ${invoiceId} requested by user ${userId}`);
 
     const result = await pool.query(
-      `SELECT * FROM app_test.invoice_extractions WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.invoice_extractions WHERE id = $1`,
       [invoiceId]
     );
 
@@ -62,13 +64,13 @@ const worker = new Worker(
     }
 
     await pool.query(
-      `UPDATE app_test.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
+      `UPDATE ${DB_SCHEMA}.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
       [invoiceId]
     );
 
     try {
       const mappingResult = await pool.query(
-        `SELECT * FROM app_test.company_ledger_mappings WHERE company_id = $1`,
+        `SELECT * FROM ${DB_SCHEMA}.company_ledger_mappings WHERE company_id = $1`,
         [row.company_id]
       );
 
@@ -147,7 +149,7 @@ const worker = new Worker(
 
       await pool.query(
         `
-        UPDATE app_test.invoice_extractions
+        UPDATE ${DB_SCHEMA}.invoice_extractions
         SET
           sync_status = 'pending',
           error_message = NULL,
@@ -174,14 +176,14 @@ const worker = new Worker(
 
       if (isTemporaryInvoiceError(error)) {
         await pool.query(
-          `UPDATE app_test.invoice_extractions SET sync_status = 'pending', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE ${DB_SCHEMA}.invoice_extractions SET sync_status = 'pending', error_message = $1, updated_at = NOW() WHERE id = $2`,
           [error.message, invoiceId]
         );
         throw error;
       }
 
       await pool.query(
-        `UPDATE app_test.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE ${DB_SCHEMA}.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
         [error.message, invoiceId]
       );
 
@@ -213,7 +215,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { invoiceId } = job.data;
     await pool.query(
-      `UPDATE app_test.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE ${DB_SCHEMA}.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
       [error.message, invoiceId]
     );
     console.error(`Purchase invoice final failure recorded: ${invoiceId}`);

@@ -1,7 +1,8 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .table("company_sales_ledger_mappings", (table) => {
 
       table.string("sales_ledger");
@@ -13,7 +14,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .table("company_sales_ledger_mappings", (table) => {
 
       table.dropColumn("sales_ledger");

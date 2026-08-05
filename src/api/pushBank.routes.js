@@ -2,6 +2,8 @@ import express from "express";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { DB_SCHEMA } from "../config/db.js";
+
 import {
   bankQueue,
   BANK_JOB_OPTIONS,
@@ -61,7 +63,7 @@ router.post(
     const companyResult = await pool.query(
       `
       SELECT id
-      FROM app_test.companies
+      FROM ${DB_SCHEMA}.companies
       WHERE name = $1
       LIMIT 1
       `,
@@ -82,7 +84,7 @@ router.post(
 
     const insertResult = await pool.query(
       `
-      INSERT INTO app_test.push_bank
+      INSERT INTO ${DB_SCHEMA}.push_bank
       (
         company_id,
         company_name,

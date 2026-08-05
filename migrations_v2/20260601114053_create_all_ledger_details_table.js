@@ -1,7 +1,8 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .createTable("all_ledger_details", (table) => {
 
       table.increments("id").primary();
@@ -61,7 +62,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .dropTableIfExists("all_ledger_details");
 
 }

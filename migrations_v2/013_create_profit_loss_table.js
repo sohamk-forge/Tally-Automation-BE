@@ -1,7 +1,8 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .createTable("profit_loss", (table) => {
 
       table.increments("id").primary();
@@ -41,7 +42,7 @@ export async function up(knex) {
       table.integer("company_id")
         .unsigned()
         .references("id")
-        .inTable("app_test.companies")
+        .inTable(`${DB_SCHEMA}.companies`)
         .onDelete("CASCADE");
 
     });
@@ -51,7 +52,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .dropTableIfExists("profit_loss");
 
 }

@@ -1,8 +1,9 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   // Fix sales_items table - change quantity columns from NUMERIC to TEXT
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sales_items", (table) => {
 
       // Change actual_quantity from NUMERIC to TEXT
@@ -23,14 +24,14 @@ export async function up(knex) {
 
   // Drop company_id if it exists (old table doesn't have it)
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sales_items", (table) => {
       table.dropColumn("company_id");
     });
 
   // Fix vouchers table - change VARCHAR to TEXT
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("vouchers", (table) => {
       table.text("company_name").alter();
       table.text("parent_group").alter();
@@ -42,7 +43,7 @@ export async function up(knex) {
 
   // Fix sundry_creditors table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sundry_creditors", (table) => {
       table.text("company_name").alter();
       table.text("ledger_name").alter();
@@ -56,7 +57,7 @@ export async function up(knex) {
 
   // Fix sundry_debtors table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sundry_debtors", (table) => {
       table.text("company_name").alter();
       table.text("ledger_name").alter();
@@ -70,7 +71,7 @@ export async function up(knex) {
 
   // Fix bank_accounts table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("bank_accounts", (table) => {
       table.text("company_name").alter();
       table.text("ledger_name").alter();
@@ -86,7 +87,7 @@ export async function up(knex) {
 
   // Fix parent_groups table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("parent_groups", (table) => {
       table.text("company_name").alter();
       table.text("group_name").alter();
@@ -94,7 +95,7 @@ export async function up(knex) {
 
   // Fix all_parent_groups table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("all_parent_groups", (table) => {
       table.text("company_name").alter();
       table.text("ledger_name").alter();
@@ -107,7 +108,7 @@ export async function up(knex) {
 
   // Fix stock_group_summary table
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("stock_group_summary", (table) => {
       table.text("company_name").alter();
       table.text("group_name").alter();
@@ -120,7 +121,7 @@ export async function down(knex) {
 
   // Revert sales_items table back to NUMERIC
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sales_items", (table) => {
       // Note: This will fail if data contains non-numeric values
       table.specificType("actual_quantity", "NUMERIC").alter();
@@ -129,7 +130,7 @@ export async function down(knex) {
 
   // Revert vouchers table back to VARCHAR
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("vouchers", (table) => {
       table.string("company_name").alter();
       table.string("parent_group").alter();
@@ -141,12 +142,12 @@ export async function down(knex) {
 
   // Add back company_id to sales_items
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .alterTable("sales_items", (table) => {
       table.integer("company_id")
         .unsigned()
         .references("id")
-        .inTable("app_test.companies")
+        .inTable(`${DB_SCHEMA}.companies`)
         .onDelete("CASCADE");
     });
 }

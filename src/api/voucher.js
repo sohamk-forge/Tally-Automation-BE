@@ -11,7 +11,7 @@ Merged helper module. Now contains:
       Access Violation)" crash on this build. Do not re-enable
       without confirming Tally has a fix.
   - checkDuplicateFromDb() -> the ACTIVE duplicate check. Queries
-      app_test.vouchers directly. NO sync call happens here anymore —
+      ${DB_SCHEMA}.vouchers directly. NO sync call happens here anymore —
       it relies entirely on whatever data is already in the DB from
       your existing periodic/manual /voucher-sync runs. This removes
       Tally-reachability as a factor in party-ledger assignment.
@@ -23,6 +23,8 @@ Both voucher.routes.js and pushVoucher.worker.js import from THIS file.
 import axios from "axios";
 import { XMLParser } from "fast-xml-parser";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
+
 /*
 ====================================
 BANK DETECTION — statement upload validation
@@ -368,13 +370,13 @@ ACTIVE — DIRECT DB DUPLICATE CHECK (no sync call)
 
 CHANGED: previously this called /voucher-sync first, then checked
 the DB. That has been removed entirely. This now queries
-app_test.vouchers directly, relying on whatever data your existing
+${DB_SCHEMA}.vouchers directly, relying on whatever data your existing
 periodic/manual sync has already populated. Party-ledger assignment
 and the pre-push worker check are now fully independent of whether
 Tally is reachable at that exact moment.
 
 Uses the party_ledger_name column directly (confirmed present on
-app_test.vouchers), and still inspects ledger_entries (jsonb) to
+${DB_SCHEMA}.vouchers), and still inspects ledger_entries (jsonb) to
 confirm the bank ledger + amount side of the entry.
 ====================================
 */
@@ -393,7 +395,7 @@ export async function checkDuplicateFromDb({
   const result = await pool.query(
     `
     SELECT id, voucher_number, guid, party_ledger_name, ledger_entries
-    FROM app_test.vouchers
+    FROM ${DB_SCHEMA}.vouchers
     WHERE company_id = $1
       AND voucher_date = $2
       AND voucher_type ILIKE $3

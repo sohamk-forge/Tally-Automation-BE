@@ -2,9 +2,11 @@
 //
 // GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
 // quotation.gst_enabled is true — set upstream in quotation.service.js
-// from app_test.company_details.
+// from ${DB_SCHEMA}.company_details.
 
 import puppeteer from "puppeteer";
+
+import { DB_SCHEMA } from "../config/db.js";
 
 let browserPromise = null;
 function getBrowser() {

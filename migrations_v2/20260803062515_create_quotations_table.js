@@ -1,7 +1,8 @@
+import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
   // Quotation Header
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .createTable("quotations", (table) => {
       table.increments("id").primary();
 
@@ -10,7 +11,7 @@ export async function up(knex) {
         .unsigned()
         .notNullable()
         .references("id")
-        .inTable("app_test.companies")
+        .inTable(`${DB_SCHEMA}.companies`)
         .onDelete("CASCADE");
 
       table.string("company_name");
@@ -48,7 +49,7 @@ export async function up(knex) {
 
   // Quotation Items
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .createTable("quotation_items", (table) => {
       table.increments("id").primary();
 
@@ -57,7 +58,7 @@ export async function up(knex) {
         .unsigned()
         .notNullable()
         .references("id")
-        .inTable("app_test.quotations")
+        .inTable(`${DB_SCHEMA}.quotations`)
         .onDelete("CASCADE");
 
       table.string("item_name").notNullable();
@@ -94,10 +95,10 @@ export async function up(knex) {
 
 export async function down(knex) {
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .dropTableIfExists("quotation_items");
 
   await knex.schema
-    .withSchema("app_test")
+    .withSchema(DB_SCHEMA)
     .dropTableIfExists("quotations");
 }

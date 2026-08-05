@@ -8,6 +8,8 @@ import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { getStockItemOpeningXML } from "../services/pushXmlBuilder.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -52,7 +54,7 @@ const worker = new Worker(
     console.log(`Processing alter stock item ID ${stockItemId} requested by user ${userId}`);
 
     const result = await pool.query(
-      `SELECT * FROM app_test.push_stock_item WHERE id = $1`,
+      `SELECT * FROM ${DB_SCHEMA}.push_stock_item WHERE id = $1`,
       [stockItemId]
     );
 
@@ -62,7 +64,7 @@ const worker = new Worker(
     }
 
     await pool.query(
-      `UPDATE app_test.push_stock_item SET status = 'processing', updated_at = NOW() WHERE id = $1`,
+      `UPDATE ${DB_SCHEMA}.push_stock_item SET status = 'processing', updated_at = NOW() WHERE id = $1`,
       [stockItemId]
     );
 
@@ -106,7 +108,7 @@ const worker = new Worker(
       });
 
       await pool.query(
-        `UPDATE app_test.push_stock_item SET status = 'pending', updated_at = NOW() WHERE id = $1`,
+        `UPDATE ${DB_SCHEMA}.push_stock_item SET status = 'pending', updated_at = NOW() WHERE id = $1`,
         [stockItemId]
       );
 
@@ -127,14 +129,14 @@ const worker = new Worker(
 
       if (isTemporaryAlterStockItemError(error)) {
         await pool.query(
-          `UPDATE app_test.push_stock_item SET status = 'pending', last_error = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE ${DB_SCHEMA}.push_stock_item SET status = 'pending', last_error = $1, updated_at = NOW() WHERE id = $2`,
           [error.message, stockItemId]
         );
         throw error;
       }
 
       await pool.query(
-        `UPDATE app_test.push_stock_item SET status = 'failed', last_error = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE ${DB_SCHEMA}.push_stock_item SET status = 'failed', last_error = $1, updated_at = NOW() WHERE id = $2`,
         [error.message, stockItemId]
       );
 
@@ -166,7 +168,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { stockItemId } = job.data;
     await pool.query(
-      `UPDATE app_test.push_stock_item SET status = 'failed', last_error = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE ${DB_SCHEMA}.push_stock_item SET status = 'failed', last_error = $1, updated_at = NOW() WHERE id = $2`,
       [error.message, stockItemId]
     );
     console.error(`Alter stock item final failure recorded: ${stockItemId}`);

@@ -13,11 +13,13 @@ import express from "express";
 import pool from "../db/index.js";
 import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const router = express.Router();
 
 async function getCompanyId(company, client) {
   const result = await client.query(
-    `SELECT id FROM app_test.companies WHERE name = $1`,
+    `SELECT id FROM ${DB_SCHEMA}.companies WHERE name = $1`,
     [company]
   );
   return result.rows[0]?.id || null;

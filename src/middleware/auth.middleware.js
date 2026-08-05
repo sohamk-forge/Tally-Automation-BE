@@ -1,6 +1,8 @@
 import jwt from "jsonwebtoken";
 import pool from "../db/index.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const authMiddleware = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -31,7 +33,7 @@ const authMiddleware = async (req, res, next) => {
     // Try as pairing token
     const result = await pool.query(
       `
-      SELECT user_id FROM app_test.connector_pairing_tokens
+      SELECT user_id FROM ${DB_SCHEMA}.connector_pairing_tokens
       WHERE token = $1 AND is_used = FALSE
       LIMIT 1
       `,

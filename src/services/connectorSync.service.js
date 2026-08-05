@@ -9,6 +9,8 @@
 import pool from "../db/index.js";
 import { createConnectorJob } from "./connectorJob.service.js";
 
+import { DB_SCHEMA } from "../config/db.js";
+
 const POLL_INTERVAL_MS = 500;    // check every 0.5 seconds ✅ FASTER!
 const TIMEOUT_MS = 120000;       // give up after 2 minutes
 
@@ -19,7 +21,7 @@ function sleep(ms) {
 /**
  * Send a sync XML request to Tally through the Connector.
  *
- * @param {number} companyId - app_test.companies.id
+ * @param {number} companyId - ${DB_SCHEMA}.companies.id
  * @param {string} xml       - Tally request XML
  * @param {string} syncType  - label for logging e.g. 'sync_ledgers'
  * @returns {Promise<string>} - response XML from Tally
@@ -39,7 +41,7 @@ export async function sendToTallyViaConnector(
     pairingResult = await pool.query(
       `
       SELECT cpt.user_id
-      FROM app_test.connector_pairing_tokens cpt
+      FROM ${DB_SCHEMA}.connector_pairing_tokens cpt
       WHERE cpt.company_id = $1
         AND cpt.user_id = $2
         AND cpt.is_used = TRUE
@@ -53,7 +55,7 @@ export async function sendToTallyViaConnector(
     pairingResult = await pool.query(
       `
       SELECT cpt.user_id
-      FROM app_test.connector_pairing_tokens cpt
+      FROM ${DB_SCHEMA}.connector_pairing_tokens cpt
       WHERE cpt.company_id = $1
         AND cpt.is_used = TRUE
       ORDER BY cpt.created_at DESC
@@ -103,7 +105,7 @@ export async function sendToTallyViaConnector(
     const result = await pool.query(
       `
       SELECT status, response_xml, error_message
-      FROM app_test.connector_jobs
+      FROM ${DB_SCHEMA}.connector_jobs
       WHERE id = $1
       `,
       [connectorJob.id]
