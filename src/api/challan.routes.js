@@ -17,6 +17,10 @@
  *   POST /api/v1/challan   { action: "create", ... }
  *        → Actually creates the challan and atomically claims the number.
  *
+ *   POST /api/v1/challan   { action: "update", ... }
+ *        → Updates an existing challan's header + replaces its line items.
+ *          challan_number/seq are never changed.
+ *
  *   POST /api/v1/challan   { action: "list", ... }
  *        → Returns all challans for a company (with optional filters).
  *
@@ -36,6 +40,7 @@
 import express from "express";
 import {
   createChallan,
+  updateChallan,
   getAllChallans,
   getChallanById,
   updateChallanStatus,
@@ -149,6 +154,60 @@ async function handleCreate(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// action = "update"
+//
+// Body:
+// {
+//   "action": "update",
+//   "company_id":  1,
+//   "challan_id":  42,          ← the numeric id, not the challan_number
+//   "challan_date": "2026-07-01",
+//   "customer_name": "ABC Traders",
+//   ...same editable fields as create, minus challan_number...
+//   "items": [ ... ]
+// }
+//
+// challan_number/seq are never changed by this action.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handleUpdate(req, res) {
+  const {
+    company_id, challan_id,
+    challan_date, customer_name, customer_gstin, customer_address,
+    narration, supply_type, items,
+  } = req.body;
+
+  if (!company_id)   return errRes(res, 400, "company_id is required");
+  if (!challan_id)   return errRes(res, 400, "challan_id is required");
+  if (!challan_date) return errRes(res, 400, "challan_date is required");
+  if (!Array.isArray(items) || items.length === 0) {
+    return errRes(res, 400, "items[] array with at least one item is required");
+  }
+
+  try {
+    const challan = await updateChallan(Number(challan_id), Number(company_id), {
+      challan_date,
+      customer_name,
+      customer_gstin,
+      customer_address,
+      narration,
+      supply_type,
+      items,
+    });
+
+    if (!challan) return errRes(res, 404, "Challan not found");
+
+    return ok(res, 200, {
+      message: `Challan ${challan.challan_number} updated successfully`,
+      data:    challan,
+    });
+  } catch (err) {
+    console.error("[Challan] update:", err.message);
+    return errRes(res, 500, err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // action = "list"
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -233,6 +292,8 @@ router.post("/", async (req, res) => {
   switch (action) {
     case "create":
       return handleCreate(req, res);
+    case "update":
+      return handleUpdate(req, res);
     case "list":
       return handleList(req, res);
     case "get":
@@ -242,7 +303,7 @@ router.post("/", async (req, res) => {
     default:
       return errRes(
         res, 400,
-        `Invalid or missing "action". Must be one of: "create", "list", "get", "update_status".`
+        `Invalid or missing "action". Must be one of: "create", "update", "list", "get", "update_status".`
       );
   }
 });

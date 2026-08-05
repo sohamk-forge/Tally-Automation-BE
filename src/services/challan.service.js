@@ -167,7 +167,6 @@ async function allocateNextChallanNumber(client, companyId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function peekNextChallanNumber(companyId) {
-  // Single optimized query — settings + count together
   const result = await pool.query(
     `SELECT
        cs.last_number,
@@ -177,7 +176,6 @@ export async function peekNextChallanNumber(companyId) {
     [companyId]
   );
 
-  // No settings yet OR challans cleared → return 0001
   if (!result.rows.length || parseInt(result.rows[0].challan_count, 10) === 0) {
     return { next_challan_number: formatChallanNo(1), current_seq: 0 };
   }
@@ -222,7 +220,6 @@ export async function createChallan(data) {
   try {
     await client.query("BEGIN");
 
-    // If company_name not sent, fetch from companies table
     if (!company_name) {
       const compRes = await client.query(
         `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`,
@@ -231,10 +228,8 @@ export async function createChallan(data) {
       if (compRes.rows.length) company_name = compRes.rows[0].name;
     }
 
-    // Atomically claim next number (0001, 0002, ...)
     const { challanNo, seq } = await allocateNextChallanNumber(client, company_id);
 
-    // Insert challan header
     const challanRes = await client.query(
       `INSERT INTO ${DB_SCHEMA}.challans (
         company_id, company_name, challan_number, challan_seq,
@@ -259,7 +254,115 @@ export async function createChallan(data) {
     const challan   = challanRes.rows[0];
     const challanId = challan.id;
 
-    // Insert line items
+    const insertedItems = [];
+    for (const [idx, it] of computedItems.entries()) {
+      const itemRes = await client.query(
+        `INSERT INTO ${DB_SCHEMA}.challan_items (
+          challan_id, item_name, godown_name, hsn_code,
+          qty, rate, gst_rate, discount_percent,
+          taxable_amount, cgst_amount, sgst_amount, igst_amount,
+          line_total, sort_order
+        ) VALUES (
+          $1,$2,$3,$4,
+          $5,$6,$7,$8,
+          $9,$10,$11,$12,
+          $13,$14
+        ) RETURNING *`,
+        [
+          challanId, it.item_name, it.godown_name, it.hsn_code,
+          it.qty, it.rate, it.gst_rate, it.discount_percent,
+          it.taxable_amount, it.cgst_amount, it.sgst_amount, it.igst_amount,
+          it.line_total, idx,
+        ]
+      );
+      insertedItems.push(itemRes.rows[0]);
+    }
+
+    await client.query("COMMIT");
+    return { ...challan, items: insertedItems };
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: updateChallan
+// Updates an existing challan's header + replaces its line items.
+// challan_number/seq are NEVER changed — only the editable fields.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function updateChallan(challanId, companyId, data) {
+  const {
+    challan_date,
+    customer_name    = null,
+    customer_gstin   = null,
+    customer_address = null,
+    narration        = null,
+    supply_type      = "intrastate",
+    items            = [],
+  } = data;
+
+  if (!challan_date) throw new Error("challan_date is required");
+  if (!items.length) throw new Error("At least one item is required");
+
+  for (const [i, item] of items.entries()) {
+    if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
+  }
+
+  const computedItems = items.map((it) => computeItem(it, supply_type));
+  const totals        = computeTotals(computedItems);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const existingRes = await client.query(
+      `SELECT id FROM ${DB_SCHEMA}.challans
+       WHERE id = $1 AND company_id = $2
+       FOR UPDATE`,
+      [challanId, companyId]
+    );
+
+    if (!existingRes.rows.length) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const updateRes = await client.query(
+      `UPDATE ${DB_SCHEMA}.challans SET
+        challan_date      = $1,
+        customer_name     = $2,
+        customer_gstin    = $3,
+        customer_address  = $4,
+        sub_total         = $5,
+        total_cgst        = $6,
+        total_sgst        = $7,
+        total_igst        = $8,
+        total_tax         = $9,
+        grand_total       = $10,
+        narration         = $11,
+        updated_at        = NOW()
+      WHERE id = $12 AND company_id = $13
+      RETURNING *`,
+      [
+        challan_date, customer_name, customer_gstin, customer_address,
+        totals.sub_total, totals.total_cgst, totals.total_sgst,
+        totals.total_igst, totals.total_tax, totals.grand_total,
+        narration, challanId, companyId,
+      ]
+    );
+
+    const challan = updateRes.rows[0];
+
+    await client.query(
+      `DELETE FROM ${DB_SCHEMA}.challan_items WHERE challan_id = $1`,
+      [challanId]
+    );
+
     const insertedItems = [];
     for (const [idx, it] of computedItems.entries()) {
       const itemRes = await client.query(
@@ -328,7 +431,6 @@ export async function getAllChallans(companyId, filters = {}) {
     values.push(`%${filters.customer_name}%`);
   }
 
-  // Fetch matching challans first
   const challanRes = await pool.query(
     `SELECT
        c.id,

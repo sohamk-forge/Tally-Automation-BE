@@ -1588,3 +1588,49 @@ export const getCompanyGSTDetailsXML = (company) => {
 </ENVELOPE>
 `;
 };
+export const getProfitLossReportXML = (company, fromDate, toDate) => {
+  return `
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export Data</TALLYREQUEST>
+  </HEADER>
+
+  <BODY>
+
+    <EXPORTDATA>
+
+      <REQUESTDESC>
+
+        <REPORTNAME>
+          Profit and Loss
+        </REPORTNAME>
+
+        <STATICVARIABLES>
+
+          <SVEXPORTFORMAT>
+            $$SysName:XML
+          </SVEXPORTFORMAT>
+
+          <SVCURRENTCOMPANY>
+            ${company}
+          </SVCURRENTCOMPANY>
+
+          <SVFROMDATE TYPE="Date">
+            ${fromDate}
+          </SVFROMDATE>
+
+          <SVTODATE TYPE="Date">
+            ${toDate}
+          </SVTODATE>
+
+        </STATICVARIABLES>
+
+      </REQUESTDESC>
+
+    </EXPORTDATA>
+
+  </BODY>
+
+</ENVELOPE>
+`;
+};
