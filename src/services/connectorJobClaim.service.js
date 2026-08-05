@@ -27,40 +27,76 @@ export async function claimPendingConnectorJobs({ userId }) {
 
   try {
     // Start transaction
-    await client.query("BEGIN");
+await client.query("BEGIN");
 
-    // Step 1: Lock all pending jobs for this user
-    // Step 2: Mark them as 'processing' 
-    // Both happen atomically
-    const result = await client.query(
-      `
-      WITH claimed_jobs AS (
-        SELECT id
-        FROM app_test.connector_jobs
-        WHERE user_id = $1
-          AND status = 'pending'
-        ORDER BY created_at ASC
-        FOR UPDATE SKIP LOCKED
-      )
-      UPDATE app_test.connector_jobs AS cj
-      SET
-        status = 'processing',
-        claimed_at = NOW(),
-        updated_at = NOW()
-      FROM claimed_jobs
-      WHERE cj.id = claimed_jobs.id
-      RETURNING
-        cj.id,
-        cj.user_id,
-        cj.job_type,
-        cj.request_xml,
-        cj.payload,
-        cj.status,
-        cj.attempt_count,
-        cj.created_at
-      `,
-      [userId]  // $1: user_id from connector's pairing token
-    );
+// =====================================================
+// MARK STUCK PROCESSING JOBS AS FAILED
+// =====================================================
+// If connector claimed a job but never returned a result
+// (connector crash, network issue, Tally timeout, etc.),
+// don't leave the job stuck in "processing" forever.
+
+const staleJobs = await client.query(
+  `
+  UPDATE app_test.connector_jobs
+  SET
+    status = 'failed',
+    error_message = 'Connector processing timeout - no result received',
+    completed_at = NOW(),
+    updated_at = NOW()
+  WHERE user_id = $1
+    AND status = 'processing'
+    AND claimed_at IS NOT NULL
+    AND claimed_at < NOW() - INTERVAL '5 minutes'
+  RETURNING
+    id,
+    job_type,
+    payload
+  `,
+  [userId]
+);
+
+if (staleJobs.rows.length > 0) {
+  console.warn("⚠️ STALE CONNECTOR JOBS MARKED FAILED:", {
+    userId,
+    count: staleJobs.rows.length,
+    jobIds: staleJobs.rows.map(job => job.id)
+  });
+}
+
+// =====================================================
+// NOW CLAIM NEW PENDING JOBS
+// =====================================================
+
+const result = await client.query(
+  `
+  WITH claimed_jobs AS (
+    SELECT id
+    FROM app_test.connector_jobs
+    WHERE user_id = $1
+      AND status = 'pending'
+    ORDER BY created_at ASC
+    FOR UPDATE SKIP LOCKED
+  )
+  UPDATE app_test.connector_jobs AS cj
+  SET
+    status = 'processing',
+    claimed_at = NOW(),
+    updated_at = NOW()
+  FROM claimed_jobs
+  WHERE cj.id = claimed_jobs.id
+  RETURNING
+    cj.id,
+    cj.user_id,
+    cj.job_type,
+    cj.request_xml,
+    cj.payload,
+    cj.status,
+    cj.attempt_count,
+    cj.created_at
+  `,
+  [userId]
+);
 
     // Commit transaction
     await client.query("COMMIT");

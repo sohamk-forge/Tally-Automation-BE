@@ -263,16 +263,21 @@ import { DB_SCHEMA } from "../config/db.js";
     "Amount"   // keep as last-resort fallback only
   ]));
 
-  const gstPercent = safeNumber(getValue(row, [
-    "GST Rate(%) 0,3,5,12,18, 28",
-    "GST Rate(%) 0,5,12,18,28",
-    "GST Rate (%) 0,5,12,18,28",
-    "GST %",
-    "GST Percentage",
-    "GST Rate",
-    "Gst %",
-    "GST"
-  ]));
+const gstPercent = safeNumber(getValue(row, [
+  // Exact/possible Excel headers
+  "GST Rate(%) 0, 3, 5, 12, 18, 28",
+  "GST Rate(%) 0, 5, 12, 18, 28",
+  "GST Rate(%) 0,3,5,12,18,28",
+  "GST Rate(%) 0,5,12,18,28",
+  "GST Rate (%) 0,3,5,12,18,28",
+
+  // Generic headers
+  "GST %",
+  "GST Percentage",
+  "GST Rate",
+  "Gst %",
+  "GST"
+]));
 
   const tdsAmount = Math.abs(safeNumber(getValue(row, [
     "TDS",
