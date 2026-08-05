@@ -18,6 +18,7 @@ import {
 } from "../api/voucher.js";
 
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -302,27 +303,29 @@ const worker = new Worker(
 
       const pairing = pairingResult.rows[0];
 
-      if (!pairing) {
-        throw new Error(`No connector pairing found for voucher ${voucherId}`);
-      }
+     if (!voucher.user_id) {
+  throw new Error(`Missing user_id for voucher ${voucherId}`);
+}
 
-      if (Number(pairing.candidate_count) > 1) {
-        console.warn(
-          ` AMBIGUOUS PAIRING: company ${voucher.company_id} has ${pairing.candidate_count} used pairing tokens; routing voucher ${voucherId} to user ${pairing.user_id}`
-        );
-      }
+const connector = await resolveConnectorForCompany(voucher.company_id, voucher.user_id);
 
-      const connectorJob = await createConnectorJob({
-        userId: pairing.user_id,
-        jobType: "voucher",
-        requestXml: xml,
-        payload: {
-          voucher_id: voucherId,
-          company_id: voucher.company_id,
-          voucher_type: voucher.voucher_type
-        }
-      });
+if (!connector) {
+  throw new Error(`No active connector found for company ${voucher.company_id} and user ${voucher.user_id}`);
+}
 
+console.log(`🔗 Voucher connector resolved: acting=${voucher.user_id}, connector=${connector.user_id}`);
+
+const connectorJob = await createConnectorJob({
+  userId: connector.user_id,
+  jobType: "voucher",
+  requestXml: xml,
+  payload: {
+    voucher_id: voucherId,
+    company_id: voucher.company_id,
+    voucher_type: voucher.voucher_type,
+    requested_by_user_id: voucher.user_id
+  }
+});
       await pool.query(
         `UPDATE app_test.contra_vouchers
          SET status = 'PENDING_CONNECTOR', tally_response = NULL, duplicate_message = NULL, updated_at = NOW()

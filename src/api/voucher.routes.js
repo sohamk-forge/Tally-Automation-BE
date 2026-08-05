@@ -14,6 +14,8 @@ import {
 } from "../queues/voucher.queue.js";
 import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 
 
 const router = express.Router();
@@ -1171,8 +1173,7 @@ router.get("/filter", async (req, res) => {
    voucher that was previously force-pushed and later bounces back to
    WAITING_LEDGER/FAILED doesn't silently keep a stale force_push=true.
 =========================== */
-
-async function assignPartyLedger(vouchers, forcePushFlag) {
+async function assignPartyLedger(vouchers, forcePushFlag, userId) {
   const allowed = ["payment", "receipt", "contra"];
 
   const queued = [];
@@ -1199,20 +1200,21 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
 
     const isContra = v.voucher_type.toLowerCase() === "contra";
 
-    const result = await db.query(
-      `UPDATE ${DB_SCHEMA}.contra_vouchers
-       SET
-         party_ledger  = $1,
-         voucher_type  = $2,
-         transfer_bank = $3,
-         force_push    = $4,
-         status        = 'PENDING'
-       WHERE id = $5
-         AND status IN ('WAITING_LEDGER', 'FAILED')
-       RETURNING *`,
-      [v.party_ledger, v.voucher_type.toLowerCase(),
-       isContra ? v.party_ledger : null, forcePushFlag, v.id]
-    );
+      const result = await db.query(
+    `UPDATE ${DB_SCHEMA}.contra_vouchers
+     SET
+       party_ledger  = $1,
+       voucher_type  = $2,
+       transfer_bank = $3,
+       force_push    = $4,
+       user_id       = $5,
+       status        = 'PENDING'
+     WHERE id = $6
+       AND status IN ('WAITING_LEDGER', 'FAILED')
+     RETURNING *`,
+    [v.party_ledger, v.voucher_type.toLowerCase(),
+     isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
+  );
 
     if (result.rows.length === 0) {
       notFound.push(v.id);
@@ -1305,18 +1307,17 @@ async function assignPartyLedger(vouchers, forcePushFlag) {
 /* ===========================
    ASSIGN party_ledger + voucher_type (single OR bulk) — CANONICAL ROUTE
 =========================== */
-
-router.put("/party-ledger", async (req, res) => {
+router.put("/party-ledger", verifySession(), async (req, res) => {
   try {
-    const forcePushFlag = req.body.forcePush === true;
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
 
+    const forcePushFlag = req.body.forcePush === true;
     const vouchers = Array.isArray(req.body.vouchers)
       ? req.body.vouchers
-      : [{
-          id: req.body.id,
-          party_ledger: req.body.party_ledger,
-          voucher_type: req.body.voucher_type
-        }];
+      : [{ id: req.body.id, party_ledger: req.body.party_ledger, voucher_type: req.body.voucher_type }];
 
     if (!vouchers.length || !vouchers[0]?.id) {
       return res.status(400).json({
@@ -1325,37 +1326,53 @@ router.put("/party-ledger", async (req, res) => {
       });
     }
 
-    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag, userId);
     return res.status(status).json(body);
-
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-
 /* ===========================
    BACKWARD-COMPATIBLE ALIASES (temporary)
 =========================== */
-
-router.put("/bulk-party-ledger", async (req, res) => {
+router.put("/bulk-party-ledger", verifySession(), async (req, res) => {
   try {
+    const userId = await getLocalUserId(req.session.getUserId());
+
+    if (!userId) {
+      return res.status(404).json({
+        success: false,
+        message: "No profile found for this account"
+      });
+    }
+
     const forcePushFlag = req.body.forcePush === true;
-    const vouchers = Array.isArray(req.body.vouchers) ? req.body.vouchers : [];
+    const vouchers = Array.isArray(req.body.vouchers)
+      ? req.body.vouchers
+      : [];
 
     if (!vouchers.length) {
       return res.status(400).json({
         success: false,
-        message: "vouchers[] array is required. Each item needs: id, party_ledger, voucher_type"
+        message:
+          "vouchers[] array is required. Each item needs: id, party_ledger, voucher_type"
       });
     }
 
-    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
-    return res.status(status).json(body);
+    const { status, body } = await assignPartyLedger(
+      vouchers,
+      forcePushFlag,
+      userId
+    );
 
+    return res.status(status).json(body);
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message
+    });
   }
 });
 
@@ -1387,18 +1404,24 @@ router.put("/:id/party-ledger", async (req, res) => {
    to DUPLICATE_FOUND.
 =========================== */
 
-router.post("/:id/confirm-push", async (req, res) => {
+router.post("/:id/confirm-push", verifySession(), async (req, res) => {
   try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const voucherId = Number(req.params.id);
 
     const result = await db.query(
       `UPDATE ${DB_SCHEMA}.contra_vouchers
        SET status = 'PENDING',
-           force_push = true
+           force_push = true,
+           user_id = $2
        WHERE id = $1
          AND status IN ('WAITING_LEDGER', 'FAILED', 'DUPLICATE_FOUND')
        RETURNING *`,
-      [voucherId]
+      [voucherId, userId]
     );
 
     if (result.rows.length === 0) {
