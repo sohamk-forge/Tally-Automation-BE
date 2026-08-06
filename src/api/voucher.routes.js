@@ -14,8 +14,7 @@ import {
 } from "../queues/voucher.queue.js";
 import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
-import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
-import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { resolveUserId } from "../utils/resolveUserId.js";
 
 
 const router = express.Router();
@@ -1307,9 +1306,9 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
 /* ===========================
    ASSIGN party_ledger + voucher_type (single OR bulk) — CANONICAL ROUTE
 =========================== */
-router.put("/party-ledger", verifySession(), async (req, res) => {
+router.put("/party-ledger", async (req, res) => {
   try {
-    const userId = await getLocalUserId(req.session.getUserId());
+    const userId = await resolveUserId(req);
     if (!userId) {
       return res.status(404).json({ success: false, message: "No profile found for this account" });
     }
@@ -1336,9 +1335,9 @@ router.put("/party-ledger", verifySession(), async (req, res) => {
 /* ===========================
    BACKWARD-COMPATIBLE ALIASES (temporary)
 =========================== */
-router.put("/bulk-party-ledger", verifySession(), async (req, res) => {
+router.put("/bulk-party-ledger", async (req, res) => {
   try {
-    const userId = await getLocalUserId(req.session.getUserId());
+    const userId = await resolveUserId(req);
 
     if (!userId) {
       return res.status(404).json({
@@ -1404,9 +1403,9 @@ router.put("/:id/party-ledger", async (req, res) => {
    to DUPLICATE_FOUND.
 =========================== */
 
-router.post("/:id/confirm-push", verifySession(), async (req, res) => {
+router.post("/:id/confirm-push", async (req, res) => {
   try {
-    const userId = await getLocalUserId(req.session.getUserId());
+    const userId = await resolveUserId(req);
     if (!userId) {
       return res.status(404).json({ success: false, message: "No profile found for this account" });
     }
