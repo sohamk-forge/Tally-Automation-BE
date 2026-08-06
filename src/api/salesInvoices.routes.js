@@ -4,8 +4,6 @@ import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { salesQueue, getSalesJobId } from "../queues/sales.queue.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 const router = express.Router();
 
 function safeNumber(value) {
@@ -55,7 +53,7 @@ router.post("/sales-invoices", async (req, res) => {
     console.log("====================================");
 
     const companyResult = await pool.query(
-      `SELECT id FROM ${DB_SCHEMA}.companies WHERE TRIM(name) = TRIM($1)`,
+      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
       [company]
     );
 
@@ -202,7 +200,7 @@ router.post("/sales-invoices", async (req, res) => {
       existingInvoice = await pool.query(
         `
         SELECT id
-        FROM ${DB_SCHEMA}.sales_invoice_extractions
+        FROM app_test.sales_invoice_extractions
         WHERE id = $1
           AND company_id = $2
         LIMIT 1
@@ -216,7 +214,7 @@ router.post("/sales-invoices", async (req, res) => {
       existingInvoice = await pool.query(
         `
         SELECT id
-        FROM ${DB_SCHEMA}.sales_invoice_extractions
+        FROM app_test.sales_invoice_extractions
         WHERE company_id = $1
           AND LOWER(TRIM(invoice_no)) = LOWER(TRIM($2))
         LIMIT 1
@@ -232,7 +230,7 @@ router.post("/sales-invoices", async (req, res) => {
       existingInvoice = await pool.query(
         `
         SELECT id
-        FROM ${DB_SCHEMA}.sales_invoice_extractions
+        FROM app_test.sales_invoice_extractions
         WHERE company_id = $1
           AND LOWER(TRIM(customer_name)) = LOWER(TRIM($2))
           AND TRIM(invoice_date) = TRIM($3)
@@ -265,7 +263,7 @@ router.post("/sales-invoices", async (req, res) => {
       // retry sends a blank one, instead of wiping it.
       const updateResult = await pool.query(
         `
-        UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+        UPDATE app_test.sales_invoice_extractions
         SET
           customer_name = $1,
           gstin = $2,
@@ -302,7 +300,7 @@ router.post("/sales-invoices", async (req, res) => {
 
       const result = await pool.query(
         `
-        INSERT INTO ${DB_SCHEMA}.sales_invoice_extractions
+        INSERT INTO app_test.sales_invoice_extractions
         (
           company_id,
           company_name,
@@ -416,7 +414,7 @@ router.get("/sales-invoices", async (req, res) => {
 
     let query = `
       SELECT *
-      FROM ${DB_SCHEMA}.sales_invoice_extractions
+      FROM app_test.sales_invoice_extractions
       WHERE company_id = $1
     `;
     const params = [companyId];
@@ -493,7 +491,7 @@ router.delete("/sales-invoice-delete", async (req, res) => {
     const existing = await pool.query(
       `
       SELECT id 
-      FROM ${DB_SCHEMA}.sales_invoice_extractions
+      FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
       `,
       [invoice_ids]
@@ -521,7 +519,7 @@ router.delete("/sales-invoice-delete", async (req, res) => {
     // Bulk delete
     await pool.query(
       `
-      DELETE FROM ${DB_SCHEMA}.sales_invoice_extractions
+      DELETE FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
       `,
       [invoice_ids]

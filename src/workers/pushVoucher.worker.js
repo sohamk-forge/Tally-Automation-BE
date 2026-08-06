@@ -20,8 +20,6 @@ import {
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
@@ -114,7 +112,7 @@ function runPythonForXml(payload) {
 
 async function markStalePendingAsFailed() {
   const result = await pool.query(
-    `UPDATE ${DB_SCHEMA}.contra_vouchers
+    `UPDATE app_test.contra_vouchers
      SET status = 'FAILED', tally_response = 'Upload interrupted / Worker restarted', updated_at = NOW()
      WHERE status = 'PENDING' AND updated_at < NOW() - INTERVAL '5 minutes'
      RETURNING id`
@@ -134,7 +132,7 @@ async function markStalePendingAsFailed() {
 // decision, same pattern as markStalePendingAsFailed for plain PENDING.
 async function recoverStuckPendingConnectorVouchers() {
   const stuck = await pool.query(
-    `SELECT id FROM ${DB_SCHEMA}.contra_vouchers
+    `SELECT id FROM app_test.contra_vouchers
      WHERE status = 'PENDING_CONNECTOR'
        AND updated_at < NOW() - INTERVAL '${STUCK_CONNECTOR_THRESHOLD}'`
   );
@@ -149,7 +147,7 @@ async function recoverStuckPendingConnectorVouchers() {
     // after we've already told the user it failed and let them retry —
     // that combination is exactly how a real duplicate push happens.
     const expired = await pool.query(
-      `UPDATE ${DB_SCHEMA}.connector_jobs
+      `UPDATE app_test.connector_jobs
        SET status = 'failed', updated_at = NOW()
        WHERE job_type = 'voucher'
          AND status IN ('pending', 'processing')
@@ -159,7 +157,7 @@ async function recoverStuckPendingConnectorVouchers() {
     );
 
     await pool.query(
-      `UPDATE ${DB_SCHEMA}.contra_vouchers
+      `UPDATE app_test.contra_vouchers
        SET status = 'FAILED',
            tally_response = 'Connector did not confirm completion in time — marked failed for manual retry. If the connector actually pushed this before going silent, re-pushing will be caught by the duplicate check.',
            updated_at = NOW()
@@ -178,7 +176,7 @@ async function recoverStuckPendingConnectorVouchers() {
 
 async function enqueuePendingVoucherJobs() {
   const result = await pool.query(
-    `SELECT id FROM ${DB_SCHEMA}.contra_vouchers WHERE status = 'PENDING' ORDER BY id ASC`
+    `SELECT id FROM app_test.contra_vouchers WHERE status = 'PENDING' ORDER BY id ASC`
   );
   let enqueuedCount = 0;
   for (const row of result.rows) {
@@ -195,7 +193,7 @@ async function waitForConnectorJob(connectorJobId, voucherId) {
     await new Promise((r) => setTimeout(r, CONNECTOR_POLL_MS));
 
     const { rows } = await pool.query(
-      `SELECT status FROM ${DB_SCHEMA}.connector_jobs WHERE id = $1`,
+      `SELECT status FROM app_test.connector_jobs WHERE id = $1`,
       [connectorJobId]
     );
     const jobStatus = rows[0]?.status;
@@ -230,7 +228,7 @@ const worker = new Worker(
   async (job) => {
     const { voucherId } = job.data;
 
-    const result = await pool.query(`SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`, [voucherId]);
+    const result = await pool.query(`SELECT * FROM app_test.contra_vouchers WHERE id = $1`, [voucherId]);
     const voucher = result.rows[0];
 
     if (!voucher) return { voucherId, status: "not_found" };
@@ -263,7 +261,7 @@ const worker = new Worker(
 
         if (dup.exists) {
           await pool.query(
-            `UPDATE ${DB_SCHEMA}.contra_vouchers
+            `UPDATE app_test.contra_vouchers
              SET status = 'DUPLICATE_FOUND', duplicate_checked = true, duplicate_message = $1, updated_at = NOW()
              WHERE id = $2`,
             [dup.message, voucherId]
@@ -273,7 +271,7 @@ const worker = new Worker(
         }
 
         await pool.query(
-          `UPDATE ${DB_SCHEMA}.contra_vouchers SET duplicate_checked = true, duplicate_message = NULL WHERE id = $1`,
+          `UPDATE app_test.contra_vouchers SET duplicate_checked = true, duplicate_message = NULL WHERE id = $1`,
           [voucherId]
         );
       }
@@ -295,7 +293,7 @@ const worker = new Worker(
 
       const pairingResult = await pool.query(
         `SELECT user_id, COUNT(*) OVER () AS candidate_count
-         FROM ${DB_SCHEMA}.connector_pairing_tokens
+         FROM app_test.connector_pairing_tokens
          WHERE company_id = $1
            AND is_used = TRUE
          ORDER BY created_at DESC
@@ -329,7 +327,7 @@ const connectorJob = await createConnectorJob({
   }
 });
       await pool.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers
+        `UPDATE app_test.contra_vouchers
          SET status = 'PENDING_CONNECTOR', tally_response = NULL, duplicate_message = NULL, updated_at = NOW()
          WHERE id = $1`,
         [voucherId]
@@ -351,14 +349,14 @@ const connectorJob = await createConnectorJob({
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
         await pool.query(
-          `UPDATE ${DB_SCHEMA}.contra_vouchers SET status = 'PENDING', tally_response = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE app_test.contra_vouchers SET status = 'PENDING', tally_response = $1, updated_at = NOW() WHERE id = $2`,
           [error.message, voucherId]
         );
         throw error; // BullMQ retries per VOUCHER_JOB_OPTIONS
       }
 
       await pool.query(
-        `UPDATE ${DB_SCHEMA}.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
         [error.message, voucherId]
       );
       console.log(`💥 Voucher Failed: ${voucherId} — ${error.message}`);
@@ -385,7 +383,7 @@ worker.on("failed", async (job, error) => {
   try {
     const { voucherId } = job.data;
     await pool.query(
-      `UPDATE ${DB_SCHEMA}.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
       [error.message, voucherId]
     );
   } catch (updateError) {

@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .createTable(
       "connector_pairing_tokens",
       (table) => {
@@ -31,7 +30,7 @@ export async function up(knex) {
         // Foreign Key
         table.foreign("user_id")
           .references("id")
-          .inTable(`${DB_SCHEMA}.users`)
+          .inTable("app_test.users")
           .onDelete("CASCADE");
 
       }
@@ -42,7 +41,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .dropTableIfExists(
       "connector_pairing_tokens"
     );

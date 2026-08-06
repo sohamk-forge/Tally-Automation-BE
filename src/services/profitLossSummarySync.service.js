@@ -1,8 +1,6 @@
 import { getProfitLossReportXML } from "./xmlBuilder.js";
 import { sendToTallyViaConnector } from "./connectorSync.service.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 /* ===================================================
    DATE HELPERS
 =================================================== */
@@ -128,7 +126,7 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
 
   const upsert = await client.query(
     `
-    INSERT INTO ${DB_SCHEMA}.profit_loss_summary (
+    INSERT INTO app_test.profit_loss_summary (
       company_id, company_name, from_date, to_date,
       total_sales, total_purchase, opening_stock, closing_stock,
       direct_income, indirect_income, indirect_expenses,
@@ -157,7 +155,7 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
       result_type              = EXCLUDED.result_type,
       profit_margin_percent   = EXCLUDED.profit_margin_percent,
       guid                     = EXCLUDED.guid,
-      alter_id                = ${DB_SCHEMA}.profit_loss_summary.alter_id + 1,
+      alter_id                = app_test.profit_loss_summary.alter_id + 1,
       updated_at               = NOW()
     RETURNING *
     `,

@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("job_logs", (table) => {
 
       table.integer("company_id")
@@ -10,7 +9,7 @@ export async function up(knex) {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("SET NULL");
 
       table.string("source_type");
@@ -24,7 +23,7 @@ export async function up(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("job_logs", (table) => {
 
       table.index(
@@ -36,7 +35,7 @@ export async function up(knex) {
 
   await knex.raw(`
     CREATE UNIQUE INDEX idx_job_logs_dedupe
-    ON ${DB_SCHEMA}.job_logs (source_type, source_id)
+    ON app_test.job_logs (source_type, source_id)
     WHERE status IN ('pending', 'in_progress')
   `);
 
@@ -45,11 +44,11 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.raw(`
-    DROP INDEX IF EXISTS ${DB_SCHEMA}.idx_job_logs_dedupe
+    DROP INDEX IF EXISTS app_test.idx_job_logs_dedupe
   `);
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("job_logs", (table) => {
 
       table.dropIndex(
@@ -60,7 +59,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("job_logs", (table) => {
 
       table.dropForeign("company_id");

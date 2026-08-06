@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
   // Challan Header
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .createTable("challans", (table) => {
       table.increments("id").primary();
 
@@ -11,7 +10,7 @@ export async function up(knex) {
         .unsigned()
         .notNullable()
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
       table.string("company_name");
@@ -44,7 +43,7 @@ export async function up(knex) {
 
   // Challan Items
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .createTable("challan_items", (table) => {
       table.increments("id").primary();
 
@@ -53,7 +52,7 @@ export async function up(knex) {
         .unsigned()
         .notNullable()
         .references("id")
-        .inTable(`${DB_SCHEMA}.challans`)
+        .inTable("app_test.challans")
         .onDelete("CASCADE");
 
       table.string("item_name").notNullable();
@@ -88,10 +87,10 @@ export async function up(knex) {
 
 export async function down(knex) {
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .dropTableIfExists("challan_items");
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .dropTableIfExists("challans");
 }

@@ -1,6 +1,5 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export function up(knex) {
-  return knex.schema.withSchema(DB_SCHEMA).createTable("trends", (table) => {
+  return knex.schema.withSchema("app_test").createTable("trends", (table) => {
     table.increments("id").primary();
     table.string("company_name").notNullable();
     table.string("cache_key").notNullable(); // 'top_sales_ledgers' | 'sales_purchase_trend' | 'monthly_sales_trend'
@@ -11,5 +10,5 @@ export function up(knex) {
 }
 
 export function down(knex) {
-  return knex.schema.withSchema(DB_SCHEMA).dropTableIfExists("trends");
+  return knex.schema.withSchema("app_test").dropTableIfExists("trends");
 }

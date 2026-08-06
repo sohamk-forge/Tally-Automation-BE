@@ -925,7 +925,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
           party_ledger_name AS party_ledger,
           narration,
           voucher_date
-        FROM ${DB_SCHEMA}.vouchers
+        FROM app_test.vouchers
         WHERE company_name = $1
           AND party_ledger_name IS NOT NULL
           AND narration ILIKE $2
@@ -936,7 +936,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
       `
       WITH combined AS (
         SELECT party_ledger, narration, voucher_date
-        FROM ${DB_SCHEMA}.contra_vouchers
+        FROM app_test.contra_vouchers
         WHERE company_name = $1
           AND party_ledger IS NOT NULL
           AND status = 'SUCCESS'

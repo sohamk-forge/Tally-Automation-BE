@@ -1,9 +1,8 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   const exists =
     await knex.schema
-      .withSchema(DB_SCHEMA)
+      .withSchema("app_test")
       .hasColumn(
         "sales_items",
         "company_id"
@@ -12,13 +11,13 @@ export async function up(knex) {
   if (!exists) {
 
     await knex.schema
-      .withSchema(DB_SCHEMA)
+      .withSchema("app_test")
       .table("sales_items", (table) => {
 
         table.integer("company_id")
           .unsigned()
           .references("id")
-          .inTable(`${DB_SCHEMA}.companies`)
+          .inTable("app_test.companies")
           .onDelete("CASCADE");
 
         table.index(
@@ -36,7 +35,7 @@ export async function down(knex) {
 
   const exists =
     await knex.schema
-      .withSchema(DB_SCHEMA)
+      .withSchema("app_test")
       .hasColumn(
         "sales_items",
         "company_id"
@@ -45,7 +44,7 @@ export async function down(knex) {
   if (exists) {
 
     await knex.schema
-      .withSchema(DB_SCHEMA)
+      .withSchema("app_test")
       .table("sales_items", (table) => {
 
         table.dropIndex(

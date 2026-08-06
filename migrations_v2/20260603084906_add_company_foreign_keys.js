@@ -1,4 +1,3 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   // =========================
@@ -6,34 +5,34 @@ export async function up(knex) {
   // =========================
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("all_ledger_details", (table) => {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("push_stock_item", (table) => {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("units", (table) => {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
@@ -43,7 +42,7 @@ export async function up(knex) {
   // =========================
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("bank_od_accounts", (table) => {
 
       table.integer("company_id")
@@ -51,13 +50,13 @@ export async function up(knex) {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("invoice_extractions", (table) => {
 
       table.integer("company_id")
@@ -65,13 +64,13 @@ export async function up(knex) {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("push_bank", (table) => {
 
       table.integer("company_id")
@@ -79,7 +78,7 @@ export async function up(knex) {
 
       table.foreign("company_id")
         .references("id")
-        .inTable(`${DB_SCHEMA}.companies`)
+        .inTable("app_test.companies")
         .onDelete("CASCADE");
 
     });
@@ -89,7 +88,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("all_ledger_details", (table) => {
 
       table.dropForeign("company_id");
@@ -97,7 +96,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("push_stock_item", (table) => {
 
       table.dropForeign("company_id");
@@ -105,7 +104,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("units", (table) => {
 
       table.dropForeign("company_id");
@@ -113,7 +112,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("bank_od_accounts", (table) => {
 
       table.dropForeign("company_id");
@@ -122,7 +121,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("invoice_extractions", (table) => {
 
       table.dropForeign("company_id");
@@ -131,7 +130,7 @@ export async function down(knex) {
     });
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable("push_bank", (table) => {
 
       table.dropForeign("company_id");

@@ -1,6 +1,5 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 /**
- * ${DB_SCHEMA}.vouchers was never given the guid / (company_id, voucher_number,
+ * app_test.vouchers was never given the guid / (company_id, voucher_number,
  * voucher_date) unique constraints that app.vouchers received in
  * 20260519120000_add_indexes_and_constraints.js. Combined with a
  * check-then-insert race in the /voucher-sync route, this let duplicate
@@ -13,8 +12,8 @@ export async function up(knex) {
   // Keep the most recently updated row for each (company_id, voucher_number,
   // voucher_date), delete the rest.
   await knex.raw(`
-    DELETE FROM ${DB_SCHEMA}.vouchers v
-    USING ${DB_SCHEMA}.vouchers dupe
+    DELETE FROM app_test.vouchers v
+    USING app_test.vouchers dupe
     WHERE v.company_id = dupe.company_id
       AND v.voucher_number = dupe.voucher_number
       AND v.voucher_date = dupe.voucher_date
@@ -27,8 +26,8 @@ export async function up(knex) {
   // guid can be null/blank for older rows (fallback guid was only added
   // later), so only enforce uniqueness where it's actually set.
   await knex.raw(`
-    DELETE FROM ${DB_SCHEMA}.vouchers v
-    USING ${DB_SCHEMA}.vouchers dupe
+    DELETE FROM app_test.vouchers v
+    USING app_test.vouchers dupe
     WHERE v.guid IS NOT NULL
       AND v.guid <> ''
       AND v.guid = dupe.guid
@@ -38,7 +37,7 @@ export async function up(knex) {
       )
   `);
 
-  await knex.schema.withSchema(DB_SCHEMA).alterTable("vouchers", (table) => {
+  await knex.schema.withSchema("app_test").alterTable("vouchers", (table) => {
     table.unique(
       ["company_id", "voucher_number", "voucher_date"],
       "uq_app_test_vouchers_company_number_date"
@@ -47,15 +46,15 @@ export async function up(knex) {
 
   await knex.raw(`
     CREATE UNIQUE INDEX uq_app_test_vouchers_guid
-    ON ${DB_SCHEMA}.vouchers (guid)
+    ON app_test.vouchers (guid)
     WHERE guid IS NOT NULL AND guid <> ''
   `);
 }
 
 export async function down(knex) {
-  await knex.raw(`DROP INDEX IF EXISTS ${DB_SCHEMA}.uq_app_test_vouchers_guid`);
+  await knex.raw(`DROP INDEX IF EXISTS app_test.uq_app_test_vouchers_guid`);
 
-  await knex.schema.withSchema(DB_SCHEMA).alterTable("vouchers", (table) => {
+  await knex.schema.withSchema("app_test").alterTable("vouchers", (table) => {
     table.dropUnique(
       ["company_id", "voucher_number", "voucher_date"],
       "uq_app_test_vouchers_company_number_date"

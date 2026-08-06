@@ -1,12 +1,10 @@
 import pool from "../db/index.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: createConnectorJob
 // 
 // The ONLY entry point backend features should use to create work for the 
-// Connector. Creates a pending row in ${DB_SCHEMA}.connector_jobs.
+// Connector. Creates a pending row in app_test.connector_jobs.
 //
 // ⚠️  IMPORTANT: userId comes from connector_pairing_token.user_id
 //     NOT from connector_machine table (that table is NOT used)
@@ -36,7 +34,7 @@ export async function createConnectorJob({
   try {
     const result = await pool.query(
       `
-      INSERT INTO ${DB_SCHEMA}.connector_jobs
+      INSERT INTO app_test.connector_jobs
       (
         user_id,
         job_type,

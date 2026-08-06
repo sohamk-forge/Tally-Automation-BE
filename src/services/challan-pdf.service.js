@@ -6,12 +6,10 @@
  *
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true — set upstream in challan.service.js from
- * ${DB_SCHEMA}.company_details.
+ * app_test.company_details.
  */
 
 import puppeteer from "puppeteer";
-
-import { DB_SCHEMA } from "../config/db.js";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers

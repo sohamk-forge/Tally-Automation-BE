@@ -8,7 +8,7 @@
  * - User never inputs the number
  *
  * GST handling: gst_enabled is read once per create/update from
- * ${DB_SCHEMA}.company_details and applied to every line item. Non-GST
+ * app_test.company_details and applied to every line item. Non-GST
  * companies get zeroed tax fields instead of computed CGST/SGST/IGST.
  */
 

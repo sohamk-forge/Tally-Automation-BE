@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable(
       "sales_invoice_extractions",
       (table) => {
@@ -14,7 +13,7 @@ export async function up(knex) {
 
   const hasTable =
     await knex.schema
-      .withSchema(DB_SCHEMA)
+      .withSchema("app_test")
       .hasTable(
         "company_sales_ledger_mappings"
       );
@@ -23,7 +22,7 @@ export async function up(knex) {
 
     const hasColumn =
       await knex.schema
-        .withSchema(DB_SCHEMA)
+        .withSchema("app_test")
         .hasColumn(
           "company_sales_ledger_mappings",
           "godown_name"
@@ -32,7 +31,7 @@ export async function up(knex) {
     if (hasColumn) {
 
       await knex.schema
-        .withSchema(DB_SCHEMA)
+        .withSchema("app_test")
         .alterTable(
           "company_sales_ledger_mappings",
           (table) => {
@@ -53,7 +52,7 @@ export async function up(knex) {
 export async function down(knex) {
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable(
       "company_sales_ledger_mappings",
       (table) => {
@@ -68,7 +67,7 @@ export async function down(knex) {
     );
 
   await knex.schema
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
     .alterTable(
       "sales_invoice_extractions",
       (table) => {

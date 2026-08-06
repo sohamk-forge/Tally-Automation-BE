@@ -1,9 +1,8 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   await knex.schema
 
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
 
     .alterTable(
 
@@ -37,7 +36,7 @@ export async function down(knex) {
 
   await knex.schema
 
-    .withSchema(DB_SCHEMA)
+    .withSchema("app_test")
 
     .alterTable(
 

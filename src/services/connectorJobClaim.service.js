@@ -1,7 +1,5 @@
 import pool from "../db/index.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: claimPendingConnectorJobs
 //
@@ -40,7 +38,7 @@ await client.query("BEGIN");
 
 const staleJobs = await client.query(
   `
-  UPDATE ${DB_SCHEMA}.connector_jobs
+  UPDATE app_test.connector_jobs
   SET
     status = 'failed',
     error_message = 'Connector processing timeout - no result received',
@@ -74,13 +72,13 @@ const result = await client.query(
   `
   WITH claimed_jobs AS (
     SELECT id
-    FROM ${DB_SCHEMA}.connector_jobs
+    FROM app_test.connector_jobs
     WHERE user_id = $1
       AND status = 'pending'
     ORDER BY created_at ASC
     FOR UPDATE SKIP LOCKED
   )
-  UPDATE ${DB_SCHEMA}.connector_jobs AS cj
+  UPDATE app_test.connector_jobs AS cj
   SET
     status = 'processing',
     claimed_at = NOW(),

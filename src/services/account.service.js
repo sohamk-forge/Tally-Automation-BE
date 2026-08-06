@@ -16,7 +16,7 @@ export const getHasPassword = async (localUserId) => {
  * no password. This gives them one by either creating a brand-new
  * EmailPassword recipe user (first time) or updating the password on an
  * EmailPassword recipe user that already existed for this email (they had
- * an account before being invited). Either way, ${DB_SCHEMA}.users.supertokens_user_id
+ * an account before being invited). Either way, app_test.users.supertokens_user_id
  * is repointed at the EmailPassword identity — that's what they'll sign in
  * with from now on.
  */

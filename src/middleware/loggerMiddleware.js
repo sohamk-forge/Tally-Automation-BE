@@ -140,7 +140,7 @@ export async function loggerMiddleware(
       await pool.query(
 
         `
-        INSERT INTO ${DB_SCHEMA}.audit_logs (
+        INSERT INTO app_test.audit_logs (
 
           action,
           entity,

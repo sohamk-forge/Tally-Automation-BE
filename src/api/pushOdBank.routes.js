@@ -69,7 +69,7 @@ router.post(
     const companyResult = await pool.query(
       `
       SELECT id
-      FROM ${DB_SCHEMA}.companies
+      FROM app_test.companies
       WHERE name = $1
       LIMIT 1
       `,
@@ -90,7 +90,7 @@ router.post(
 
     const insertResult = await pool.query(
       `
-      INSERT INTO ${DB_SCHEMA}.bank_od_accounts
+      INSERT INTO app_test.bank_od_accounts
       (
         company_id,
         company_name,

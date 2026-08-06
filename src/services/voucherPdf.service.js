@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../config/db.js";
 /**
  * voucherPdf.service.js
  * ======================
- * Pure data-shaping logic: takes a raw row from ${DB_SCHEMA}.vouchers
+ * Pure data-shaping logic: takes a raw row from app_test.vouchers
  * (columns: id, company_name, voucher_date, voucher_type, voucher_number,
  * party_ledger_name, narration, debit_amount, credit_amount, balance,
  * parent_group, guid, master_id, alter_id, company_id, ledger_entries jsonb)
@@ -224,7 +223,7 @@ function findBankOrCashLine(ledgerEntries) {
 /**
  * Converts a raw vouchers row into the shape templates expect.
  *
- * @param {Object} row - raw row from ${DB_SCHEMA}.vouchers
+ * @param {Object} row - raw row from app_test.vouchers
  * @param {Object} companyInfo - from companyInfo.service.js
  * @param {Object} hsnMap - { [stockItemName]: hsnCode }, built by the route
  *   handler from the stock_group_summary table. Only used for

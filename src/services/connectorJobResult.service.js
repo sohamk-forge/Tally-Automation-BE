@@ -10,8 +10,6 @@
 // Tally had accepted it.
 import { storeLedgerEmbedding } from "./ledgerEmbedding.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 function resolveTallyOutcome(responseXml) {
   let finalStatus = "failed";
   let errorMessage = null;
@@ -55,7 +53,7 @@ export async function processConnectorJobResult(client, job) {
 
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.push_ledger
+          UPDATE app_test.push_ledger
           SET
             status = $1,
             tally_response = $2,
@@ -75,7 +73,7 @@ export async function processConnectorJobResult(client, job) {
 
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+          UPDATE app_test.sales_invoice_extractions
           SET
             sync_status = $1,
             tally_response = $2,
@@ -94,7 +92,7 @@ export async function processConnectorJobResult(client, job) {
         const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
 
         await client.query(
-          `UPDATE ${DB_SCHEMA}.invoice_extractions
+          `UPDATE app_test.invoice_extractions
           SET
             sync_status = $1,
             tally_response = $2,
@@ -114,7 +112,7 @@ export async function processConnectorJobResult(client, job) {
 
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.push_stock_item
+          UPDATE app_test.push_stock_item
           SET
             status = $1,
             tally_response = $2,
@@ -134,7 +132,7 @@ export async function processConnectorJobResult(client, job) {
 
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.push_bank
+          UPDATE app_test.push_bank
           SET
             sync_status = $1,
             tally_response = $2,
@@ -154,7 +152,7 @@ export async function processConnectorJobResult(client, job) {
 
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.bank_od_accounts
+          UPDATE app_test.bank_od_accounts
           SET
             sync_status = $1,
             tally_response = $2,
@@ -172,7 +170,7 @@ export async function processConnectorJobResult(client, job) {
       case "alter_stock_item": {
         const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
 
-        // ✅ FIXED: was UPDATE ${DB_SCHEMA}.alter_stock_item.
+        // ✅ FIXED: was UPDATE app_test.alter_stock_item.
         // payload.alter_stock_item_id is a push_stock_item.id — the opening
         // stock worker reads and writes push_stock_item, so the result must
         // land on the same row. Pointing at a different table meant either a
@@ -185,7 +183,7 @@ export async function processConnectorJobResult(client, job) {
         // which stage failed. Splitting the column is the real fix.
         await client.query(
           `
-          UPDATE ${DB_SCHEMA}.push_stock_item
+          UPDATE app_test.push_stock_item
           SET
             status = $1,
             tally_response = $2,
@@ -207,7 +205,7 @@ export async function processConnectorJobResult(client, job) {
 
   const voucherResult = await client.query(
     `
-    UPDATE ${DB_SCHEMA}.contra_vouchers
+    UPDATE app_test.contra_vouchers
     SET
       status = $1,
       tally_response = $2,

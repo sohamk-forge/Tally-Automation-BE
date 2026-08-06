@@ -1,8 +1,6 @@
 import cron from "node-cron";
 import pool from "../db/index.js";
 
-import { DB_SCHEMA } from "../config/db.js";
-
 /* =====================================
    RECLAIM STUCK CONNECTOR JOBS
 
@@ -17,7 +15,7 @@ cron.schedule("*/1 * * * *", async () => {
 
     const result = await pool.query(
       `
-      UPDATE ${DB_SCHEMA}.job_logs
+      UPDATE app_test.job_logs
       SET status = 'pending', claimed_at = NULL
       WHERE status = 'in_progress'
         AND claimed_at < NOW() - INTERVAL '5 minutes'

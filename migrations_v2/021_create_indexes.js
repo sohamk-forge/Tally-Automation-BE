@@ -1,8 +1,7 @@
-import { DB_SCHEMA } from "../src/config/db.js";
 export async function up(knex) {
 
   // USERS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("users", (table) => {
 
       table.index(["email"]);
@@ -10,7 +9,7 @@ export async function up(knex) {
     });
 
   // COMPANIES
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("companies", (table) => {
 
       table.index(["name"]);
@@ -20,7 +19,7 @@ export async function up(knex) {
     });
 
   // LEDGERS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("ledgers", (table) => {
 
       table.index(["company_id"]);
@@ -36,7 +35,7 @@ export async function up(knex) {
     });
 
   // BANK ACCOUNTS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("bank_accounts", (table) => {
 
       table.index(["company_id"]);
@@ -48,7 +47,7 @@ export async function up(knex) {
     });
 
   // PARENT GROUPS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("parent_groups", (table) => {
 
       table.index(["company_id"]);
@@ -58,7 +57,7 @@ export async function up(knex) {
     });
 
   // ALL PARENT GROUPS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("all_parent_groups", (table) => {
 
       table.index(["company_id"]);
@@ -70,7 +69,7 @@ export async function up(knex) {
     });
 
   // VOUCHERS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("vouchers", (table) => {
 
       table.index(["company_id"]);
@@ -86,7 +85,7 @@ export async function up(knex) {
     });
 
   // STOCK ITEMS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("stock_items", (table) => {
 
       table.index(["company_id"]);
@@ -96,7 +95,7 @@ export async function up(knex) {
     });
 
   // STOCK GROUP SUMMARY
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("stock_group_summary", (table) => {
 
       table.index(["company_id"]);
@@ -108,7 +107,7 @@ export async function up(knex) {
     });
 
   // PUSH LEDGER
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("push_ledger", (table) => {
 
       table.index(["company_id"]);
@@ -120,7 +119,7 @@ export async function up(knex) {
     });
 
   // AUDIT LOGS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("audit_logs", (table) => {
 
       table.index(["user_id"]);
@@ -132,7 +131,7 @@ export async function up(knex) {
     });
 
   // JOB LOGS
-  await knex.schema.withSchema(DB_SCHEMA)
+  await knex.schema.withSchema("app_test")
     .table("job_logs", (table) => {
 
       table.index(["user_id"]);
