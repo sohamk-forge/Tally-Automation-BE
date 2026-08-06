@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
-import { resolveUserId } from "../utils/resolveUserId.js";
+import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import { getLocalUserId } from "../utils/getLocalUserId.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -35,9 +36,9 @@ const router = express.Router();
 /* =========================================
    GET ALL COMPANIES (paginated, current user only)
 ========================================= */
-router.get("/", async (req, res) => {
+router.get("/", verifySession(), async (req, res) => {
   try {
-    const userId = await resolveUserId(req);
+    const userId = await getLocalUserId(req.session.getUserId());
 
     if (!userId) {
       return res.status(404).json({
@@ -110,9 +111,9 @@ router.get("/", async (req, res) => {
    Without the user filter any caller could read any company by guessing
    an integer id.
 ========================================= */
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifySession(), async (req, res) => {
   try {
-    const userId = await resolveUserId(req);
+    const userId = await getLocalUserId(req.session.getUserId());
 
     if (!userId) {
       return res.status(404).json({
@@ -168,9 +169,9 @@ router.get("/:id", async (req, res) => {
 /* =========================================
    GET ALL COMPANIES (SIMPLE, current user only)
 ========================================= */
-router.get("/all/list", async (req, res) => {
+router.get("/all/list", verifySession(), async (req, res) => {
   try {
-    const userId = await resolveUserId(req);
+    const userId = await getLocalUserId(req.session.getUserId());
 
     if (!userId) {
       return res.status(404).json({
