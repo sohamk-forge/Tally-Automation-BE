@@ -80,13 +80,13 @@
       HELPER FUNCTIONS
     =================================================== */
 
-    const clean = (value) => {
-      if (value === null || value === undefined) return null;
-      return String(value)
-        .replace(/&#13;&#10;|\r|\n/g, "")
-        .replace(/ /g, "")
-        .trim();
-    };
+  const clean = (value) => {
+  if (value === null || value === undefined) return null;
+  return String(value)
+    .replace(/&#13;&#10;|\r|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 
     const cleanBalance = (value) => {
       if (!value) return 0;
