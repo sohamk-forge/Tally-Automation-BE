@@ -6,6 +6,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "/Users/sohamkshirsagar/Projects/Tally-FE/Tally-Automation-FE", "run", "dev"],
       "port": 5173
+    },
+    {
+      "name": "tally-be",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/sohamkshirsagar/Projects/Tally-Automation-BE", "run", "dev"],
+      "port": 5001
+    },
+    {
+      "name": "tally-connector",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/sohamkshirsagar/Projects/Tally-Connector/Tally-Automation-Connector", "run", "dev"],
+      "port": 5002
     }
   ]
 }

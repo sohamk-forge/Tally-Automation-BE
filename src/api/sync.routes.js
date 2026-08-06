@@ -2,8 +2,7 @@ import { DB_SCHEMA } from "../config/db.js";
   import express from "express";
     import pool from "../db/index.js";
     import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
-    import { getLocalUserId } from "../utils/getLocalUserId.js";
-    import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+    import { resolveUserId } from "../utils/resolveUserId.js";
     import axios from "axios";
     import {
       getCompaniesXML,
@@ -2398,12 +2397,11 @@ import { DB_SCHEMA } from "../config/db.js";
 
   router.post(
     "/manual",
-    verifySession(),
     async (req, res) => {
 
       try {
 
-        const userId = await getLocalUserId(req.session.getUserId());
+        const userId = await resolveUserId(req);
         if (!userId) {
           return res.status(404).json({
             status: "error",
@@ -2525,14 +2523,11 @@ import { DB_SCHEMA } from "../config/db.js";
 
   router.post(
     "/manual-auto",
-    verifySession(),
     async (req, res) => {
 
       try {
 
-        const userId = req.session
-          ? await getLocalUserId(req.session.getUserId())
-          : req.connectorMachine?.userId;
+        const userId = await resolveUserId(req);
 
         if (!userId) {
           return res.status(401).json({

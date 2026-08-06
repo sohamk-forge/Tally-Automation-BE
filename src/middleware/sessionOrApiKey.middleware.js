@@ -1,7 +1,25 @@
-import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
+import Session from "supertokens-node/recipe/session/index.js";
 import { verifyConnectorApiKey } from "./apiKey.middleware.js";
 
-const optionalSession = verifySession({ sessionRequired: false });
+// Deliberately NOT using verifySession({ sessionRequired: false }) from
+// supertokens-node/recipe/session/framework/express here: that framework
+// wrapper double-wraps the request object internally (ExpressRequest
+// wrapping an already-wrapped request), which corrupts header/session
+// detection specifically on this optional-session path and makes it throw
+// "unauthorised" even when sessionRequired is false and no session-related
+// headers are present at all — verified by calling the imperative
+// Session.getSession() API directly with the exact same request, which
+// correctly returns undefined with no throw. Calling the imperative API
+// ourselves avoids the double-wrap entirely.
+const optionalSession = async (req, res, next) => {
+  try {
+    req.session = await Session.getSession(req, res, { sessionRequired: false });
+  } catch (err) {
+    // Any error here just means "no valid session" for our purposes —
+    // fall through to the API-key check rather than failing the request.
+  }
+  next();
+};
 
 const fallbackToApiKey = (req, res, next) => {
   if (req.session) {
