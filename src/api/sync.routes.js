@@ -1,6 +1,6 @@
   import express from "express";
     import pool from "../db/index.js";
-    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
+      import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
     import axios from "axios";
     import {
@@ -2421,28 +2421,60 @@
           });
         }
 
-        await pool.query(
+        // Company identity is scoped per user: a name match against another
+        // user's company must never grant this user access to that row.
+        // Only reuse a company row this user already owns via
+        // user_companies; otherwise create a new one.
+        const existingManualCompanyResult = await pool.query(
           `
-          INSERT INTO app_test.companies
-          (
-            name,
-            financial_year_start,
-            financial_year_end
-          )
-          VALUES ($1, $2, $3)
-
-          ON CONFLICT (name)
-          DO UPDATE SET
-            financial_year_start = EXCLUDED.financial_year_start,
-            financial_year_end = EXCLUDED.financial_year_end,
-            updated_at = NOW()
+          SELECT c.id
+          FROM app_test.companies c
+          JOIN app_test.user_companies uc ON uc.company_id = c.id
+          WHERE uc.user_id = $1 AND c.name = $2
+          LIMIT 1
           `,
-          [
-            company.trim(),
-            fromYear,
-            toYear
-          ]
+          [userId, company.trim()]
         );
+
+        if (existingManualCompanyResult.rows.length > 0) {
+          await pool.query(
+            `
+            UPDATE app_test.companies
+            SET financial_year_start = $1,
+                financial_year_end = $2,
+                updated_at = NOW()
+            WHERE id = $3
+            `,
+            [fromYear, toYear, existingManualCompanyResult.rows[0].id]
+          );
+        } else {
+          const manualCompanyInsertResult = await pool.query(
+            `
+            INSERT INTO app_test.companies
+            (
+              name,
+              financial_year_start,
+              financial_year_end
+            )
+            VALUES ($1, $2, $3)
+            RETURNING id
+            `,
+            [
+              company.trim(),
+              fromYear,
+              toYear
+            ]
+          );
+
+          await pool.query(
+            `
+            INSERT INTO app_test.user_companies (user_id, company_id)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id, company_id) DO NOTHING
+            `,
+            [userId, manualCompanyInsertResult.rows[0].id]
+          );
+        }
 
         const payload = {
           company,

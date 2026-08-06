@@ -105,28 +105,46 @@ router.post("/pair", async (req, res) => {
     const user = userResult.rows[0];
 
    
-   const companyUpsertResult = await client.query(
-  `
-  INSERT INTO ${DB_SCHEMA}.companies (name)
-  VALUES ($1)
-  ON CONFLICT (name) DO UPDATE
-    SET name = EXCLUDED.name
-  RETURNING id
-  `,
-  [company_name]
-);
-    const companyId = companyUpsertResult.rows[0].id;
-
-    // Record that this user now has access to this company. ON CONFLICT
-    // because a user can pair multiple machines to the same company.
-    await client.query(
+    // Company identity is scoped per user: a name match against another
+    // user's company must never grant this user access to that row (see
+    // the shared-company_id bug this fixes). Only reuse a company row this
+    // user already owns via user_companies; otherwise create a new one.
+    const existingCompanyResult = await client.query(
       `
-      INSERT INTO ${DB_SCHEMA}.user_companies (user_id, company_id)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id, company_id) DO NOTHING
+      SELECT c.id
+      FROM ${DB_SCHEMA}.companies c
+      JOIN ${DB_SCHEMA}.user_companies uc ON uc.company_id = c.id
+      WHERE uc.user_id = $1 AND c.name = $2
+      LIMIT 1
       `,
-      [user.id, companyId]
+      [user.id, company_name]
     );
+
+    let companyId;
+    if (existingCompanyResult.rows.length > 0) {
+      companyId = existingCompanyResult.rows[0].id;
+    } else {
+      const companyInsertResult = await client.query(
+        `
+        INSERT INTO ${DB_SCHEMA}.companies (name)
+        VALUES ($1)
+        RETURNING id
+        `,
+        [company_name]
+      );
+      companyId = companyInsertResult.rows[0].id;
+
+      // Record that this user now has access to this company. ON CONFLICT
+      // because a user can pair multiple machines to the same company.
+      await client.query(
+        `
+        INSERT INTO ${DB_SCHEMA}.user_companies (user_id, company_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id, company_id) DO NOTHING
+        `,
+        [user.id, companyId]
+      );
+    }
 
     // Generate a long-lived, revocable API key for this machine (shown once —
     // only its hash is stored). Replaces the old 30-day JWT.
