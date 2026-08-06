@@ -1,6 +1,6 @@
   import express from "express";
     import pool from "../db/index.js";
-    import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
+    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
     import axios from "axios";
     import {
@@ -3730,30 +3730,53 @@
 
 
       // ============================================
-      // 2. COMPANY DETAILS XML
+      // 2. COMPANY DETAILS + GST/TAX UNIT XML
+      //
+      // These two Tally requests don't depend on each other — the GST XML
+      // only needs `company` (already known), not the parsed company
+      // response — so both connector jobs are created up front and
+      // awaited concurrently instead of one full round-trip after the
+      // other. sendToTallyViaConnector() blocks per call, so two
+      // sequential awaits would starve the connector of more than one job
+      // at a time even though it can process several in parallel.
       // ============================================
       const companyXML = getCompanyDetailsXML(company);
+      const gstXML = getCompanyGSTDetailsXML(company);
 
       console.log("\n📤 CALL 1: COMPANY DETAILS");
       console.log("--------------------------------------------");
       console.log(companyXML);
       console.log("--------------------------------------------");
 
+      console.log("\n📤 CALL 2: GST TAX UNIT");
+      console.log("--------------------------------------------");
+      console.log(gstXML);
+      console.log("--------------------------------------------");
+
 
       // ============================================
-      // 3. SEND COMPANY XML TO TALLY
+      // 3. SEND BOTH XMLs TO TALLY CONCURRENTLY
       // ============================================
-      const companyResponseXML =
-        await sendToTallyViaConnector(
-          companyId,
-          companyXML,
-          "sync",
-          req.headers["x-user-id"] || null
-        );
+      const userIdHeader = req.headers["x-user-id"] || null;
+
+      const [companyJobId, gstJobId] = await Promise.all([
+        createConnectorSyncJob(companyId, companyXML, "sync", userIdHeader),
+        createConnectorSyncJob(companyId, gstXML, "sync", userIdHeader)
+      ]);
+
+      const [companyResponseXML, gstResponseXML] = await Promise.all([
+        waitForConnectorSyncJob(companyJobId),
+        waitForConnectorSyncJob(gstJobId)
+      ]);
 
       console.log("\n📥 COMPANY RESPONSE");
       console.log("--------------------------------------------");
       console.log(companyResponseXML);
+      console.log("--------------------------------------------");
+
+      console.log("\n📥 GST RESPONSE");
+      console.log("--------------------------------------------");
+      console.log(gstResponseXML);
       console.log("--------------------------------------------");
 
 
@@ -3898,36 +3921,9 @@
 
 
       // ============================================
-      // 11. GST / TAX UNIT XML
-      // ============================================
-      const gstXML =
-        getCompanyGSTDetailsXML(company);
-
-      console.log("\n📤 CALL 2: GST TAX UNIT");
-      console.log("--------------------------------------------");
-      console.log(gstXML);
-      console.log("--------------------------------------------");
-
-
-      // ============================================
-      // 12. SEND GST XML TO TALLY
-      // ============================================
-      const gstResponseXML =
-        await sendToTallyViaConnector(
-          companyId,
-          gstXML,
-          "sync",
-          req.headers["x-user-id"] || null
-        );
-
-      console.log("\n📥 GST RESPONSE");
-      console.log("--------------------------------------------");
-      console.log(gstResponseXML);
-      console.log("--------------------------------------------");
-
-
-      // ============================================
       // 13. PARSE GST RESPONSE
+      // (gstXML/gstResponseXML already fetched concurrently with the
+      // company details request — see step 2/3 above)
       // ============================================
       const gstParsed =
         await parseXML(gstResponseXML);
