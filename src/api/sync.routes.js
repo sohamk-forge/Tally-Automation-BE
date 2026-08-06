@@ -1078,6 +1078,7 @@
       });
 
       const client = await pool.connect();
+      let voucherClient = null;
 
       try {
         /* =====================================
@@ -1121,7 +1122,16 @@
         /* =====================================
           PROCESS EACH VOUCHER IN SEPARATE TRANSACTION
           (To prevent one failure from breaking everything)
+
+          One connection is reused across the whole loop instead of calling
+          pool.connect() per voucher — for a remote DB, checking out a new
+          connection per voucher (on top of BEGIN/INSERT/COMMIT) was adding
+          a full extra round-trip per voucher for no benefit, since BEGIN/
+          COMMIT/ROLLBACK on the same connection already gives each voucher
+          its own isolated transaction sequentially.
         ===================================== */
+        voucherClient = await pool.connect();
+
         for (const voucher of list) {
           try {
             const voucherNumber = clean(voucher?.VOUCHERNUMBER);
@@ -1195,14 +1205,8 @@
 
       /* ================================
       START A NEW TRANSACTION FOR THIS VOUCHER
-    ================================ */
-
-    /* ================================
-      START TRANSACTION
-    ================================ */
-
-    const voucherClient =
-      await pool.connect();
+      (voucherClient is the single connection acquired once above the loop)
+      ================================ */
 
     try {
 
@@ -1454,13 +1458,9 @@
 
       });
 
-    } finally {
-
-      voucherClient.release();
-
     }
 
-    
+
 
           } catch (loopError) {
             failed++;
@@ -1537,6 +1537,9 @@
         });
       } finally {
         client.release();
+        if (voucherClient) {
+          voucherClient.release();
+        }
       }
     });
 
