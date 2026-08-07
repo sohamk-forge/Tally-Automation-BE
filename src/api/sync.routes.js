@@ -80,7 +80,7 @@
       HELPER FUNCTIONS
     =================================================== */
 
-  const clean = (value) => {
+const clean = (value) => {
   if (value === null || value === undefined) return null;
   return String(value)
     .replace(/&#13;&#10;|\r|\n/g, " ")

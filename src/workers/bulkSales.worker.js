@@ -25,19 +25,18 @@ function safeNumber(value) {
   return isNaN(num) ? 0 : num;
 }
 
-// Helper to get value from multiple possible header names
 function getValue(row, possibleKeys) {
   const rowKeys = Object.keys(row);
 
   for (const key of possibleKeys) {
     const target = String(key).toLowerCase();
-
-    // Exact match first
     if (row[target] !== undefined && String(row[target]).trim() !== "") {
       return row[target];
     }
+  }
 
-    // Fallback: header that starts with the target text
+  for (const key of possibleKeys) {
+    const target = String(key).toLowerCase();
     const matchedKey = rowKeys.find(k => k.startsWith(target));
     if (matchedKey && String(row[matchedKey]).trim() !== "") {
       return row[matchedKey];
@@ -47,29 +46,22 @@ function getValue(row, possibleKeys) {
   return "";
 }
 
-// Format date from Excel (handles Date objects and strings)
 function formatDate(value) {
   if (!value) return "";
 
-  // Excel serial date (45748, 45749, etc.)
   if (typeof value === "number") {
     const excelDate = XLSX.SSF.parse_date_code(value);
-
     if (!excelDate) return "";
-
     const day = String(excelDate.d).padStart(2, "0");
     const month = String(excelDate.m).padStart(2, "0");
     const year = excelDate.y;
-
     return `${day}-${month}-${year}`;
   }
 
-  // JS Date object
   if (value instanceof Date) {
     const day = String(value.getDate()).padStart(2, "0");
     const month = String(value.getMonth() + 1).padStart(2, "0");
     const year = value.getFullYear();
-
     return `${day}-${month}-${year}`;
   }
 
@@ -81,13 +73,6 @@ const worker = new Worker(
 
   async (job) => {
 
-    // userId comes from the upload route's verifySession() and must be
-    // forwarded onto every salesQueue job below. Without it,
-    // pushSalesInvoice.worker calls resolveConnectorForCompany() with no
-    // acting user, the acting-user-first branch is skipped, and every
-    // invoice from this upload routes by fallback — i.e. into whichever
-    // connector for that company happens to be live, which may be someone
-    // else's Tally entirely.
     const { company, filePath, userId } = job.data;
 
     if (!userId) {
@@ -96,6 +81,38 @@ const worker = new Worker(
 
     console.log(`Reading Sales Excel : ${filePath}`, { userId });
 
+    const companyResult = await pool.query(
+      `
+      SELECT id
+      FROM ${DB_SCHEMA}.companies
+      WHERE TRIM(name) = TRIM($1)
+      LIMIT 1
+      `,
+      [company]
+    );
+
+    const companyId = companyResult.rows[0]?.id;
+
+    if (!companyId) {
+      throw new Error(`Company not found: ${company}`);
+    }
+
+    const companyDetailsResult = await pool.query(
+      `SELECT gstin FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+      [companyId]
+    );
+
+    const companyGstin = (companyDetailsResult.rows[0]?.gstin || "").trim();
+    const companyStateCode = companyGstin.substring(0, 2);
+
+    if (!companyStateCode) {
+      throw new Error(
+        `Cannot determine this company's own GST state (company_id ${companyId}) — run /api/sync/company-details first.`
+      );
+    }
+
+    console.log(`Company GST state resolved: ${companyStateCode} (from GSTIN ${companyGstin})`);
+
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -103,21 +120,17 @@ const worker = new Worker(
 
     const rows = rawRows.map(row => {
       const normalized = {};
-
       Object.keys(row).forEach(key => {
         const cleanKey = String(key)
           .replace(/\r?\n/g, " ")
           .replace(/\s+/g, " ")
           .trim()
           .toLowerCase();
-
         normalized[cleanKey] = row[key];
       });
-
       return normalized;
     });
 
-    // DEBUG: Print actual headers from Excel
     console.log("================================");
     console.log("EXACT HEADERS FROM EXCEL:");
     console.log("================================");
@@ -127,39 +140,12 @@ const worker = new Worker(
       });
     }
     console.log("================================");
-    console.log("FIRST ROW SAMPLE:");
-    console.log("================================");
-    console.log(rows[0]);
-
-    console.log("TEST VALUES:");
-    console.log({
-      invoiceNo: getValue(rows[0], ["invoice number"]),
-      invoiceDate: getValue(rows[0], ["invoice date (dd-mm-yyyy)"]),
-      quantity: getValue(rows[0], ["quantity"]),
-      rate: getValue(rows[0], ["rate"]),
-      taxable: getValue(rows[0], ["taxable amount inr"]),
-      total: getValue(rows[0], ["total amount"]),
-      roundOff: getValue(rows[0], ["round off"])
-    });
-
-    console.log("================================");
-
     console.log(`Rows Found : ${rows.length}`);
 
     const invoices = {};
 
-    // Diagnostic-only accumulators, keyed by invoice number. These do NOT
-    // affect invoice.tds_amount or invoice.excel_total — they exist purely
-    // so the "FINAL GST CHECK" log can show you both the sum interpretation
-    // and the last-value interpretation side by side. We got burned once
-    // (₹6,000, then ₹13,000) by assuming a repeated invoice-level Excel
-    // field was safe to sum with +=. This log lets you catch that pattern
-    // by eye before a bad batch reaches Tally, without changing behavior.
-    const tdsRowValues = {};
-
     for (const row of rows) {
 
-      // Get invoice number with multiple possible header names
       const invoiceNo = String(getValue(row, [
         "invoice number",
         "invoice no",
@@ -170,40 +156,6 @@ const worker = new Worker(
       if (!invoiceNo) {
         continue;
       }
-
-      // Debug invoice fields
-      console.log("Invoice Debug:", {
-        invoiceNo,
-        invoiceDate: getValue(row, [
-          "Invoice Date",
-          "Invoice Date (dd-mm-yyyy)",
-          "Invoice date",
-          "Date",
-          "InvoiceDate"
-        ]),
-        quantity: getValue(row, [
-          "Quantity",
-          "Qty",
-          "quantity",
-          "qty"
-        ]),
-        rate: getValue(row, [
-          "Rate",
-          "rate",
-          "Unit Price"
-        ]),
-        taxableAmount: getValue(row, [
-          "Taxable Amount",
-          "Taxable amount",
-          "Amount"
-        ]),
-        roundOff: getValue(row, [
-          "Round Off",
-          "RoundOff",
-          "Round off",
-          "Round Off Amount"
-        ])
-      });
 
       if (!invoices[invoiceNo]) {
 
@@ -240,7 +192,6 @@ const worker = new Worker(
               "Godown",
               "Location"
             ]);
-
             return godown && String(godown).trim()
               ? String(godown).trim()
               : "Main Location";
@@ -248,7 +199,6 @@ const worker = new Worker(
 
           taxable_amount: 0,
           grand_total: 0,
-          gst_percent: 0,
 
           cgst_amount: 0,
           sgst_amount: 0,
@@ -256,16 +206,15 @@ const worker = new Worker(
           tds_amount: 0,
           round_off: 0,
 
-          // ✅ NEW — Excel-total tracking for paisa reconciliation
           excel_total: 0,
           has_excel_total: false,
           has_round_off: false,
 
           line_items: []
         };
-
-        tdsRowValues[invoiceNo] = [];
       }
+
+      const invoice = invoices[invoiceNo];
 
       const taxableAmount = safeNumber(getValue(row, [
         "Taxable Amount",
@@ -274,24 +223,23 @@ const worker = new Worker(
         "Taxable Value",
         "Taxable value",
         "TaxableValue",
-        "Amount"   // keep as last-resort fallback only
+        "Amount"
       ]));
 
-      const gstPercent = safeNumber(getValue(row, [
-        // Exact/possible Excel headers
+      const rawGstPercent = getValue(row, [
         "GST Rate(%) 0, 3, 5, 12, 18, 28",
         "GST Rate(%) 0, 5, 12, 18, 28",
         "GST Rate(%) 0,3,5,12,18,28",
         "GST Rate(%) 0,5,12,18,28",
         "GST Rate (%) 0,3,5,12,18,28",
-
-        // Generic headers
         "GST %",
         "GST Percentage",
         "GST Rate",
         "Gst %",
         "GST"
-      ]));
+      ]);
+
+      const lineGstPercent = safeNumber(rawGstPercent);
 
       const tdsAmount = Math.abs(safeNumber(getValue(row, [
         "TDS",
@@ -300,9 +248,6 @@ const worker = new Worker(
         "TDS Amount INR"
       ])));
 
-      // ✅ NEW — Total Amount, read per row (invoice-level field per your
-      // confirmation on this Excel; summed below because it's line-level
-      // for multi-item invoices in this template)
       const excelTotalAmount = safeNumber(getValue(row, [
         "Total Amount",
         "Total Amount INR",
@@ -324,31 +269,18 @@ const worker = new Worker(
 
       const roundOff = safeNumber(rawRoundOff);
 
-      invoices[invoiceNo].taxable_amount += taxableAmount;
+      invoice.tds_amount += tdsAmount;
 
-      if (invoices[invoiceNo].gst_percent === 0) {
-        invoices[invoiceNo].gst_percent = gstPercent || 18;
-      }
-
-      // TDS kept as-is (summed). NOT CONFIRMED whether TDS repeats per row
-      // in this Excel — see tdsRowValues diagnostic below and check the
-      // "FINAL GST CHECK" log before trusting this on a new invoice format.
-      invoices[invoiceNo].tds_amount += tdsAmount;
-      tdsRowValues[invoiceNo].push(tdsAmount);
-
-      // ✅ NEW — Total Amount summed across rows (line-level for this Excel)
       if (excelTotalAmount !== 0) {
-        invoices[invoiceNo].excel_total += excelTotalAmount;
-        invoices[invoiceNo].has_excel_total = true;
+        invoice.excel_total += excelTotalAmount;
+        invoice.has_excel_total = true;
       }
 
-      // Round Off overwritten (invoice-level, same value repeats per row)
       if (hasRoundOffValue) {
-        invoices[invoiceNo].round_off = roundOff;
-        invoices[invoiceNo].has_round_off = true;
+        invoice.round_off = roundOff;
+        invoice.has_round_off = true;
       }
 
-      // Get line item details
       const itemName = String(getValue(row, [
         "Particulars",
         "Item Name",
@@ -356,80 +288,72 @@ const worker = new Worker(
         "Description"
       ])).trim();
 
-      // Only push if there's an item name
       if (itemName) {
-        invoices[invoiceNo].line_items.push({
+        invoice.line_items.push({
           item_name: itemName,
           quantity: safeNumber(getValue(row, [
-            "Quantity",
-            "Qty",
-            "quantity",
-            "qty"
+            "Quantity", "Qty", "quantity", "qty"
           ])),
           rate: safeNumber(getValue(row, [
-            "Rate",
-            "rate",
-            "Unit Price",
-            "Price"
+            "Rate", "rate", "Unit Price", "Price"
           ])),
-          amount: safeNumber(getValue(row, [
-            "Taxable Amount",
-            "Taxable Amount INR",
-            "Amount",
-            "taxable amount"
-          ]))
+          amount: taxableAmount,
+          gst_percent: lineGstPercent
         });
       }
     }
 
-
     Object.values(invoices).forEach(invoice => {
 
-      // Step 1 + 2: Taxable → Calculate GST yourself
-      const gstAmount = Number(
-        ((invoice.taxable_amount * invoice.gst_percent) / 100).toFixed(2)
-      );
-
-      const stateCode = String(invoice.customer_gstin || "")
+      const customerStateCode = String(invoice.customer_gstin || "")
         .trim()
         .substring(0, 2);
 
-      if (stateCode === "27") {
+      const isIntraState =
+        !customerStateCode || customerStateCode === companyStateCode;
 
-        const halfRate = invoice.gst_percent / 2;
+      invoice.taxable_amount = 0;
+      invoice.cgst_amount = 0;
+      invoice.sgst_amount = 0;
+      invoice.igst_amount = 0;
 
-        invoice.cgst_amount = Number(
-          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
-        );
+      for (const item of invoice.line_items) {
 
-        invoice.sgst_amount = Number(
-          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
-        );
+        const taxable = safeNumber(item.amount);
+        const gstRate = safeNumber(item.gst_percent);
 
-        invoice.igst_amount = 0;
+        invoice.taxable_amount += taxable;
 
-      } else if (stateCode) {
+        if (isIntraState) {
 
-        invoice.cgst_amount = 0;
-        invoice.sgst_amount = 0;
-        invoice.igst_amount = gstAmount;
+          const halfRate = gstRate / 2;
+          const lineCgst = Number(((taxable * halfRate) / 100).toFixed(2));
+          const lineSgst = Number(((taxable * halfRate) / 100).toFixed(2));
 
-      } else {
+          item.cgst_amount = lineCgst;
+          item.sgst_amount = lineSgst;
+          item.igst_amount = 0;
 
-        const halfRate = invoice.gst_percent / 2;
+          invoice.cgst_amount += lineCgst;
+          invoice.sgst_amount += lineSgst;
 
-        invoice.cgst_amount = Number(
-          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
-        );
+        } else {
 
-        invoice.sgst_amount = Number(
-          ((invoice.taxable_amount * halfRate) / 100).toFixed(2)
-        );
+          const lineIgst = Number(((taxable * gstRate) / 100).toFixed(2));
 
-        invoice.igst_amount = 0;
+          item.cgst_amount = 0;
+          item.sgst_amount = 0;
+          item.igst_amount = lineIgst;
+
+          invoice.igst_amount += lineIgst;
+        }
       }
 
-      // Step 4: Subtract TDS
+      invoice.taxable_amount = Number(invoice.taxable_amount.toFixed(2));
+      invoice.cgst_amount = Number(invoice.cgst_amount.toFixed(2));
+      invoice.sgst_amount = Number(invoice.sgst_amount.toFixed(2));
+      invoice.igst_amount = Number(invoice.igst_amount.toFixed(2));
+
       const baseTotal = Number((
         invoice.taxable_amount +
         invoice.cgst_amount +
@@ -438,17 +362,6 @@ const worker = new Worker(
         invoice.tds_amount
       ).toFixed(2));
 
-      // ✅ UPDATED — Step 5: Grand Total reconciliation
-      //
-      // Fix: an explicit Round Off of 0 used to short-circuit reconciliation
-      // even when Excel's Total Amount implied a nonzero adjustment (e.g.
-      // invoice 5930052600299: explicit Round Off = 0, but Excel Total
-      // required +0.02 to reach 2435.05, and the old branch order returned
-      // 2435.03 instead). Excel's Total Amount, when present, is the ground
-      // truth for what the invoice must equal — so it now takes priority.
-      // An explicit Round Off is still used to double check: if it disagrees
-      // with what the Total Amount implies, we log it instead of trusting
-      // the (possibly stale/placeholder) Round Off cell silently.
       if (invoice.has_excel_total) {
 
         const derivedRoundOff = Number(
@@ -457,7 +370,7 @@ const worker = new Worker(
 
         if (invoice.has_round_off &&
             Math.abs(invoice.round_off - derivedRoundOff) > 0.001) {
-          console.log("⚠️ ROUND OFF MISMATCH — Excel Round Off cell disagrees with Excel Total Amount, using Total Amount as source of truth:", {
+          console.log("⚠️ ROUND OFF MISMATCH — using Excel Total Amount as source of truth:", {
             invoice: invoice.invoice_no,
             excel_round_off_cell: invoice.round_off,
             derived_round_off_from_total: derivedRoundOff,
@@ -467,16 +380,11 @@ const worker = new Worker(
         }
 
         invoice.round_off = derivedRoundOff;
-        invoice.grand_total = Number(
-          invoice.excel_total.toFixed(2)
-        );
+        invoice.grand_total = Number(invoice.excel_total.toFixed(2));
 
       } else if (invoice.has_round_off) {
 
-        // No Excel Total to reconcile against — trust the explicit Round Off.
-        invoice.grand_total = Number(
-          (baseTotal + invoice.round_off).toFixed(2)
-        );
+        invoice.grand_total = Number((baseTotal + invoice.round_off).toFixed(2));
 
       } else {
 
@@ -484,31 +392,12 @@ const worker = new Worker(
         invoice.grand_total = baseTotal;
       }
 
-      // DIAGNOSTIC ONLY — does not affect invoice.tds_amount. Compares the
-      // "sum all rows" value already stored against the "last row only"
-      // value. If these two numbers differ for a multi-item invoice, TDS is
-      // very likely an invoice-level field repeated per row in this Excel
-      // (the same pattern that caused the earlier excel_total bug), and
-      // invoice.tds_amount is currently inflated by a multiple of the true
-      // TDS. Check this log against the Excel before trusting the total.
-      const tdsRows = tdsRowValues[invoice.invoice_no] || [];
-      const tdsLastRowOnly = tdsRows.length ? tdsRows[tdsRows.length - 1] : 0;
-      if (tdsRows.length > 1 && tdsLastRowOnly !== 0 &&
-          Math.abs(invoice.tds_amount - tdsLastRowOnly) > 0.001) {
-        console.log("⚠️ TDS SUM-VS-SINGLE MISMATCH — verify against Excel:", {
-          invoice: invoice.invoice_no,
-          row_count: tdsRows.length,
-          tds_summed_all_rows: Number(invoice.tds_amount.toFixed(2)),
-          tds_if_single_value: tdsLastRowOnly,
-          row_values: tdsRows
-        });
-      }
-
       console.log("FINAL GST CHECK", {
         invoice: invoice.invoice_no,
+        customer_state: customerStateCode,
+        company_state: companyStateCode,
+        is_intrastate: isIntraState,
         taxable: invoice.taxable_amount,
-        gst_percent: invoice.gst_percent,
-        gst: gstAmount,
         cgst: invoice.cgst_amount,
         sgst: invoice.sgst_amount,
         igst: invoice.igst_amount,
@@ -521,37 +410,17 @@ const worker = new Worker(
       });
     });
 
-    // Resolve the company once, not once per invoice — the name never changes
-    // inside a single upload.
-    const companyResult = await pool.query(
-      `
-      SELECT id
-      FROM ${DB_SCHEMA}.companies
-      WHERE TRIM(name) = TRIM($1)
-      LIMIT 1
-      `,
-      [company]
-    );
-
-    const companyId = companyResult.rows[0]?.id;
-
-    if (!companyId) {
-      throw new Error(`Company not found: ${company}`);
-    }
-
     let successCount = 0;
     let failCount = 0;
     for (const invoiceNo of Object.keys(invoices)) {
       try {
         const invoiceData = invoices[invoiceNo];
 
-        // Skip if no line items
         if (invoiceData.line_items.length === 0) {
           console.log(`Skipping invoice ${invoiceNo} - no line items`);
           continue;
         }
 
-        // Skip if missing required fields
         if (!invoiceData.invoice_date) {
           console.log(`⚠️ Warning: Invoice ${invoiceNo} has no invoice date`);
         }
@@ -583,7 +452,6 @@ const worker = new Worker(
           invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
         );
 
-        // If duplicate, RETURNING id gives nothing - skip queuing
         if (!insertResult.rows.length) {
           console.log(`⚠️ Skipping duplicate invoice: ${invoiceNo}`);
           continue;
@@ -591,26 +459,9 @@ const worker = new Worker(
 
         const salesId = insertResult.rows[0].id;
 
-        // The job id MUST be unique per push.
-        //
-        // This used to be getSalesJobId(salesId) — a fixed id per invoice — with a
-        // getJob()/remove() dance in front of it. BullMQ SILENTLY IGNORES add() when
-        // a job with that id already exists, and removeOnComplete keeps recent
-        // completed jobs around, so re-uploading a spreadsheet enqueued nothing at
-        // all for any invoice already pushed once: this worker logged "Sales Queued"
-        // and the sales worker never ran.
-        //
-        // Duplicate processing is not a risk: pushSalesInvoice.worker skips when a
-        // 'pending' or 'processing' connector job already exists for the invoice.
         await salesQueue.add(
           "sales-invoice",
-          {
-            salesId,
-
-            // Owner of this upload — carried through so the sales worker can route
-            // to THIS user's connector rather than falling back to any live one.
-            userId
-          },
+          { salesId, userId },
           { jobId: `${salesId}-${Date.now()}` }
         );
 
