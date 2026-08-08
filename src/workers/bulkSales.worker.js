@@ -20,9 +20,35 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
+// This company's own GST state code — Sai Sanjivani Enterprise (Eicher
+// Workshop) is registered in Maharashtra. Intentionally hardcoded here
+// (not looked up from company_details) per explicit instruction: no
+// company GSTIN/state DB lookup for this worker.
+const MY_COMPANY_STATE_CODE = "27";
+
+// Every valid 2-digit Indian GST state/UT code. Used only to validate that
+// a customer's GSTIN prefix is a real state code before trusting it as
+// "this customer is in a different state" — a garbage/malformed GSTIN
+// prefix (or one that isn't a real code) is treated the same as "no
+// GSTIN" (unregistered/local), which falls into the CGST+SGST branch,
+// not silently misrouted into IGST.
+const VALID_GST_STATE_CODES = new Set([
+  "01", "02", "03", "04", "05", "06", "07", "08", "09", "10",
+  "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+  "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
+  "31", "32", "33", "34", "35", "36", "37", "38", "97"
+]);
+
 function safeNumber(value) {
   const num = Number(value);
   return isNaN(num) ? 0 : num;
+}
+
+// Proper 2-decimal rounding — .toFixed(2) alone is unreliable for values
+// like 178.47 / 2 = 89.235, which JS's floating-point toFixed rounds DOWN
+// to 89.23 instead of 89.24. This uses Number.EPSILON to correct that.
+function roundTo2(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 function getValue(row, possibleKeys) {
@@ -96,22 +122,6 @@ const worker = new Worker(
     if (!companyId) {
       throw new Error(`Company not found: ${company}`);
     }
-
-    const companyDetailsResult = await pool.query(
-      `SELECT gstin FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
-      [companyId]
-    );
-
-    const companyGstin = (companyDetailsResult.rows[0]?.gstin || "").trim();
-    const companyStateCode = companyGstin.substring(0, 2);
-
-    if (!companyStateCode) {
-      throw new Error(
-        `Cannot determine this company's own GST state (company_id ${companyId}) — run /api/sync/company-details first.`
-      );
-    }
-
-    console.log(`Company GST state resolved: ${companyStateCode} (from GSTIN ${companyGstin})`);
 
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
@@ -200,6 +210,8 @@ const worker = new Worker(
           taxable_amount: 0,
           grand_total: 0,
 
+          tax_amount: 0,
+
           cgst_amount: 0,
           sgst_amount: 0,
           igst_amount: 0,
@@ -226,20 +238,15 @@ const worker = new Worker(
         "Amount"
       ]));
 
-      const rawGstPercent = getValue(row, [
-        "GST Rate(%) 0, 3, 5, 12, 18, 28",
-        "GST Rate(%) 0, 5, 12, 18, 28",
-        "GST Rate(%) 0,3,5,12,18,28",
-        "GST Rate(%) 0,5,12,18,28",
-        "GST Rate (%) 0,3,5,12,18,28",
-        "GST %",
-        "GST Percentage",
-        "GST Rate",
-        "Gst %",
-        "GST"
-      ]);
-
-      const lineGstPercent = safeNumber(rawGstPercent);
+      // ✅ Source of truth for tax — Excel's own "TAX AMOUNT" column,
+      // summed at the invoice level. No taxable × rate calculation
+      // anywhere in this file anymore.
+      const taxAmount = safeNumber(getValue(row, [
+        "TAX AMOUNT",
+        "Tax Amount",
+        "GST Amount",
+        "Tax Amt"
+      ]));
 
       const tdsAmount = Math.abs(safeNumber(getValue(row, [
         "TDS",
@@ -248,12 +255,12 @@ const worker = new Worker(
         "TDS Amount INR"
       ])));
 
-      const excelTotalAmount = safeNumber(getValue(row, [
-        "Total Amount",
-        "Total Amount INR",
-        "Grand Total",
-        "Invoice Total"
-      ]));
+    const excelTotalAmount = safeNumber(getValue(row, [
+  "Total Amount",
+  "Total Amount INR",
+  "Grand Total",
+  "Invoice Total"
+]));
 
       const rawRoundOff = getValue(row, [
         "Round Off",
@@ -269,6 +276,8 @@ const worker = new Worker(
 
       const roundOff = safeNumber(rawRoundOff);
 
+      invoice.taxable_amount += taxableAmount;
+      invoice.tax_amount += taxAmount;
       invoice.tds_amount += tdsAmount;
 
       if (excelTotalAmount !== 0) {
@@ -302,102 +311,55 @@ const worker = new Worker(
             "Taxable Amount INR",
             "Amount",
             "taxable amount"
-          ])),
-          // Own GST rate for this line — falls back to the invoice's rate
-          // (first row seen) only if this row didn't specify one, so
-          // mixed-rate line items on the same invoice are computed correctly.
-          gst_percent: gstPercent || invoices[invoiceNo].gst_percent
+          ]))
         });
       }
     }
 
     Object.values(invoices).forEach(invoice => {
 
-      // A GSTIN state prefix only counts as interstate when it's an actual
-      // 2-digit numeric code. Placeholder text like "NA" (or a blank GSTIN)
-      // means "no registered GSTIN" — i.e. a local/unregistered sale — not
-      // an interstate one, so it must fall into the CGST+SGST branch below.
+      const taxAmount = roundTo2(invoice.tax_amount);
+
       const rawStateCode = String(invoice.customer_gstin || "")
         .trim()
         .substring(0, 2);
 
-      const stateCode = /^\d{2}$/.test(rawStateCode) ? rawStateCode : "";
+      // Only trust the prefix as a real state code if it's actually one
+      // of the 38 valid Indian GST codes — anything else (blank, "NA",
+      // a malformed GSTIN) is treated as unregistered/local, same as
+      // Maharashtra, i.e. CGST+SGST.
+      const stateCode = VALID_GST_STATE_CODES.has(rawStateCode) ? rawStateCode : "";
 
-      // GST is calculated per LINE ITEM (each rounded to 2dp) and the
-      // per-line figures are summed to get the invoice's CGST/SGST/IGST —
-      // NOT calculated once on the invoice's combined taxable_amount.
-      // This matches how the source Excel's own totals are built, and is
-      // an intentional choice (confirmed) even though it means our output
-      // no longer matches a voucher entered against the combined total,
-      // e.g. a 2-line invoice can land 1-2 paise higher than the
-      // combined-total method due to rounding twice instead of once.
-      let cgstSum = 0;
-      let sgstSum = 0;
-      let igstSum = 0;
+      if (stateCode === MY_COMPANY_STATE_CODE || !stateCode) {
 
-      const items = invoice.line_items.length ? invoice.line_items : [{
-        amount: invoice.taxable_amount,
-        gst_percent: invoice.gst_percent
-      }];
+        // Intrastate (or unregistered/local customer) — split in half
+        const cgst = roundTo2(taxAmount / 2);
+const sgst = roundTo2(taxAmount - cgst);
 
-      for (const item of items) {
-        const lineTaxable = item.amount || 0;
-        const lineGstPercent = item.gst_percent || invoice.gst_percent;
+invoice.cgst_amount = cgst;
+invoice.sgst_amount = sgst;
+invoice.igst_amount = 0;
 
-        if (stateCode && stateCode !== "27") {
-          igstSum += Number(((lineTaxable * lineGstPercent) / 100).toFixed(2));
-        } else {
-          const halfRate = lineGstPercent / 2;
-          const halfRaw = (lineTaxable * halfRate) / 100;
-          const halfRounded = Number(halfRaw.toFixed(2));
+      } else {
 
-          // Diagnostic only — does not change the amount pushed. Rounding
-          // each half independently (what we do, "split") and rounding the
-          // full line GST once then splitting it ("once") can land a paisa
-          // apart. We've confirmed against Eicher's own verified GST report
-          // that which one is "correct" is NOT predictable from taxable
-          // amount, rate, customer type, or quantity — the identical
-          // taxable+rate combination (₹703.39 @ 18%) is verified-correct as
-          // ₹126.61 on one invoice and ₹126.62 on another. So this can't be
-          // auto-corrected; flagged here for manual cross-check against the
-          // OEM/GST portal report instead.
-          const splitLineTotal = Number((halfRounded * 2).toFixed(2));
-          const onceLineTotal = Number(((lineTaxable * lineGstPercent) / 100).toFixed(2));
-
-          if (splitLineTotal !== onceLineTotal) {
-            console.log("⚠️ GST ROUNDING BOUNDARY — verify against OEM/GST portal report:", {
-              invoice: invoice.invoice_no,
-              item: item.item_name,
-              line_taxable: lineTaxable,
-              gst_percent: lineGstPercent,
-              our_line_total_if_split: splitLineTotal,
-              our_line_total_if_rounded_once: onceLineTotal
-            });
-          }
-
-          cgstSum += halfRounded;
-          sgstSum += halfRounded;
-        }
+        // Interstate — any other valid state code goes fully to IGST
+        invoice.cgst_amount = 0;
+        invoice.sgst_amount = 0;
+        invoice.igst_amount = taxAmount;
       }
 
-      invoice.cgst_amount = Number(cgstSum.toFixed(2));
-      invoice.sgst_amount = Number(sgstSum.toFixed(2));
-      invoice.igst_amount = Number(igstSum.toFixed(2));
-
       // Step 4: Subtract TDS
-      const baseTotal = Number((
+      const baseTotal = roundTo2(
         invoice.taxable_amount +
         invoice.cgst_amount +
         invoice.sgst_amount +
         invoice.igst_amount -
         invoice.tds_amount
-      ).toFixed(2));
+      );
 
       if (invoice.has_excel_total) {
 
-        const derivedRoundOff = Number(
-          (invoice.excel_total - baseTotal).toFixed(2)
-        );
+        const derivedRoundOff = roundTo2(invoice.excel_total - baseTotal);
 
         if (invoice.has_round_off &&
             Math.abs(invoice.round_off - derivedRoundOff) > 0.001) {
@@ -411,11 +373,11 @@ const worker = new Worker(
         }
 
         invoice.round_off = derivedRoundOff;
-        invoice.grand_total = Number(invoice.excel_total.toFixed(2));
+        invoice.grand_total = roundTo2(invoice.excel_total);
 
       } else if (invoice.has_round_off) {
 
-        invoice.grand_total = Number((baseTotal + invoice.round_off).toFixed(2));
+        invoice.grand_total = roundTo2(baseTotal + invoice.round_off);
 
       } else {
 
@@ -425,12 +387,12 @@ const worker = new Worker(
 
       console.log("FINAL GST CHECK", {
         invoice: invoice.invoice_no,
-        customer_state: customerStateCode,
-        company_state: companyStateCode,
-        is_intrastate: isIntraState,
+        customer_gstin: invoice.customer_gstin || "—",
+        customer_state_code: stateCode || "unregistered/local",
+        my_company_state_code: MY_COMPANY_STATE_CODE,
+        is_intrastate: stateCode === MY_COMPANY_STATE_CODE || !stateCode,
         taxable: invoice.taxable_amount,
-        gst_percent: invoice.gst_percent,
-        gst: Number((invoice.cgst_amount + invoice.sgst_amount + invoice.igst_amount).toFixed(2)),
+        tax_amount: taxAmount,
         cgst: invoice.cgst_amount,
         sgst: invoice.sgst_amount,
         igst: invoice.igst_amount,
