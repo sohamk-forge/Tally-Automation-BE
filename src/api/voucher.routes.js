@@ -12,7 +12,7 @@ import {
   getVoucherJobId,
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
-import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
+import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 
@@ -398,7 +398,6 @@ router.post("/create", async (req, res) => {
 /* ===========================
    PROCESS A SINGLE UPLOADED FILE
 =========================== */
-
 async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
   const originalFileName = file.originalname;
   const fileName = await getUniqueFileName(company_id, originalFileName);
@@ -422,20 +421,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  // ── Bank/ledger cross-check — BEFORE any row is touched ──
-  const bankCheck = validateBankMatchesLedger(sheet, bank_ledger, xlsx.utils);
-  if (!bankCheck.ok) {
-    return {
-      file_name: fileName,
-      original_file_name: wasRenamed ? originalFileName : undefined,
-      renamed: wasRenamed,
-      success: false,
-      bank_mismatch: true,
-      detected_bank: bankCheck.detected,
-      expected_bank: bankCheck.expected,
-      message: bankCheck.message
-    };
-  }
   const headerRowIndex = findHeaderRowIndex(sheet);
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {

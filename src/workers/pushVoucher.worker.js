@@ -1,7 +1,9 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { spawn } from "child_process";
+import axios from "axios";
 import path from "path";
+import net from "net";
 
 import pool from "../db/index.js";
 import {
@@ -12,271 +14,334 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
-import {
-  formatVoucherDate,
-  checkDuplicateFromDb
-} from "../api/voucher.js";
-
-import { createConnectorJob } from "../services/connectorJob.service.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
-
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
   maxRetriesPerRequest: null
 });
 
-const CONNECTOR_POLL_MS = 1000;
-const CONNECTOR_MAX_WAIT_MS = 90000; // 90s per voucher — tune as needed
-
-// ── NEW: how stale a PENDING_CONNECTOR row has to be before the sweep
-// gives up on it. Must be comfortably larger than CONNECTOR_MAX_WAIT_MS
-// so we never sweep a voucher that's still inside a live worker's wait.
-const STUCK_CONNECTOR_THRESHOLD = "10 minutes";
-// How often the sweep runs while the process stays up (in addition to
-// running once at startup).
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+/*
+====================================
+TEMPORARY ERROR DETECTION
+====================================
+*/
 
 function isTemporaryVoucherError(error) {
   const code = String(error?.code || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
 
   return [
-    "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "ECONNABORTED"
+    "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND"
   ].includes(code) ||
     message.includes("connection timeout") ||
     message.includes("timeout") ||
+    message.includes("tally server unavailable") ||
+    message.includes("server unavailable") ||
     message.includes("network") ||
     message.includes("fetch failed") ||
     message.includes("socket hang up") ||
     message.includes("econnreset") ||
     message.includes("econnrefused") ||
-    message.includes("econnaborted") ||
     message.includes("etimedout");
 }
+
+/*
+====================================
+BUILD LEDGERS BY VOUCHER TYPE
+====================================
+*/
 
 function buildLedgers(voucher, amount) {
   if (voucher.voucher_type === "payment") {
     return [
-      { ledger_name: voucher.party_ledger, amount: -amount, is_positive: true },
       {
-        ledger_name: voucher.bank_ledger, amount: amount, is_positive: false,
-        bank_allocation: { bank_name: voucher.bank_ledger, party_name: voucher.party_ledger, instrument_number: voucher.instrument_number || "" }
+        ledger_name: voucher.party_ledger,
+        amount: -amount,
+        is_positive: true
+      },
+      {
+        ledger_name: voucher.bank_ledger,
+        amount: amount,
+        is_positive: false,
+        bank_allocation: {
+          bank_name: voucher.bank_ledger,
+          party_name: voucher.party_ledger,
+          instrument_number: voucher.instrument_number || ""
+        }
       }
     ];
   }
+
   if (voucher.voucher_type === "receipt") {
     return [
-      { ledger_name: voucher.party_ledger, amount: amount, is_positive: false },
       {
-        ledger_name: voucher.bank_ledger, amount: -amount, is_positive: true,
-        bank_allocation: { bank_name: voucher.bank_ledger, party_name: voucher.party_ledger, instrument_number: voucher.instrument_number || "" }
+        ledger_name: voucher.party_ledger,
+        amount: amount,
+        is_positive: false
+      },
+      {
+        ledger_name: voucher.bank_ledger,
+        amount: -amount,
+        is_positive: true,
+        bank_allocation: {
+          bank_name: voucher.bank_ledger,
+          party_name: voucher.party_ledger,
+          instrument_number: voucher.instrument_number || ""
+        }
       }
     ];
   }
+
   if (voucher.voucher_type === "contra") {
     const destinationBank = voucher.transfer_bank || voucher.party_ledger;
-    if (!destinationBank) throw new Error(`Contra voucher ${voucher.id} is missing transfer_bank / party_ledger`);
+
+    if (!destinationBank) {
+      throw new Error(`Contra voucher ${voucher.id} is missing transfer_bank / party_ledger`);
+    }
+
     return [
-      { ledger_name: voucher.bank_ledger, amount: amount, is_positive: false },
       {
-        ledger_name: destinationBank, amount: -amount, is_positive: true,
-        bank_allocation: { bank_name: destinationBank, party_name: voucher.bank_ledger, instrument_number: voucher.instrument_number || "" }
+        ledger_name: voucher.bank_ledger,
+        amount: amount,
+        is_positive: false
+      },
+      {
+        ledger_name: destinationBank,
+        amount: -amount,
+        is_positive: true,
+        bank_allocation: {
+          bank_name: destinationBank,
+          party_name: voucher.bank_ledger,
+          instrument_number: voucher.instrument_number || ""
+        }
       }
     ];
   }
+
   throw new Error(`Unknown voucher_type: ${voucher.voucher_type}`);
 }
 
-function runPythonForXml(payload) {
+/*
+====================================
+SAFE DATE FORMATTING (YYYYMMDD for Tally)
+====================================
+*/
+
+function formatVoucherDate(rawDate, voucherId) {
+  if (rawDate instanceof Date) {
+    if (isNaN(rawDate.getTime())) {
+      throw new Error(`Voucher ${voucherId}: voucher_date is an invalid Date object`);
+    }
+    const yyyy = rawDate.getUTCFullYear();
+    const mm = String(rawDate.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(rawDate.getUTCDate()).padStart(2, "0");
+    return `${yyyy}${mm}${dd}`;
+  }
+
+  const str = String(rawDate || "").trim();
+
+  if (/^\d{8}$/.test(str)) {
+    return str;
+  }
+
+  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    const [, yyyy, mm, dd] = isoMatch;
+    return `${yyyy}${mm}${dd}`;
+  }
+
+  throw new Error(`Voucher ${voucherId}: unable to parse voucher_date "${str}" into YYYYMMDD`);
+}
+
+/*
+====================================
+TALLY AVAILABILITY CHECK
+
+Cheap TCP probe against Tally's XML port. Used both:
+  1) as a fast pre-check before wasting a python spawn, and
+  2) by the background poller that detects when Tally comes
+     back online and auto re-queues pending vouchers.
+====================================
+*/
+
+function isTallyOnline(host = "127.0.0.1", port = 9000, timeout = 2000) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(timeout);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+
+    socket.connect(port, host);
+  });
+}
+
+/*
+====================================
+RUN PYTHON & SEND TO TALLY
+====================================
+*/
+
+function runPythonAndSendToTally(payload) {
   return new Promise((resolve, reject) => {
     const pythonFile = path.join(process.cwd(), "src", "python", "VoucherGenerator.py");
+
     const python = spawn("python", [pythonFile, JSON.stringify(payload)]);
 
     let xmlData = "";
     let errorData = "";
 
-    python.stdout.on("data", (data) => { xmlData += data.toString(); });
-    python.stderr.on("data", (data) => { errorData += data.toString(); });
+    python.stdout.on("data", (data) => {
+      const output = data.toString();
+      console.log("PYTHON OUTPUT:", output);
+      xmlData += output;
+    });
 
-    python.on("close", (code) => {
+    python.stderr.on("data", (data) => {
+      const error = data.toString();
+      console.log("PYTHON ERROR:", error);
+      errorData += error;
+    });
+
+    python.on("close", async (code) => {
+      console.log("Python Exit Code:", code);
+
       if (code !== 0) {
-        return reject(Object.assign(new Error(errorData || "Python process failed"), { isPythonError: true, errorData }));
+        return reject(
+          Object.assign(
+            new Error(errorData || "Python process failed"),
+            { isPythonError: true, errorData }
+          )
+        );
       }
-      resolve(xmlData);
+
+      try {
+        const response = await axios.post(
+          "http://localhost:9000",
+          xmlData,
+          { headers: { "Content-Type": "application/xml" }, timeout: 8000 }
+        );
+
+        console.log("📥 TALLY RESPONSE:", response.data);
+        resolve(response.data);
+      } catch (err) {
+        reject(err);
+      }
     });
 
     python.on("error", reject);
   });
 }
 
+/*
+====================================
+STARTUP: MARK STALE PENDING AS FAILED
+
+NOTE: this only catches vouchers stuck PENDING with a stale
+updated_at (e.g. a crashed worker mid-job). It does NOT touch
+vouchers that are PENDING simply because Tally is closed and
+being actively retried/polled — those get a fresh updated_at
+on every retry attempt, so they never go stale here.
+====================================
+*/
+
 async function markStalePendingAsFailed() {
   const result = await pool.query(
     `UPDATE app_test.contra_vouchers
-     SET status = 'FAILED', tally_response = 'Upload interrupted / Worker restarted', updated_at = NOW()
-     WHERE status = 'PENDING' AND updated_at < NOW() - INTERVAL '5 minutes'
+     SET
+       status = 'FAILED',
+       tally_response = 'Upload interrupted / Worker restarted',
+       updated_at = NOW()
+     WHERE status = 'PENDING'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
      RETURNING id`
   );
   console.log(`Marked ${result.rowCount} stale pending vouchers as failed`);
 }
 
-// ── NEW: recovers vouchers stuck at PENDING_CONNECTOR — i.e. the
-// worker created a connector job and started waiting, but the
-// connector app never called back (crashed, went offline, or the
-// worker itself restarted mid-wait so waitForConnectorJob never even
-// finished running). These are NOT re-enqueued automatically — doing
-// that blindly risks pushing a real duplicate to Tally if the
-// connector actually did finish the job right before going silent
-// (same race window as issue #3). Instead we fail them visibly so a
-// human/route (confirm-push / party-ledger re-assign) makes the retry
-// decision, same pattern as markStalePendingAsFailed for plain PENDING.
-async function recoverStuckPendingConnectorVouchers() {
-  const stuck = await pool.query(
-    `SELECT id FROM app_test.contra_vouchers
-     WHERE status = 'PENDING_CONNECTOR'
-       AND updated_at < NOW() - INTERVAL '${STUCK_CONNECTOR_THRESHOLD}'`
-  );
+/*
+====================================
+ENQUEUE ALL PENDING VOUCHERS
 
-  if (!stuck.rowCount) return;
-
-  for (const row of stuck.rows) {
-    const voucherId = row.id;
-
-    // Expire the orphaned connector job (if still pending/processing) so
-    // a connector app that reconnects later doesn't push it to Tally
-    // after we've already told the user it failed and let them retry —
-    // that combination is exactly how a real duplicate push happens.
-    const expired = await pool.query(
-      `UPDATE app_test.connector_jobs
-       SET status = 'failed', updated_at = NOW()
-       WHERE job_type = 'voucher'
-         AND status IN ('pending', 'processing')
-         AND (payload->>'voucher_id')::bigint = $1
-       RETURNING id`,
-      [voucherId]
-    );
-
-    await pool.query(
-      `UPDATE app_test.contra_vouchers
-       SET status = 'FAILED',
-           tally_response = 'Connector did not confirm completion in time — marked failed for manual retry. If the connector actually pushed this before going silent, re-pushing will be caught by the duplicate check.',
-           updated_at = NOW()
-       WHERE id = $1`,
-      [voucherId]
-    );
-
-    console.warn(
-      `⚠️ Recovered stuck PENDING_CONNECTOR voucher ${voucherId}` +
-      (expired.rowCount ? ` (expired connector job ${expired.rows[0].id})` : ` (no live connector job found to expire)`)
-    );
-  }
-
-  console.log(`Recovered ${stuck.rowCount} stuck PENDING_CONNECTOR vouchers`);
-}
+Reused both at worker startup AND by the Tally-availability
+poller whenever Tally transitions from offline → online.
+====================================
+*/
 
 async function enqueuePendingVoucherJobs() {
   const result = await pool.query(
-    `SELECT id FROM app_test.contra_vouchers WHERE status = 'PENDING' ORDER BY id ASC`
+    `SELECT id FROM app_test.contra_vouchers
+     WHERE status = 'PENDING'
+     ORDER BY id ASC`
   );
+
   let enqueuedCount = 0;
+
   for (const row of result.rows) {
     const { action } = await safeEnqueueVoucher(row.id);
     if (action === "enqueued") enqueuedCount++;
   }
-  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending voucher jobs`);
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending voucher jobs (rest already queued/active)`);
 }
 
-async function waitForConnectorJob(connectorJobId, voucherId) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < CONNECTOR_MAX_WAIT_MS) {
-    await new Promise((r) => setTimeout(r, CONNECTOR_POLL_MS));
-
-    const { rows } = await pool.query(
-      `SELECT status FROM app_test.connector_jobs WHERE id = $1`,
-      [connectorJobId]
-    );
-    const jobStatus = rows[0]?.status;
-
-    if (jobStatus === "completed" || jobStatus === "success") {
-      console.log(`✅ Connector finished voucher ${voucherId} (job ${connectorJobId})`);
-      return { outcome: "connector_completed" };
-    }
-
-    if (jobStatus === "failed") {
-      console.log(`💥 Connector reported failure for voucher ${voucherId} (job ${connectorJobId})`);
-      return { outcome: "connector_failed" };
-    }
-
-    // still 'pending' or 'processing' → keep waiting
-  }
-
-  // ── CHANGED: this is a WORKER-SIDE timeout only — it means we gave up
-  // watching, not that the job is dead. The connector may still finish
-  // it and call processConnectorJobResult later, which will correctly
-  // update the voucher. We deliberately do NOT touch contra_vouchers
-  // here (that would race with a legitimate late completion). The
-  // periodic recoverStuckPendingConnectorVouchers() sweep is what
-  // eventually resolves this if the callback truly never arrives —
-  // it waits an extra buffer (10 min vs this 90s) before acting.
-  console.warn(`⏳ Timed out waiting on connector job ${connectorJobId} for voucher ${voucherId} — leaving PENDING_CONNECTOR; sweep will recover it if the connector never calls back`);
-  return { outcome: "connector_timeout" };
-}
+/*
+====================================
+WORKER
+====================================
+*/
 
 const worker = new Worker(
   VOUCHER_QUEUE_NAME,
   async (job) => {
     const { voucherId } = job.data;
 
-    const result = await pool.query(`SELECT * FROM app_test.contra_vouchers WHERE id = $1`, [voucherId]);
+    const result = await pool.query(
+      `SELECT * FROM app_test.contra_vouchers WHERE id = $1`,
+      [voucherId]
+    );
+
     const voucher = result.rows[0];
 
-    if (!voucher) return { voucherId, status: "not_found" };
-
-    if (voucher.status === "CANCELLED") {
-      console.log(`🚫 Voucher ${voucherId} was cancelled — skipping push`);
-      return { voucherId, status: "cancelled" };
+    if (!voucher) {
+      console.error(`Voucher ${voucherId} not found`);
+      return { voucherId, status: "not_found" };
     }
 
-    console.log(`\n================================\n🚀 PROCESSING VOUCHER ID ${voucher.id}\n   Type: ${voucher.voucher_type} | Amount: ${voucher.amount}\n   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}\n================================`);
+    console.log("");
+    console.log("================================");
+    console.log(`🚀 PROCESSING VOUCHER ID ${voucher.id}`);
+    console.log(`   Type: ${voucher.voucher_type} | Amount: ${voucher.amount}`);
+    console.log(`   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}`);
+    console.log("================================");
+
+    // Fast pre-check: don't even bother spawning python if Tally is closed.
+    const online = await isTallyOnline();
+    if (!online) {
+      await pool.query(
+        `UPDATE app_test.contra_vouchers
+         SET status = 'PENDING', tally_response = 'Tally is not open', updated_at = NOW()
+         WHERE id = $1`,
+        [voucherId]
+      );
+      console.log(`⏳ Voucher ${voucherId} left PENDING — Tally is not open`);
+      throw Object.assign(new Error("Tally server unavailable"), { code: "ECONNREFUSED" });
+    }
 
     try {
       const amount = Number(voucher.amount);
+      const ledgers = buildLedgers(voucher, amount);
       const formattedDate = formatVoucherDate(voucher.voucher_date, voucher.id);
 
-      if (!voucher.force_push) {
-        const voucherDateStr =
-          voucher.voucher_date instanceof Date
-            ? voucher.voucher_date.toISOString().split("T")[0]
-            : String(voucher.voucher_date).slice(0, 10);
-
-        const dup = await checkDuplicateFromDb({
-          companyId: voucher.company_id,
-          voucherType: voucher.voucher_type,
-          voucherDate: voucherDateStr,
-          partyLedger: voucher.party_ledger,
-          bankLedger: voucher.bank_ledger,
-          amount
-        });
-
-        if (dup.exists) {
-          await pool.query(
-            `UPDATE app_test.contra_vouchers
-             SET status = 'DUPLICATE_FOUND', duplicate_checked = true, duplicate_message = $1, updated_at = NOW()
-             WHERE id = $2`,
-            [dup.message, voucherId]
-          );
-          console.log(`⚠️ Duplicate found for voucher ${voucherId} at push time — waiting on confirm-push/cancel-push`);
-          return { voucherId, status: "duplicate_found" };
-        }
-
-        await pool.query(
-          `UPDATE app_test.contra_vouchers SET duplicate_checked = true, duplicate_message = NULL WHERE id = $1`,
-          [voucherId]
-        );
-      }
-
-      const ledgers = buildLedgers(voucher, amount);
       const payload = {
         company: voucher.company_name,
         voucher_type: voucher.voucher_type,
@@ -287,103 +352,94 @@ const worker = new Worker(
         ledgers
       };
 
-      console.log("📤 Generating XML for payload:", JSON.stringify(payload, null, 2));
+      console.log("📤 Sending Payload:", JSON.stringify(payload, null, 2));
 
-      const xml = await runPythonForXml(payload);
+      const tallyResponse = await runPythonAndSendToTally(payload);
 
-      const pairingResult = await pool.query(
-        `SELECT user_id, COUNT(*) OVER () AS candidate_count
-         FROM app_test.connector_pairing_tokens
-         WHERE company_id = $1
-           AND is_used = TRUE
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [voucher.company_id]
-      );
+      const created = tallyResponse.includes("<CREATED>1</CREATED>");
+      const altered = tallyResponse.includes("<ALTERED>1</ALTERED>");
+      const success = created || altered;
 
-      const pairing = pairingResult.rows[0];
+      if (success) {
+        await pool.query(
+          `UPDATE app_test.contra_vouchers
+           SET status = 'SUCCESS', tally_response = $1, updated_at = NOW()
+           WHERE id = $2`,
+          [tallyResponse, voucherId]
+        );
+        console.log(`✅ Voucher Success: ${voucherId}`);
+        return { voucherId, status: "success" };
+      }
 
-     if (!voucher.user_id) {
-  throw new Error(`Missing user_id for voucher ${voucherId}`);
-}
-
-const connector = await resolveConnectorForCompany(voucher.company_id, voucher.user_id);
-
-if (!connector) {
-  throw new Error(`No active connector found for company ${voucher.company_id} and user ${voucher.user_id}`);
-}
-
-console.log(`🔗 Voucher connector resolved: acting=${voucher.user_id}, connector=${connector.user_id}`);
-
-const connectorJob = await createConnectorJob({
-  userId: connector.user_id,
-  jobType: "voucher",
-  requestXml: xml,
-  payload: {
-    voucher_id: voucherId,
-    company_id: voucher.company_id,
-    voucher_type: voucher.voucher_type,
-    requested_by_user_id: voucher.user_id
-  }
-});
+      // Tally rejected (non-retriable business error)
       await pool.query(
         `UPDATE app_test.contra_vouchers
-         SET status = 'PENDING_CONNECTOR', tally_response = NULL, duplicate_message = NULL, updated_at = NOW()
-         WHERE id = $1`,
-        [voucherId]
+         SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [tallyResponse, voucherId]
       );
-
-      console.log(`✅ Voucher connector job created: ${voucherId}`, {
-        jobId: connectorJob.id,
-        userId: pairing.user_id
-      });
-
-      const { outcome } = await waitForConnectorJob(connectorJob.id, voucherId);
-
-      return {
-        voucherId,
-        status: outcome,
-        connectorJobId: connectorJob.id
-      };
+      console.log(`❌ Voucher Rejected by Tally: ${voucherId}`);
+      return { voucherId, status: "failed" };
 
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
         await pool.query(
-          `UPDATE app_test.contra_vouchers SET status = 'PENDING', tally_response = $1, updated_at = NOW() WHERE id = $2`,
+          `UPDATE app_test.contra_vouchers
+           SET status = 'PENDING', tally_response = $1, updated_at = NOW()
+           WHERE id = $2`,
           [error.message, voucherId]
         );
-        throw error; // BullMQ retries per VOUCHER_JOB_OPTIONS
+        throw error; // BullMQ retries; poller will also catch it once Tally is back
       }
 
+      // Permanent (real) error → fail
       await pool.query(
-        `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
+        `UPDATE app_test.contra_vouchers
+         SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
+         WHERE id = $2`,
         [error.message, voucherId]
       );
       console.log(`💥 Voucher Failed: ${voucherId} — ${error.message}`);
       return { voucherId, status: "failed" };
     }
   },
-  { connection, concurrency: 1 }
+  { connection, concurrency: 5 }
 );
 
-worker.on("completed", (job) => console.log(`Voucher job completed: ${job.id}`));
+/*
+====================================
+WORKER EVENTS
+====================================
+*/
+
+worker.on("completed", (job) => {
+  console.log(`Voucher job completed: ${job.id}`);
+});
 
 worker.on("failed", async (job, error) => {
   console.error(`Voucher job failed: ${job?.id}`, error.message);
+
   if (!job) return;
 
+  // Temporary/connection errors (Tally not open) must NEVER be stamped
+  // FAILED here, even after BullMQ's attempts run out. Leave it PENDING —
+  // the Tally-availability poller below will re-push it once Tally is back,
+  // regardless of how many attempts this particular job already used.
   if (isTemporaryVoucherError(error)) {
-    console.log(`⏳ Voucher ${job.data?.voucherId} stays PENDING — will retry per BullMQ attempts/backoff`);
+    console.log(`⏳ Voucher ${job.data?.voucherId} stays PENDING — will retry once Tally is reachable`);
     return;
   }
 
   const maximumAttempts = Number(job.opts.attempts || 1);
   if (job.attemptsMade < maximumAttempts) return;
 
+  // All retries exhausted on a REAL (non-connection) error → final FAILED
   try {
     const { voucherId } = job.data;
     await pool.query(
-      `UPDATE app_test.contra_vouchers SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE app_test.contra_vouchers
+       SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
+       WHERE id = $2`,
       [error.message, voucherId]
     );
   } catch (updateError) {
@@ -391,27 +447,62 @@ worker.on("failed", async (job, error) => {
   }
 });
 
-worker.on("error", (error) => console.error("Voucher worker error:", error.message));
+worker.on("error", (error) => {
+  console.error("Voucher worker error:", error.message);
+});
+
+/*
+====================================
+TALLY AVAILABILITY POLLER
+
+Runs independently of BullMQ's attempt counter. Every 20s it
+checks the Tally port. The moment Tally flips from
+unreachable → reachable, it re-enqueues every PENDING voucher.
+This is what guarantees vouchers get pushed automatically once
+you open Tally, no matter how long it was closed for or how
+many BullMQ attempts a given job already burned through.
+====================================
+*/
+
+let wasTallyOnline = null; // null = unknown at boot, avoids a false "back online" log on first run
+
+async function pollTallyAndRequeue() {
+  try {
+    const online = await isTallyOnline();
+
+    if (online && wasTallyOnline === false) {
+      console.log("✅ Tally is back online — re-queuing all PENDING vouchers");
+      await enqueuePendingVoucherJobs();
+    }
+
+    if (!online && wasTallyOnline !== false) {
+      console.log("⛔ Tally is not open — vouchers will hold as PENDING until it's back");
+    }
+
+    wasTallyOnline = online;
+  } catch (err) {
+    console.error("Tally poll error:", err.message);
+  }
+}
+
+setInterval(pollTallyAndRequeue, 20000);
+
+/*
+====================================
+STARTUP RECOVERY
+====================================
+*/
 
 (async () => {
   try {
     await markStalePendingAsFailed();
-    await recoverStuckPendingConnectorVouchers();
     await enqueuePendingVoucherJobs();
+    await pollTallyAndRequeue(); // establishes the initial wasTallyOnline baseline
   } catch (error) {
     console.error("Voucher startup recovery failed:", error.message);
   }
 })();
 
-// ── NEW: keep sweeping periodically, not just at startup — a worker
-// process can run for days between restarts, and a connector app can
-// go silent at any point during that window, not just right after
-// deploy.
-setInterval(() => {
-  markStalePendingAsFailed().catch((e) => console.error("markStalePendingAsFailed sweep failed:", e.message));
-  recoverStuckPendingConnectorVouchers().catch((e) => console.error("recoverStuckPendingConnectorVouchers sweep failed:", e.message));
-}, SWEEP_INTERVAL_MS);
-
-console.log("✅ Push Voucher BullMQ Worker Started (routes via Connector)");
+console.log("✅ Push Voucher BullMQ Worker Started");
 
 export default worker;
