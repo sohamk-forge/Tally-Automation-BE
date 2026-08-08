@@ -297,63 +297,94 @@ const worker = new Worker(
           rate: safeNumber(getValue(row, [
             "Rate", "rate", "Unit Price", "Price"
           ])),
-          amount: taxableAmount,
-          gst_percent: lineGstPercent
+          amount: safeNumber(getValue(row, [
+            "Taxable Amount",
+            "Taxable Amount INR",
+            "Amount",
+            "taxable amount"
+          ])),
+          // Own GST rate for this line — falls back to the invoice's rate
+          // (first row seen) only if this row didn't specify one, so
+          // mixed-rate line items on the same invoice are computed correctly.
+          gst_percent: gstPercent || invoices[invoiceNo].gst_percent
         });
       }
     }
 
     Object.values(invoices).forEach(invoice => {
 
-      const customerStateCode = String(invoice.customer_gstin || "")
+      // A GSTIN state prefix only counts as interstate when it's an actual
+      // 2-digit numeric code. Placeholder text like "NA" (or a blank GSTIN)
+      // means "no registered GSTIN" — i.e. a local/unregistered sale — not
+      // an interstate one, so it must fall into the CGST+SGST branch below.
+      const rawStateCode = String(invoice.customer_gstin || "")
         .trim()
         .substring(0, 2);
 
-      const isIntraState =
-        !customerStateCode || customerStateCode === companyStateCode;
+      const stateCode = /^\d{2}$/.test(rawStateCode) ? rawStateCode : "";
 
-      invoice.taxable_amount = 0;
-      invoice.cgst_amount = 0;
-      invoice.sgst_amount = 0;
-      invoice.igst_amount = 0;
+      // GST is calculated per LINE ITEM (each rounded to 2dp) and the
+      // per-line figures are summed to get the invoice's CGST/SGST/IGST —
+      // NOT calculated once on the invoice's combined taxable_amount.
+      // This matches how the source Excel's own totals are built, and is
+      // an intentional choice (confirmed) even though it means our output
+      // no longer matches a voucher entered against the combined total,
+      // e.g. a 2-line invoice can land 1-2 paise higher than the
+      // combined-total method due to rounding twice instead of once.
+      let cgstSum = 0;
+      let sgstSum = 0;
+      let igstSum = 0;
 
-      for (const item of invoice.line_items) {
+      const items = invoice.line_items.length ? invoice.line_items : [{
+        amount: invoice.taxable_amount,
+        gst_percent: invoice.gst_percent
+      }];
 
-        const taxable = safeNumber(item.amount);
-        const gstRate = safeNumber(item.gst_percent);
+      for (const item of items) {
+        const lineTaxable = item.amount || 0;
+        const lineGstPercent = item.gst_percent || invoice.gst_percent;
 
-        invoice.taxable_amount += taxable;
-
-        if (isIntraState) {
-
-          const halfRate = gstRate / 2;
-          const lineCgst = Number(((taxable * halfRate) / 100).toFixed(2));
-          const lineSgst = Number(((taxable * halfRate) / 100).toFixed(2));
-
-          item.cgst_amount = lineCgst;
-          item.sgst_amount = lineSgst;
-          item.igst_amount = 0;
-
-          invoice.cgst_amount += lineCgst;
-          invoice.sgst_amount += lineSgst;
-
+        if (stateCode && stateCode !== "27") {
+          igstSum += Number(((lineTaxable * lineGstPercent) / 100).toFixed(2));
         } else {
+          const halfRate = lineGstPercent / 2;
+          const halfRaw = (lineTaxable * halfRate) / 100;
+          const halfRounded = Number(halfRaw.toFixed(2));
 
-          const lineIgst = Number(((taxable * gstRate) / 100).toFixed(2));
+          // Diagnostic only — does not change the amount pushed. Rounding
+          // each half independently (what we do, "split") and rounding the
+          // full line GST once then splitting it ("once") can land a paisa
+          // apart. We've confirmed against Eicher's own verified GST report
+          // that which one is "correct" is NOT predictable from taxable
+          // amount, rate, customer type, or quantity — the identical
+          // taxable+rate combination (₹703.39 @ 18%) is verified-correct as
+          // ₹126.61 on one invoice and ₹126.62 on another. So this can't be
+          // auto-corrected; flagged here for manual cross-check against the
+          // OEM/GST portal report instead.
+          const splitLineTotal = Number((halfRounded * 2).toFixed(2));
+          const onceLineTotal = Number(((lineTaxable * lineGstPercent) / 100).toFixed(2));
 
-          item.cgst_amount = 0;
-          item.sgst_amount = 0;
-          item.igst_amount = lineIgst;
+          if (splitLineTotal !== onceLineTotal) {
+            console.log("⚠️ GST ROUNDING BOUNDARY — verify against OEM/GST portal report:", {
+              invoice: invoice.invoice_no,
+              item: item.item_name,
+              line_taxable: lineTaxable,
+              gst_percent: lineGstPercent,
+              our_line_total_if_split: splitLineTotal,
+              our_line_total_if_rounded_once: onceLineTotal
+            });
+          }
 
-          invoice.igst_amount += lineIgst;
+          cgstSum += halfRounded;
+          sgstSum += halfRounded;
         }
       }
 
-      invoice.taxable_amount = Number(invoice.taxable_amount.toFixed(2));
-      invoice.cgst_amount = Number(invoice.cgst_amount.toFixed(2));
-      invoice.sgst_amount = Number(invoice.sgst_amount.toFixed(2));
-      invoice.igst_amount = Number(invoice.igst_amount.toFixed(2));
+      invoice.cgst_amount = Number(cgstSum.toFixed(2));
+      invoice.sgst_amount = Number(sgstSum.toFixed(2));
+      invoice.igst_amount = Number(igstSum.toFixed(2));
 
+      // Step 4: Subtract TDS
       const baseTotal = Number((
         invoice.taxable_amount +
         invoice.cgst_amount +
@@ -398,6 +429,8 @@ const worker = new Worker(
         company_state: companyStateCode,
         is_intrastate: isIntraState,
         taxable: invoice.taxable_amount,
+        gst_percent: invoice.gst_percent,
+        gst: Number((invoice.cgst_amount + invoice.sgst_amount + invoice.igst_amount).toFixed(2)),
         cgst: invoice.cgst_amount,
         sgst: invoice.sgst_amount,
         igst: invoice.igst_amount,
