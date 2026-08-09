@@ -46,6 +46,8 @@ import "./workers/bulkSales.worker.js";
 
 import "./workers/pushVoucher.worker.js";
 
+import "./workers/bulkSalesV2.worker.js";
+
 /* =================================
 
    ROUTES
@@ -185,7 +187,7 @@ import quotationPdfRoutes from "./api/quotationpdf.routes.js";
 import companyLogoRoutes
 from "./api/companyLogo.routes.js";
 
-import proformaRoutes from "./api/proforma.routes.js";
+import bulkSalesV2Routes from "./api/bulkSalesV2.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -562,6 +564,8 @@ app.use(
   ...requireSessionOrApiKey(),
   companyLogoRoutes
 );
+
+app.use("/api", bulkSalesV2Routes);
 /* =================================
    DEFAULT API
 ================================= */
