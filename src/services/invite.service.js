@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { checkSeatAvailable } from "../utils/companyMembers.js";
 
 /**
  * Company access is gated by connector_pairing_tokens (user_id + company_id +
@@ -8,14 +9,16 @@ import { DB_SCHEMA } from "../config/db.js";
  * note in companies.routes.js. Granting an invitee the inviter's access means
  * cloning the inviter's used pairing-token rows for the invitee.
  */
-export const createInvite = async (invitedByUserId, email) => {
+export const VALID_ROLES = ["admin", "accountant", "staff"];
+
+export const createInvite = async (invitedByUserId, email, role = "staff") => {
   const result = await pool.query(
     `
-    INSERT INTO ${DB_SCHEMA}.invites (email, invited_by_user_id, status)
-    VALUES ($1, $2, 'invited')
-    RETURNING id, email, status, created_at
+    INSERT INTO ${DB_SCHEMA}.invites (email, invited_by_user_id, status, role)
+    VALUES ($1, $2, 'invited', $3)
+    RETURNING id, email, status, role, created_at
     `,
-    [email, invitedByUserId]
+    [email, invitedByUserId, role]
   );
 
   return result.rows[0];
@@ -56,7 +59,7 @@ export const markInviteAccepted = async (supertokensUserId, email) => {
 export const listInvitesForUser = async (invitedByUserId) => {
   const result = await pool.query(
     `
-    SELECT id, email, status, invitee_user_id, created_at, updated_at
+    SELECT id, email, status, role, invitee_user_id, created_at, updated_at
     FROM ${DB_SCHEMA}.invites
     WHERE invited_by_user_id = $1
     ORDER BY created_at DESC
@@ -68,70 +71,146 @@ export const listInvitesForUser = async (invitedByUserId) => {
 };
 
 /**
+ * Returns the invite currently blocking this user from real access, if any
+ * — used to show a "waiting for approval" screen instead of the normal
+ * dashboard shell. A user can only ever be genuinely blocked by one invite
+ * at a time (the one that brought them into the app), so the most recent
+ * pending_approval row targeting them is enough.
+ */
+export const getPendingInviteForUser = async (userId) => {
+  const result = await pool.query(
+    `
+    SELECT
+      i.id,
+      i.role,
+      i.created_at,
+      u.email AS inviter_email,
+      u.first_name AS inviter_first_name,
+      u.last_name AS inviter_last_name
+    FROM ${DB_SCHEMA}.invites i
+    JOIN ${DB_SCHEMA}.users u ON u.id = i.invited_by_user_id
+    WHERE i.invitee_user_id = $1
+      AND i.status = 'pending_approval'
+    ORDER BY i.created_at DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows[0] || null;
+};
+
+/**
  * Approves a pending invite: clones every company the inviter currently has
  * access to (a used connector_pairing_tokens row) onto the invitee, then
  * marks the invite approved. Only the original inviter may approve.
  */
 export const approveInvite = async (inviteId, approverUserId) => {
-  const inviteResult = await pool.query(
-    `
-    SELECT id, invited_by_user_id, invitee_user_id, status
-    FROM ${DB_SCHEMA}.invites
-    WHERE id = $1
-    `,
-    [inviteId]
-  );
+  const client = await pool.connect();
 
-  const invite = inviteResult.rows[0];
-  if (!invite) {
-    return { error: "not_found" };
-  }
-  if (invite.invited_by_user_id !== approverUserId) {
-    return { error: "forbidden" };
-  }
-  if (invite.status !== "pending_approval") {
-    return { error: "invalid_status" };
-  }
-  if (!invite.invitee_user_id) {
-    return { error: "invitee_not_signed_in" };
-  }
+  try {
+    await client.query("BEGIN");
 
-  const pairingResult = await pool.query(
-    `
-    SELECT company_id
-    FROM ${DB_SCHEMA}.connector_pairing_tokens
-    WHERE user_id = $1
-      AND is_used = TRUE
-      AND company_id IS NOT NULL
-    `,
-    [invite.invited_by_user_id]
-  );
-
-  for (const { company_id } of pairingResult.rows) {
-    const token = "INVITE-" + crypto.randomBytes(8).toString("hex").toUpperCase();
-    const expiresAt = new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
-
-    await pool.query(
+    const inviteResult = await client.query(
       `
-      INSERT INTO ${DB_SCHEMA}.connector_pairing_tokens
-      (id, user_id, company_id, token, expires_at, is_used, invite_id)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, TRUE, $5)
-      ON CONFLICT DO NOTHING
+      SELECT id, invited_by_user_id, invitee_user_id, status, role
+      FROM ${DB_SCHEMA}.invites
+      WHERE id = $1
+      FOR UPDATE
       `,
-      [invite.invitee_user_id, company_id, token, expiresAt, inviteId]
+      [inviteId]
     );
+
+    const invite = inviteResult.rows[0];
+    if (!invite) {
+      await client.query("ROLLBACK");
+      return { error: "not_found" };
+    }
+    if (invite.invited_by_user_id !== approverUserId) {
+      await client.query("ROLLBACK");
+      return { error: "forbidden" };
+    }
+    if (invite.status !== "pending_approval") {
+      await client.query("ROLLBACK");
+      return { error: "invalid_status" };
+    }
+    if (!invite.invitee_user_id) {
+      await client.query("ROLLBACK");
+      return { error: "invitee_not_signed_in" };
+    }
+
+    const role = invite.role || "staff";
+
+    const pairingResult = await client.query(
+      `
+      SELECT company_id
+      FROM ${DB_SCHEMA}.connector_pairing_tokens
+      WHERE user_id = $1
+        AND is_used = TRUE
+        AND company_id IS NOT NULL
+      `,
+      [invite.invited_by_user_id]
+    );
+
+    // Check every company this invite would grant BEFORE mutating anything —
+    // a partial grant (some companies succeed, one fails) would leave the
+    // invitee with confusing, inconsistent access.
+    for (const { company_id } of pairingResult.rows) {
+      const seatCheck = await checkSeatAvailable(company_id, role, invite.invitee_user_id, client);
+
+      if (!seatCheck.available) {
+        await client.query("ROLLBACK");
+        return {
+          error: seatCheck.reason,
+          role,
+          companyId: company_id,
+          takenBy: seatCheck.takenBy
+        };
+      }
+    }
+
+    for (const { company_id } of pairingResult.rows) {
+      const token = "INVITE-" + crypto.randomBytes(8).toString("hex").toUpperCase();
+      const expiresAt = new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
+
+      await client.query(
+        `
+        INSERT INTO ${DB_SCHEMA}.connector_pairing_tokens
+        (id, user_id, company_id, token, expires_at, is_used, invite_id)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, TRUE, $5)
+        ON CONFLICT DO NOTHING
+        `,
+        [invite.invitee_user_id, company_id, token, expiresAt, inviteId]
+      );
+
+      await client.query(
+        `
+        INSERT INTO ${DB_SCHEMA}.company_members (user_id, company_id, role, invited_by_user_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id, company_id) DO UPDATE SET role = EXCLUDED.role
+        `,
+        [invite.invitee_user_id, company_id, role, invite.invited_by_user_id]
+      );
+    }
+
+    await client.query(
+      `
+      UPDATE ${DB_SCHEMA}.invites
+      SET status = 'approved', updated_at = now()
+      WHERE id = $1
+      `,
+      [inviteId]
+    );
+
+    await client.query("COMMIT");
+
+    return { companiesGranted: pairingResult.rows.length };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-
-  await pool.query(
-    `
-    UPDATE ${DB_SCHEMA}.invites
-    SET status = 'approved', updated_at = now()
-    WHERE id = $1
-    `,
-    [inviteId]
-  );
-
-  return { companiesGranted: pairingResult.rows.length };
 };
 
 /**
@@ -143,7 +222,7 @@ export const approveInvite = async (inviteId, approverUserId) => {
 export const revokeInvite = async (inviteId, requesterUserId) => {
   const inviteResult = await pool.query(
     `
-    SELECT id, invited_by_user_id, status
+    SELECT id, invited_by_user_id, invitee_user_id, status
     FROM ${DB_SCHEMA}.invites
     WHERE id = $1
     `,
@@ -162,9 +241,26 @@ export const revokeInvite = async (inviteId, requesterUserId) => {
   }
 
   const revokedResult = await pool.query(
-    `DELETE FROM ${DB_SCHEMA}.connector_pairing_tokens WHERE invite_id = $1`,
+    `DELETE FROM ${DB_SCHEMA}.connector_pairing_tokens WHERE invite_id = $1 RETURNING company_id`,
     [inviteId]
   );
+
+  // Also drop this invite's role grant for the same companies — otherwise a
+  // revoked admin/accountant invite would keep occupying that role's seat
+  // (blocking a new invite for the same role) even though their actual data
+  // access was just revoked above.
+  if (invite.invitee_user_id && revokedResult.rows.length > 0) {
+    const companyIds = revokedResult.rows.map((row) => row.company_id);
+
+    await pool.query(
+      `
+      DELETE FROM ${DB_SCHEMA}.company_members
+      WHERE user_id = $1
+        AND company_id = ANY($2::int[])
+      `,
+      [invite.invitee_user_id, companyIds]
+    );
+  }
 
   await pool.query(
     `

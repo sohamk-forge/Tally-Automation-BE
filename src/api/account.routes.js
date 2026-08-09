@@ -21,7 +21,7 @@ router.get("/status", verifySession(), async (req, res) => {
     }
 
     const hasPassword = await getHasPassword(userId);
-    return res.json({ status: "success", data: { hasPassword } });
+    return res.json({ status: "success", data: { userId, hasPassword } });
   } catch (err) {
     console.log("ACCOUNT STATUS ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });

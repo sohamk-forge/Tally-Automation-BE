@@ -1,6 +1,8 @@
 import express from "express";
 import pool from "../db/index.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
+import { getCompanyMemberRole, checkSeatAvailable } from "../utils/companyMembers.js";
+import { PAGE_KEYS, EDITABLE_ROLES, getRolePermissionMatrix, getEnabledPagesForRole } from "../utils/pagePermissions.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -215,4 +217,263 @@ router.get("/all/list", async (req, res) => {
   }
 });
   
+/* =========================================
+   MY ROLE — unlike GET /:id/members (admin-only), any member can check
+   their own role. This is what the frontend uses to decide which pages/
+   nav items to show for the active company.
+========================================= */
+router.get("/:id/my-role", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const role = await getCompanyMemberRole(userId, req.params.id);
+
+    if (!role) {
+      return res.status(404).json({ status: "error", message: "You are not a member of this company" });
+    }
+
+    // Admin always sees every page — the permission matrix only ever
+    // applies to accountant/staff, so it's not even consulted here.
+    const enabledPages = role === "admin"
+      ? [...PAGE_KEYS]
+      : await getEnabledPagesForRole(req.params.id, role);
+
+    return res.json({ status: "success", data: { role, enabledPages } });
+  } catch (err) {
+    console.log("COMPANY MY ROLE ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   ROLE PAGE PERMISSIONS — admin-only. Controls which pages Accountant and
+   Staff can see, per company. Admin is intentionally not represented here
+   at all (always full access) and "team" (Team & Access) is intentionally
+   not in PAGE_KEYS (always admin-only) — neither is ever toggle-able.
+========================================= */
+router.get("/:id/role-permissions", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = req.params.id;
+    const callerRole = await getCompanyMemberRole(userId, companyId);
+    if (callerRole !== "admin") {
+      return res.status(403).json({ status: "error", message: "Only an admin can view page permissions" });
+    }
+
+    const matrix = await getRolePermissionMatrix(companyId);
+    return res.json({ status: "success", data: { pages: PAGE_KEYS, matrix } });
+  } catch (err) {
+    console.log("ROLE PERMISSIONS GET ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+router.patch("/:id/role-permissions", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = req.params.id;
+    const { role, pageKey, enabled } = req.body;
+
+    if (!EDITABLE_ROLES.includes(role)) {
+      return res.status(400).json({ status: "error", message: `role must be one of: ${EDITABLE_ROLES.join(", ")}` });
+    }
+    if (!PAGE_KEYS.includes(pageKey)) {
+      return res.status(400).json({ status: "error", message: "Unknown pageKey" });
+    }
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ status: "error", message: "enabled must be true or false" });
+    }
+
+    const callerRole = await getCompanyMemberRole(userId, companyId);
+    if (callerRole !== "admin") {
+      return res.status(403).json({ status: "error", message: "Only an admin can change page permissions" });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO ${DB_SCHEMA}.company_role_permissions (company_id, role, page_key, enabled)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (company_id, role, page_key)
+      DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()
+      `,
+      [companyId, role, pageKey, enabled]
+    );
+
+    const matrix = await getRolePermissionMatrix(companyId);
+    return res.json({ status: "success", data: { pages: PAGE_KEYS, matrix } });
+  } catch (err) {
+    console.log("ROLE PERMISSIONS PATCH ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   COMPANY MEMBERS — list / change role / remove
+   Admin-only: the caller must hold role='admin' in company_members for
+   this company (checked via getCompanyMemberRole, not the legacy
+   connector_pairing_tokens/user_companies access check — membership and
+   data access are deliberately separate concerns here).
+========================================= */
+router.get("/:id/members", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = req.params.id;
+    const callerRole = await getCompanyMemberRole(userId, companyId);
+
+    if (callerRole !== "admin") {
+      return res.status(403).json({ status: "error", message: "Only an admin can view company members" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        u.id AS user_id,
+        u.email,
+        u.first_name,
+        u.last_name,
+        cm.role,
+        EXISTS (
+          SELECT 1 FROM ${DB_SCHEMA}.connector_api_keys cak
+          WHERE cak.user_id = u.id
+            AND cak.company_id = $1
+            AND cak.revoked_at IS NULL
+        ) AS has_device
+      FROM ${DB_SCHEMA}.company_members cm
+      JOIN ${DB_SCHEMA}.users u ON u.id = cm.user_id
+      WHERE cm.company_id = $1
+      ORDER BY cm.role, u.email
+      `,
+      [companyId]
+    );
+
+    return res.json({ status: "success", data: result.rows });
+  } catch (err) {
+    console.log("COMPANY MEMBERS LIST ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+router.patch("/:id/members/:memberId", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = req.params.id;
+    const memberId = req.params.memberId;
+    const { role } = req.body;
+
+    if (!["admin", "accountant", "staff"].includes(role)) {
+      return res.status(400).json({ status: "error", message: "role must be one of: admin, accountant, staff" });
+    }
+
+    const callerRole = await getCompanyMemberRole(userId, companyId);
+    if (callerRole !== "admin") {
+      return res.status(403).json({ status: "error", message: "Only an admin can change a member's role" });
+    }
+
+    const seatCheck = await checkSeatAvailable(companyId, role, memberId);
+    if (!seatCheck.available) {
+      return res.status(409).json({
+        status: "error",
+        message: seatCheck.reason === "seat_taken"
+          ? `The ${role} seat for this company is already taken by ${seatCheck.takenBy}`
+          : "This company already has the maximum number of staff members"
+      });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE ${DB_SCHEMA}.company_members
+      SET role = $1
+      WHERE company_id = $2 AND user_id = $3
+      RETURNING user_id, role
+      `,
+      [role, companyId, memberId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ status: "error", message: "Member not found on this company" });
+    }
+
+    // Any role change clears this member's existing device pairing for the
+    // company — otherwise someone demoted off admin/accountant would keep
+    // an active connector device despite the role no longer permitting one,
+    // and re-pairing under the new role is a cheap one-time action anyway.
+    await pool.query(
+      `
+      UPDATE ${DB_SCHEMA}.connector_api_keys
+      SET revoked_at = NOW()
+      WHERE user_id = $1 AND company_id = $2 AND revoked_at IS NULL
+      `,
+      [memberId, companyId]
+    );
+
+    return res.json({ status: "success", data: result.rows[0] });
+  } catch (err) {
+    console.log("COMPANY MEMBER ROLE UPDATE ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+router.delete("/:id/members/:memberId", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = req.params.id;
+    const memberId = req.params.memberId;
+
+    const callerRole = await getCompanyMemberRole(userId, companyId);
+    if (callerRole !== "admin") {
+      return res.status(403).json({ status: "error", message: "Only an admin can remove a member" });
+    }
+    if (String(memberId) === String(userId)) {
+      return res.status(400).json({ status: "error", message: "An admin cannot remove their own access" });
+    }
+
+    await pool.query(
+      `DELETE FROM ${DB_SCHEMA}.company_members WHERE company_id = $1 AND user_id = $2`,
+      [companyId, memberId]
+    );
+
+    await pool.query(
+      `DELETE FROM ${DB_SCHEMA}.connector_pairing_tokens WHERE company_id = $1 AND user_id = $2`,
+      [companyId, memberId]
+    );
+
+    await pool.query(
+      `
+      UPDATE ${DB_SCHEMA}.connector_api_keys
+      SET revoked_at = NOW()
+      WHERE company_id = $1 AND user_id = $2 AND revoked_at IS NULL
+      `,
+      [companyId, memberId]
+    );
+
+    return res.json({ status: "success", message: "Member access removed" });
+  } catch (err) {
+    console.log("COMPANY MEMBER REMOVE ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
 export default router;

@@ -2,7 +2,7 @@ import express from "express";
 import Passwordless from "supertokens-node/recipe/passwordless/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { createInvite, listInvitesForUser, approveInvite, revokeInvite } from "../services/invite.service.js";
+import { createInvite, listInvitesForUser, approveInvite, revokeInvite, getPendingInviteForUser, VALID_ROLES } from "../services/invite.service.js";
 import { sendInviteEmail } from "../services/mailer.service.js";
 
 const router = express.Router();
@@ -19,15 +19,18 @@ router.post("/", verifySession(), async (req, res) => {
       return res.status(404).json({ status: "error", message: "No profile found for this account" });
     }
 
-    const { email } = req.body;
+    const { email, role = "staff" } = req.body;
     if (!email) {
       return res.status(400).json({ status: "error", message: "email is required" });
+    }
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ status: "error", message: `role must be one of: ${VALID_ROLES.join(", ")}` });
     }
 
     await Passwordless.signInUp({ tenantId: "public", email });
     const inviteLink = await Passwordless.createMagicLink({ tenantId: "public", email });
 
-    const invite = await createInvite(userId, email);
+    const invite = await createInvite(userId, email, role);
 
     await sendInviteEmail(email, inviteLink);
 
@@ -62,6 +65,27 @@ router.get("/", verifySession(), async (req, res) => {
 });
 
 /* =========================================
+   MY PENDING INVITE
+   Used by the frontend to show a "waiting for approval" screen instead of
+   the dashboard shell — any authenticated user can check their own status.
+========================================= */
+router.get("/my-pending", verifySession(), async (req, res) => {
+  try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const pending = await getPendingInviteForUser(userId);
+
+    return res.json({ status: "success", data: pending });
+  } catch (err) {
+    console.log("INVITE MY-PENDING ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
    APPROVE INVITE
    Grants the invitee access to every company the inviter currently has.
 ========================================= */
@@ -85,6 +109,18 @@ router.post("/:id/approve", verifySession(), async (req, res) => {
     }
     if (result.error === "invitee_not_signed_in") {
       return res.status(409).json({ status: "error", message: "Invitee has not logged in via the invite link yet" });
+    }
+    if (result.error === "seat_taken") {
+      return res.status(409).json({
+        status: "error",
+        message: `The ${result.role} seat for this company is already taken by ${result.takenBy}`
+      });
+    }
+    if (result.error === "staff_limit_reached") {
+      return res.status(409).json({
+        status: "error",
+        message: "This company already has the maximum number of staff members"
+      });
     }
 
     return res.json({

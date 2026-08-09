@@ -2421,28 +2421,53 @@ const clean = (value) => {
           });
         }
 
-        await pool.query(
+        // Same per-user company scoping as /api/connector-auth/pair (see
+        // that route for the full rationale) — reuse only a company this
+        // user already owns via a used pairing token, otherwise always
+        // create a fresh row, even against an identical name owned by
+        // someone else.
+        const ownedManualCompanyResult = await pool.query(
           `
-          INSERT INTO app_test.companies
-          (
-            name,
-            financial_year_start,
-            financial_year_end
-          )
-          VALUES ($1, $2, $3)
-
-          ON CONFLICT (name)
-          DO UPDATE SET
-            financial_year_start = EXCLUDED.financial_year_start,
-            financial_year_end = EXCLUDED.financial_year_end,
-            updated_at = NOW()
+          SELECT c.id
+          FROM app_test.companies c
+          JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+          WHERE cpt.user_id = $1
+            AND cpt.is_used = TRUE
+            AND lower(trim(c.name)) = lower(trim($2))
+          LIMIT 1
           `,
-          [
-            company.trim(),
-            fromYear,
-            toYear
-          ]
+          [userId, company.trim()]
         );
+
+        if (ownedManualCompanyResult.rows.length > 0) {
+          await pool.query(
+            `
+            UPDATE app_test.companies
+            SET financial_year_start = $1,
+                financial_year_end = $2,
+                updated_at = NOW()
+            WHERE id = $3
+            `,
+            [fromYear, toYear, ownedManualCompanyResult.rows[0].id]
+          );
+        } else {
+          await pool.query(
+            `
+            INSERT INTO app_test.companies
+            (
+              name,
+              financial_year_start,
+              financial_year_end
+            )
+            VALUES ($1, $2, $3)
+            `,
+            [
+              company.trim(),
+              fromYear,
+              toYear
+            ]
+          );
+        }
 
         const payload = {
           company,
