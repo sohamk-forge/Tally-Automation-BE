@@ -175,4 +175,55 @@ router.get("/ledger-mapping/:companyId", async (req, res) => {
 
 });
 
+router.get("/purchase-ledgers/:companyId", async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const mapping = await pool.query(
+      `
+      SELECT invoice_parent_group
+      FROM ${DB_SCHEMA}.company_ledger_mappings
+      WHERE company_id = $1
+      LIMIT 1
+      `,
+      [companyId]
+    );
+
+    if (!mapping.rows.length) {
+      return res.status(404).json({
+        status: "error",
+        message: "Purchase ledger mapping not found"
+      });
+    }
+
+    const parentGroup = mapping.rows[0].invoice_parent_group;
+
+    const result = await pool.query(
+      `
+      SELECT ledger_name
+      FROM ${DB_SCHEMA}.all_ledger_details
+      WHERE company_id = $1
+        AND LOWER(TRIM(parent_group)) = LOWER(TRIM($2))
+      ORDER BY ledger_name
+      `,
+      [companyId, parentGroup]
+    );
+
+    return res.status(200).json({
+      status: "success",
+      purchase_parent_group: parentGroup,
+      count: result.rows.length,
+      data: result.rows
+    });
+
+  } catch (err) {
+    console.error("Purchase ledgers error:", err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
 export default router;
