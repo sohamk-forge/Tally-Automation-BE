@@ -184,6 +184,8 @@ import quotationPdfRoutes from "./api/quotationpdf.routes.js";
 
 import companyLogoRoutes
 from "./api/companyLogo.routes.js";
+
+import proformaRoutes from "./api/proforma.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -524,6 +526,8 @@ app.use(
   ...requireSessionOrApiKey(),
   voucherPdfRoutes
 );
+
+app.use("/api/v1/proforma", ...requireSessionOrApiKey(), proformaRoutes);
 
 
 /* =================================

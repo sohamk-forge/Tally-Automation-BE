@@ -1020,88 +1020,36 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
-
 export const getStockGroupSummaryXML = (company) => {
   return `
 <ENVELOPE>
- 
   <HEADER>
- 
     <VERSION>1</VERSION>
- 
-    <TALLYREQUEST>
-      Export
-    </TALLYREQUEST>
- 
-    <TYPE>
-      Collection
-    </TYPE>
- 
-    <ID>
-      StockItemSummary
-    </ID>
- 
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockItemSummary</ID>
   </HEADER>
- 
   <BODY>
- 
     <DESC>
- 
       <STATICVARIABLES>
- 
-        <SVCURRENTCOMPANY>
-          ${company}
-        </SVCURRENTCOMPANY>
- 
-        <SVEXPORTFORMAT>
-          $$SysName:XML
-        </SVEXPORTFORMAT>
- 
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
- 
       <TDL>
- 
         <TDLMESSAGE>
- 
-          <COLLECTION
-            NAME="StockItemSummary"
-          >
- 
-            <TYPE>
-              StockItem
-            </TYPE>
- 
-          <FETCH>
- 
-  NAME,
- 
-  PARENT,
- 
-  HSNDETAILS.LIST,
- 
-  GSTDETAILS.LIST,
- 
-  STANDARDPRICE,
- 
-  CLOSINGBALANCE,
- 
-  CLOSINGVALUE
- 
-</FETCH>
- 
+          <COLLECTION NAME="StockItemSummary">
+            <TYPE>StockItem</TYPE>
+            <FETCH>
+              NAME, PARENT, BASEUNITS, HSNDETAILS.LIST,
+              GSTDETAILS.LIST, STANDARDPRICE,
+              CLOSINGBALANCE, CLOSINGVALUE
+            </FETCH>
           </COLLECTION>
- 
         </TDLMESSAGE>
- 
       </TDL>
- 
     </DESC>
- 
   </BODY>
- 
-</ENVELOPE>
- 
-`;
+</ENVELOPE>`;
 };
 /* ===================================================
    SIMPLE UNITS XML

@@ -124,7 +124,7 @@ export function detectBankFromSheet(sheet, xlsxUtils) {
   return { detected: null, evidence: null };
 }
 
-export function validateBankMatchesLedger(sheet, bankLedgerName, xlsxUtils) {
+export function validateBankMatchesLedger(sheet, bankName, xlsxUtils) {
   const { detected, evidence } = detectBankFromSheet(sheet, xlsxUtils);
 
   if (!detected) {
