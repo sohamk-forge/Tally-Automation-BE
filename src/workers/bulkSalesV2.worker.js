@@ -19,12 +19,9 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
-// This company's own GST state — used only by the SPARE_SALES format,
-// which has a single combined Tax Amount column that still needs to be
-// split into CGST+SGST vs IGST ourselves. WARRANTY and SPARE_LABOUR both
-// arrive with CGST/SGST/IGST already split by the source system, so this
-// constant is never consulted for those two formats.
-const MY_COMPANY_STATE_NAME = "maharashtra";
+// (State recognition now lives in isMaharashtraState() below, which
+// handles multiple representations — name, abbreviation, GST code —
+// rather than a single hardcoded string comparison.)
 
 function safeNumber(value) {
   const num = Number(value);
@@ -50,7 +47,18 @@ function getValue(row, possibleKeys) {
 
   for (const key of possibleKeys) {
     const target = String(key).toLowerCase();
-    const matchedKey = rowKeys.find(k => k.startsWith(target));
+    // Check both directions: our alias could be a prefix of a longer real
+    // header, OR — since Excel is known to truncate its own headers mid-
+    // word in this dataset (e.g. "...gstin/ /unique i" cutting off
+    // "unique i[d]") — the real header could be a truncated prefix of our
+    // alias instead. Missing this second direction means any column
+    // Excel truncates shorter than our alias text silently fails to
+    // match at all, even though it's clearly the same column.
+    // Minimum length guard on the reverse check (k.length > 8) avoids a
+    // short, unrelated header accidentally prefix-matching a long alias.
+    const matchedKey = rowKeys.find(k =>
+      k.startsWith(target) || (k.length > 8 && target.startsWith(k))
+    );
     if (matchedKey && String(row[matchedKey]).trim() !== "") {
       return row[matchedKey];
     }
@@ -74,6 +82,25 @@ function findGstAmountColumn(row) {
     k.includes("gst") && amountWords.some(w => k.includes(w))
   );
   return matchedKey ? row[matchedKey] : "";
+}
+
+// Normalizes and recognizes Maharashtra across the different ways a
+// source file might represent it — full name (any casing), abbreviation
+// ("MH"), the 2-digit GST state code ("27"), or partial text containing
+// "maharashtra". A blank/missing state is NOT treated as Maharashtra —
+// it falls through to the IGST branch instead, since silently assuming
+// an unknown customer is local is the wrong default for tax purposes.
+function isMaharashtraState(value) {
+  const state = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    state === "maharashtra" ||
+    state === "mh" ||
+    state === "27" ||
+    state.includes("maharashtra")
+  );
 }
 
 function formatDate(value) {
@@ -221,6 +248,7 @@ function processSpareLabourRow(row, invoices) {
   const invoice = ensureInvoice(invoices, invoiceNo, {
     customer_name: String(getValue(row, ["bill to customer name"])).trim(),
     customer_gstin: String(getValue(row, [
+      "bill to party customers gstin/ /unique i",
       "customers gstin/ /unique id issued to un"
     ])).trim(),
     invoice_date: formatDate(getValue(row, ["document date"])),
@@ -403,9 +431,8 @@ const worker = new Worker(
 
       if (format === "SPARE_SALES") {
         const taxAmount = roundTo2(invoice.pending_tax_amount);
-        const stateName = String(invoice.customer_state || "").trim().toLowerCase();
 
-        if (!stateName || stateName === MY_COMPANY_STATE_NAME) {
+        if (isMaharashtraState(invoice.customer_state)) {
           // Compute SGST as the remainder (taxAmount - cgst) rather than
           // halving twice — guarantees cgst + sgst always equals the
           // original taxAmount exactly, even when taxAmount is an odd

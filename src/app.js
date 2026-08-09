@@ -188,6 +188,8 @@ import companyLogoRoutes
 from "./api/companyLogo.routes.js";
 
 import bulkSalesV2Routes from "./api/bulkSalesV2.routes.js";
+
+import proformaRoutes from "./api/proforma.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
