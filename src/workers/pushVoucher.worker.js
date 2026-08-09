@@ -12,13 +12,6 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
-// CHANGED: this worker no longer talks to Tally directly. It only
-// generates the voucher XML and hands it off to the correct user's
-// connector app (via connector_jobs), which pushes to THEIR local
-// Tally on THEIR machine. Previously this used axios.post to
-// http://localhost:9000, which hit the BACKEND SERVER's own port
-// 9000 — never the user's machine — which is why vouchers were
-// landing in the wrong (or no) Tally.
 import { formatVoucherDate, checkDuplicateFromDb } from "../api/voucher.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 
@@ -132,11 +125,9 @@ function buildLedgers(voucher, amount) {
 ====================================
 RUN PYTHON — XML GENERATION ONLY
 
-CHANGED: previously this spawned python AND posted the resulting XML
-to http://localhost:9000 (the backend server's own Tally port). That
-axios.post call has been removed entirely. This function now only
-returns the generated XML string — delivering it to the user's own
-local Tally is the connector app's job, via connector_jobs below.
+Generates the voucher XML and returns it as a string. Nothing in this
+function makes a network call — delivery to Tally happens entirely on
+the user's machine via the connector app.
 ====================================
 */
 
@@ -259,9 +250,8 @@ const worker = new Worker(
       const amount = Number(voucher.amount);
       const formattedDate = formatVoucherDate(voucher.voucher_date, voucher.id);
 
-      // ── Pre-push duplicate re-check — queries app_test.vouchers
-      // directly, no Tally-reachability dependency. Skipped if this
-      // voucher was explicitly force-pushed (see confirm-push route).
+      // Pre-push duplicate re-check — DB only. Skipped if force_push
+      // was explicitly set (see confirm-push route in voucher.routes.js).
       if (!voucher.force_push) {
         const voucherDateStr =
           voucher.voucher_date instanceof Date
@@ -294,9 +284,7 @@ const worker = new Worker(
         );
       }
 
-      // ─────────────────────────────────────────────────────────────
-      // GENERATE XML ONLY. Do not push it anywhere from the server.
-      // ─────────────────────────────────────────────────────────────
+      // Generate XML only. Nothing gets pushed from the server.
       const ledgers = buildLedgers(voucher, amount);
       const payload = {
         company: voucher.company_name,
@@ -312,14 +300,10 @@ const worker = new Worker(
 
       const xml = await runPythonForXml(payload);
 
-      // ─────────────────────────────────────────────────────────────
-      // ROUTE TO THE CORRECT USER'S CONNECTOR.
-      //
-      // user_id is now stored directly on the voucher row (set in
-      // voucher.routes.js at party-ledger-assign / confirm-push time),
-      // so no pairing-token lookup or "most recent used token" guessing
-      // is needed here anymore — the owner is explicit, not inferred.
-      // ─────────────────────────────────────────────────────────────
+      // Route to the correct user's connector. user_id is stored
+      // directly on the voucher row (set in voucher.routes.js at
+      // party-ledger-assign / confirm-push time) — no pairing-token
+      // lookup or "most recent used token" guessing needed.
       if (!voucher.user_id) {
         throw new Error(`Voucher ${voucherId} has no user_id set — cannot route to a connector`);
       }
@@ -347,14 +331,12 @@ const worker = new Worker(
         userId: voucher.user_id
       });
 
-      // NOTE: this worker does NOT block waiting for the connector to
-      // finish (unlike an earlier version). The connector app polls
-      // GET /api/connector/jobs, claims the job, pushes the XML to the
-      // user's own local Tally, and reports back via the connector
-      // result-callback route, which is what should flip this voucher
-      // from PENDING_CONNECTOR to SUCCESS/FAILED. If you want strict
-      // one-at-a-time delivery per user, add a wait/poll step here and
-      // drop concurrency to 1 (see bottom of file — already set to 1).
+      // This worker does not block waiting for the connector. The
+      // connector app polls GET /api/connector/jobs, claims the job,
+      // pushes the XML to the user's own local Tally, and reports back
+      // via the connector result-callback route — that callback is
+      // what should flip this voucher from PENDING_CONNECTOR to
+      // SUCCESS/FAILED.
       return {
         voucherId,
         status: "pending_connector",
@@ -382,9 +364,8 @@ const worker = new Worker(
       return { voucherId, status: "failed" };
     }
   },
-  // CHANGED: concurrency 5 → 1. Serializes connector-job creation so a
-  // bulk push doesn't hand the same user's connector multiple voucher
-  // XMLs to race through at once.
+  // Serializes connector-job creation so a bulk push doesn't hand the
+  // same user's connector multiple voucher XMLs to race through at once.
   { connection, concurrency: 1 }
 );
 
@@ -432,13 +413,6 @@ worker.on("error", (error) => {
 ====================================
 STARTUP RECOVERY
 
-NOTE: the Tally-availability poller (setInterval checking
-localhost:9000 on the SERVER) has been removed entirely — that
-port belongs to the backend server, not the user's Tally, so
-polling it never told us anything useful about the user's actual
-Tally status. Retry/requeue now happens purely via BullMQ's
-attempts/backoff on temporary errors, and via markStalePendingAsFailed
-catching anything that got stuck.
 ====================================
 */
 

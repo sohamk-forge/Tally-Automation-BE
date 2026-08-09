@@ -12,7 +12,7 @@ import {
   getVoucherJobId,
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
-import { formatVoucherDate, checkDuplicateFromDb } from "./voucher.js";
+import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 
@@ -398,7 +398,7 @@ router.post("/create", async (req, res) => {
 /* ===========================
    PROCESS A SINGLE UPLOADED FILE
 =========================== */
-async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
+async function processStatementFile({ file, company_id, company_name, bank_ledger, bank_name, password }) {
   const originalFileName = file.originalname;
   const fileName = await getUniqueFileName(company_id, originalFileName);
   const wasRenamed = fileName !== originalFileName;
@@ -421,7 +421,27 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+  // ── Bank NAME cross-check — BEFORE any row is touched.
+  // Validated against bank_name (the fixed dropdown value, e.g.
+  // "HDFC Bank"), NOT bank_ledger (which is a free-form Tally ledger
+  // account name and could be anything the user typed there).
+  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils);
+  if (!bankCheck.ok) {
+    return {
+      file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
+      success: false,
+      bank_mismatch: true,
+      detected_bank: bankCheck.detected,
+      expected_bank: bankCheck.expected,
+      message: bankCheck.message
+    };
+  }
+
   const headerRowIndex = findHeaderRowIndex(sheet);
+  // ...rest of the function stays exactly the same
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
     defval: null,
@@ -627,7 +647,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 /* ===========================
    UPLOAD BANK STATEMENT(S) (EXCEL)
 =========================== */
-
 router.post(
   "/upload-statement",
   (req, res, next) => {
@@ -644,7 +663,7 @@ router.post(
   },
   async (req, res) => {
     try {
-      const { company_id, company_name, bank_ledger, password } = req.body;
+      const { company_id, company_name, bank_ledger, bank_name, password } = req.body;
 
       if (!req.files || !req.files.length) {
         return res.status(400).json({ success: false, message: "At least one Excel file is required" });
@@ -655,12 +674,18 @@ router.post(
           message: "company_id, company_name and bank_ledger are required"
         });
       }
+      if (!bank_name) {
+        return res.status(400).json({
+          success: false,
+          message: "bank_name is required (the bank selected from the dropdown, e.g. \"HDFC Bank\")"
+        });
+      }
 
       const results = [];
       for (const file of req.files) {
         try {
           const outcome = await processStatementFile({
-            file, company_id, company_name, bank_ledger, password
+            file, company_id, company_name, bank_ledger, bank_name, password
           });
           results.push(outcome);
         } catch (fileErr) {

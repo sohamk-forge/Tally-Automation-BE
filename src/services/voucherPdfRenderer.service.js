@@ -149,6 +149,21 @@ function wrap(bodyHtml) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8" />${SHARED_STYLE}</head><body><div class="sheet">${bodyHtml}</div></body></html>`;
 }
 
+// ---------- round off row builder shared by purchase + sales ----------
+
+/**
+ * Renders the "Round Off" row for the items table, if a round-off amount
+ * was extracted from ledger_entries. Negative amounts (debit round-off,
+ * i.e. total was rounded down) are shown with a leading "(-)" the way
+ * Tally itself prints it; positive amounts (credit round-off, rounded up)
+ * are shown plain.
+ */
+function buildRoundOffRowHtml(roundOff) {
+  if (!roundOff) return "";
+  const sign = roundOff < 0 ? "(-) " : "";
+  return `<tr><td colspan="6"><em>Round Off</em></td><td class="num">${sign}${money(Math.abs(roundOff))}</td></tr>`;
+}
+
 // ---------- tax-table builder shared by purchase + sales ----------
 
 function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal) {
@@ -246,7 +261,7 @@ function buildContraHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank A/C</td>
@@ -292,7 +307,7 @@ function buildJournalHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Party</td>
@@ -340,7 +355,7 @@ function buildPaymentHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
@@ -392,7 +407,7 @@ function buildReceiptHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
@@ -448,14 +463,15 @@ function buildPurchaseHtml(v) {
       <tr><td colspan="6"><em>Cgst</em></td><td class="num">${money(v.cgst)}</td></tr>
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst;
+  const roundOffRow = buildRoundOffRowHtml(v.roundOff);
+  const grandTotal = v.total + v.cgst + v.sgst + v.igst + (v.roundOff || 0);
 
   return wrap(`
     ${headerHtml(v.company, "Purchase Invoice")}
     <table class="info-table">
       <tr>
         <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Dated</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
         <td class="label">Supplier Invoice No.</td><td>${esc(v.supplierInvoiceNo)}</td>
       </tr>
     </table>
@@ -477,6 +493,7 @@ function buildPurchaseHtml(v) {
       ${itemRows}
       ${chargeRows}
       ${taxLineRows}
+      ${roundOffRow}
       <tr class="total-row">
         <td colspan="6">Total</td><td class="num">Rs. ${money(grandTotal)}</td>
       </tr>
@@ -518,14 +535,15 @@ function buildSalesHtml(v) {
       <tr><td colspan="6"><em>Cgst</em></td><td class="num">${money(v.cgst)}</td></tr>
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst;
+  const roundOffRow = buildRoundOffRowHtml(v.roundOff);
+  const grandTotal = v.total + v.cgst + v.sgst + v.igst + (v.roundOff || 0);
 
   return wrap(`
     ${headerHtml(v.company, "Tax Invoice")}
     <table class="info-table">
       <tr>
         <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Dated</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
         <td class="label">Buyer's Order No.</td><td>${esc(v.buyerOrderNo)}</td>
       </tr>
     </table>
@@ -553,6 +571,7 @@ function buildSalesHtml(v) {
       ${itemRows}
       ${chargeRows}
       ${taxLineRows}
+      ${roundOffRow}
       <tr class="total-row">
         <td colspan="6">Total</td><td class="num">Rs. ${money(grandTotal)}</td>
       </tr>
