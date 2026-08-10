@@ -226,4 +226,42 @@ router.get("/purchase-ledgers/:companyId", async (req, res) => {
   }
 });
 
+
+router.patch("/purchase-ledger/:companyId", async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { purchase_ledger } = req.body;
+
+    if (!purchase_ledger) {
+      return res.status(400).json({
+        status: "error",
+        message: "purchase_ledger required"
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE ${DB_SCHEMA}.company_ledger_mappings
+      SET
+        purchase_ledger = $1,
+        updated_at = NOW()
+      WHERE company_id = $2
+      `,
+      [purchase_ledger, companyId]
+    );
+
+    return res.json({
+      status: "success",
+      message: "Purchase ledger updated successfully"
+    });
+
+  } catch (err) {
+    console.error("Purchase ledger update error:", err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
 export default router;
