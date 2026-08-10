@@ -4297,28 +4297,138 @@ router.get(
     financial year (1 Apr → today) if omitted.
     Accepts either "YYYY-MM-DD" or Tally's "YYYYMMDD".
   =================================================== */
+/* ===================================================
+  PROFIT & LOSS SUMMARY SYNC
+  GET /api/sync/profit-loss-summary-sync?company=...
+  GET /api/sync/profit-loss-summary-sync?company=...&fromDate=2024-04-01&toDate=2025-03-31
 
-  router.get("/profit-loss-summary-sync", async (req, res) => {
-    const company = req.query.company;
-    const fromDate = req.query.fromDate || null;
-    const toDate = req.query.toDate || null;
+  fromDate/toDate are OPTIONAL — defaults to current
+  financial year (1 Apr → today) if omitted.
+  Accepts either "YYYY-MM-DD" or Tally's "YYYYMMDD".
+=================================================== */
 
-    if (!company) {
-      return res.status(400).json({
-        status: "error",
-        message: "company query parameter required"
-      });
+router.get("/profit-loss-summary-sync", async (req, res) => {
+  const company = req.query.company;
+  const fromDate = req.query.fromDate || null;
+  const toDate = req.query.toDate || null;
+
+  if (!company) {
+    return res.status(400).json({
+      status: "error",
+      message: "company query parameter required"
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const companyId = await getCompanyId(company, client);
+    if (!companyId) throw new Error("Company not found");
+
+    const summary = await syncProfitLossSummary(client, {
+      company,
+      companyId,
+      fromDate,
+      toDate,
+      userId: req.headers["x-user-id"] || null
+    });
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Profit & loss summary synced successfully",
+      company,
+      data: summary
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.log("❌ PROFIT LOSS SUMMARY SYNC ERROR:", err.message);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/* ===================================================
+  PROFIT MARGIN (READ-ONLY, AUTO-SYNCS IF MISSING)
+  GET /api/sync/profit-margin?company_id=...
+  GET /api/sync/profit-margin?company_id=...&fromDate=2024-04-01&toDate=2025-03-31
+
+  NOTE: gross_profit_percent is NOT stored in the DB —
+  it's derived here from gross_profit / total_sales,
+  both of which already exist as columns. No schema
+  change required.
+=================================================== */
+router.get("/profit-margin", async (req, res) => {
+  const companyId = Number(req.query.company_id);
+  const fromDate = req.query.fromDate || null;
+  const toDate = req.query.toDate || null;
+
+  if (!companyId) {
+    return res.status(400).json({
+      status: "error",
+      message: "company_id query parameter required"
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    // Fetch company name (needed only if we need to sync)
+    const companyResult = await client.query(
+      `
+      SELECT name AS company_name
+      FROM app_test.companies
+      WHERE id = $1
+      `,
+      [companyId]
+    );
+
+    if (companyResult.rows.length === 0) {
+      throw new Error("Company not found");
     }
 
-    const client = await pool.connect();
+    const company = companyResult.rows[0].company_name;
 
-    try {
+    // Try reading existing summary
+    let query;
+    let params;
+
+    if (fromDate && toDate) {
+      query = `
+        SELECT *
+        FROM app_test.profit_loss_summary
+        WHERE company_id = $1
+          AND from_date = $2
+          AND to_date = $3
+      `;
+      params = [companyId, fromDate, toDate];
+    } else {
+      query = `
+        SELECT *
+        FROM app_test.profit_loss_summary
+        WHERE company_id = $1
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+      params = [companyId];
+    }
+
+    let existing = await client.query(query, params);
+
+    // If summary doesn't exist, sync it from Tally
+    if (existing.rows.length === 0 || (fromDate && toDate)) {
       await client.query("BEGIN");
 
-      const companyId = await getCompanyId(company, client);
-      if (!companyId) throw new Error("Company not found");
-
-      const summary = await syncProfitLossSummary(client, {
+      await syncProfitLossSummary(client, {
         company,
         companyId,
         fromDate,
@@ -4328,128 +4438,43 @@ router.get(
 
       await client.query("COMMIT");
 
-      return res.status(200).json({
-        status: "success",
-        source: "tally",
-        message: "Profit & loss summary synced successfully",
-        company,
-        data: summary
-      });
-
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.log("❌ PROFIT LOSS SUMMARY SYNC ERROR:", err.message);
-      return res.status(500).json({
-        status: "error",
-        message: err.message
-      });
-    } finally {
-      client.release();
-    }
-  });
-
-  /* ===================================================
-    PROFIT MARGIN (READ-ONLY, AUTO-SYNCS IF MISSING)
-    GET /api/sync/profit-margin?company=...
-    GET /api/sync/profit-margin?company=...&fromDate=2024-04-01&toDate=2025-03-31
-  =================================================== */
-  router.get("/profit-margin", async (req, res) => {
-    const companyId = Number(req.query.company_id);
-    const fromDate = req.query.fromDate || null;
-    const toDate = req.query.toDate || null;
-
-    if (!companyId) {
-      return res.status(400).json({
-        status: "error",
-        message: "company_id query parameter required"
-      });
+      existing = await client.query(query, params);
     }
 
-    const client = await pool.connect();
+    const row = existing.rows[0];
 
-    try {
-      // Fetch company name (needed only if we need to sync)
-      const companyResult = await client.query(
-        `
-        SELECT name AS company_name
-  FROM app_test.companies
-  WHERE id = $1
-        `,
-        [companyId]
-      );
+    const totalSalesNum = Number(row.total_sales);
+    const grossProfitNum = Number(row.gross_profit);
 
-      if (companyResult.rows.length === 0) {
-        throw new Error("Company not found");
-      }
+    const grossProfitPercent =
+      totalSalesNum > 0
+        ? Number(((grossProfitNum / totalSalesNum) * 100).toFixed(2))
+        : 0;
 
-      const company = companyResult.rows[0].company_name;
+    return res.status(200).json({
+      status: "success",
+      company_id: companyId,
+      fromDate: row.from_date,
+      toDate: row.to_date,
+      totalSales: totalSalesNum,
+      grossProfit: grossProfitNum,
+      grossProfitPercent,
+      netResult: Number(row.net_result),
+      resultType: row.result_type,
+      profitMarginPercent: Number(row.profit_margin_percent),
+      lastSyncedAt: row.updated_at
+    });
 
-      // Try reading existing summary
-      let query;
-      let params;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.log("❌ PROFIT MARGIN ERROR:", err.message);
 
-      if (fromDate && toDate) {
-        query = `
-          SELECT *
-          FROM app_test.profit_loss_summary
-          WHERE company_id = $1
-            AND from_date = $2
-            AND to_date = $3
-        `;
-        params = [companyId, fromDate, toDate];
-      } else {
-        query = `
-          SELECT *
-          FROM app_test.profit_loss_summary
-          WHERE company_id = $1
-          ORDER BY updated_at DESC
-          LIMIT 1
-        `;
-        params = [companyId];
-      }
-
-      let existing = await client.query(query, params);
-
-      // If summary doesn't exist, sync it from Tally
-      if (existing.rows.length === 0) {
-        await client.query("BEGIN");
-
-        await syncProfitLossSummary(client, {
-          company,
-          companyId,
-          fromDate,
-          toDate,
-          userId: req.headers["x-user-id"] || null
-        });
-
-        await client.query("COMMIT");
-
-        existing = await client.query(query, params);
-      }
-
-      const row = existing.rows[0];
-
-      return res.status(200).json({
-        status: "success",
-        company_id: companyId,
-        fromDate: row.from_date,
-        toDate: row.to_date,
-        netResult: Number(row.net_result),
-        resultType: row.result_type,
-        profitMarginPercent: Number(row.profit_margin_percent),
-        lastSyncedAt: row.updated_at
-      });
-
-    } catch (err) {
-      await client.query("ROLLBACK").catch(() => {});
-      console.log("❌ PROFIT MARGIN ERROR:", err.message);
-
-      return res.status(500).json({
-        status: "error",
-        message: err.message
-      });
-    } finally {
-      client.release();
-    }
-  });
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  } finally {
+    client.release();
+  }
+});
     export default router;

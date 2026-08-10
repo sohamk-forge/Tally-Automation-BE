@@ -140,7 +140,6 @@ function signatureHtml(company) {
 function invoiceFooterHtml(company) {
   return `
 <div class="jurisdiction-footer">
-  SUBJECT TO ${esc((company.state || "").toUpperCase())} JURISDICTION<br/>
   This is a Computer Generated Invoice
 </div>`;
 }
@@ -166,13 +165,27 @@ function buildRoundOffRowHtml(roundOff) {
 
 // ---------- tax-table builder shared by purchase + sales ----------
 
-function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal) {
+function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal, chargesTotal = 0) {
   const grouped = {};
   for (const item of items) {
     const key = item.hsnSac || "N/A";
     if (!grouped[key]) grouped[key] = { hsnSac: key, taxableValue: 0 };
     grouped[key].taxableValue += item.amount;
   }
+
+  // additionalCharges (e.g. Handling Charges) carry no HSN of their own but
+  // are still part of the value GST was calculated on. Apportion them into
+  // each group's taxableValue using that group's existing item-value share,
+  // so the displayed rate (amt / taxableValue) reflects the true rate
+  // instead of being inflated by an undercounted denominator.
+  const totalItemTaxable = Object.values(grouped).reduce((s, g) => s + g.taxableValue, 0) || 1;
+  if (chargesTotal) {
+    for (const g of Object.values(grouped)) {
+      const itemShare = g.taxableValue / totalItemTaxable;
+      g.taxableValue += chargesTotal * itemShare;
+    }
+  }
+
   const totalTaxable = Object.values(grouped).reduce((s, g) => s + g.taxableValue, 0) || 1;
 
   return Object.values(grouped).map((g) => {
@@ -191,7 +204,8 @@ function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal) {
 }
 
 function buildTaxTableHtml(v) {
-  const taxRows = buildTaxRows(v.items, v.cgst, v.sgst, v.igst);
+  const chargesTotal = (v.additionalCharges || []).reduce((s, c) => s + c.amount, 0);
+  const taxRows = buildTaxRows(v.items, v.cgst, v.sgst, v.igst, chargesTotal);
   const isInterstate = v.igst > 0;
 
   if (isInterstate) {
@@ -445,15 +459,15 @@ function buildPurchaseHtml(v) {
         <td>${idx + 1}</td>
         <td><strong>${esc(item.stockItemName)}</strong></td>
         <td>${esc(item.hsnSac)}</td>
-        <td class="num">${esc(item.quantity)}</td>
-        <td class="num">${money(item.rate)}</td>
+        <td class="num">${item.quantity ? esc(item.quantity) : "-"}</td>
+        <td class="num">${item.rate ? money(item.rate) : "-"}</td>
         <td>${esc(item.unit)}</td>
         <td class="num">${money(item.amount)}</td>
       </tr>`
   ).join("");
 
   const chargeRows = (v.additionalCharges || [])
-    .map((c) => `<tr><td colspan="6"><em>${esc(v.narration ? v.narration : "Total")}</em></td><td class="num">${money(c.amount)}</td></tr>`)
+    .map((c) => `<tr><td colspan="6"><em>${esc(c.label)}</em></td><td class="num">${money(c.amount)}</td></tr>`)
     .join("");
 
   const isInterstate = v.igst > 0;
@@ -469,10 +483,15 @@ function buildPurchaseHtml(v) {
   return wrap(`
     ${headerHtml(v.company, "Purchase Invoice")}
     <table class="info-table">
+      <colgroup>
+        <col style="width:16%"><col style="width:12%">
+        <col style="width:8%"><col style="width:14%">
+        <col style="width:16%"><col style="width:34%">
+      </colgroup>
       <tr>
-        <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Invoice Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
-        <td class="label">Supplier Invoice No.</td><td>${esc(v.supplierInvoiceNo)}</td>
+        <td class="label">Supplier Invoice No :</td><td>${esc(v.supplierInvoiceNo)}</td>
       </tr>
     </table>
     <div class="party-block">
@@ -517,15 +536,15 @@ function buildSalesHtml(v) {
         <td>${idx + 1}</td>
         <td><strong>${esc(item.stockItemName)}</strong></td>
         <td>${esc(item.hsnSac)}</td>
-        <td class="num">${esc(item.quantity)}</td>
-        <td class="num">${money(item.rate)}</td>
+        <td class="num">${item.quantity ? esc(item.quantity) : "-"}</td>
+        <td class="num">${item.rate ? money(item.rate) : "-"}</td>
         <td>${esc(item.unit)}</td>
         <td class="num">${money(item.amount)}</td>
       </tr>`
   ).join("");
 
   const chargeRows = (v.additionalCharges || [])
-    .map((c) => `<tr><td colspan="6"><em>${esc(v.narration ? v.narration : "Total")}</em></td><td class="num">${money(c.amount)}</td></tr>`)
+    .map((c) => `<tr><td colspan="6"><em>${esc(c.label)}</em></td><td class="num">${money(c.amount)}</td></tr>`)
     .join("");
 
   const isInterstate = v.igst > 0;
@@ -541,10 +560,15 @@ function buildSalesHtml(v) {
   return wrap(`
     ${headerHtml(v.company, "Tax Invoice")}
     <table class="info-table">
+      <colgroup>
+        <col style="width:16%"><col style="width:12%">
+        <col style="width:8%"><col style="width:14%">
+        <col style="width:16%"><col style="width:34%">
+      </colgroup>
       <tr>
-        <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Invoice Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
-        <td class="label">Buyer's Order No.</td><td>${esc(v.buyerOrderNo)}</td>
+        <td class="label">Buyer's Order No :</td><td>${esc(v.buyerOrderNo)}</td>
       </tr>
     </table>
     <div class="party-block">

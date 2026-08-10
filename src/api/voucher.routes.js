@@ -591,18 +591,18 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
         }
       } else {
         const r = await db.query(
-          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-           (company_id, company_name, voucher_date, bank_ledger,
-            amount, narration, instrument_number,
-            debit_credit, voucher_type, party_ledger, status,
-            statement_password, file_name, merchant_name, group_key)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-           RETURNING *`,
-          [company_id, company_name, txnDate, bank_ledger,
-           depositAmt, narration, chequeRef, password || null, fileName,
-           merchantName, groupKey]
-        );
-        inserted.push({ ...r.rows[0], _action: 'inserted' });
+  `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+   (company_id, company_name, voucher_date, bank_ledger, bank_name,
+    amount, narration, instrument_number,
+    debit_credit, voucher_type, party_ledger, status,
+    statement_password, file_name, merchant_name, group_key)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'CREDIT',NULL,NULL,'WAITING_LEDGER',$9,$10,$11,$12)
+   RETURNING *`,
+  [company_id, company_name, txnDate, bank_ledger, bank_name,
+   depositAmt, narration, chequeRef, password || null, fileName,
+   merchantName, groupKey]
+);
+inserted.push({ ...r.rows[0], _action: 'inserted' });
       }
     }
   }

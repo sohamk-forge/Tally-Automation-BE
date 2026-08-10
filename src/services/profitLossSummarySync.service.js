@@ -118,12 +118,31 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
   const parsed = parseProfitLossReport(responseXML);
 
   const resultType = parsed.netResult >= 0 ? "profit" : "loss";
-  const profitMarginPercent = parsed.totalSales > 0
-    ? Number(((parsed.netResult / parsed.totalSales) * 100).toFixed(2))
-    : 0;
+
+  /* =====================================
+     NET PROFIT MARGIN %
+     Uncapped, signed. A loss CAN exceed
+     100% of sales — that's a valid real
+     result, not a bug. Stored in the
+     existing profit_margin_percent column.
+  ===================================== */
+  const profitMarginPercent =
+    parsed.totalSales > 0
+      ? Number(((parsed.netResult / parsed.totalSales) * 100).toFixed(2))
+      : 0;
+
+  console.log("========== P&L DEBUG ==========");
+  console.log("totalSales:", parsed.totalSales);
+  console.log("grossProfit:", parsed.grossProfit);
+  console.log("netResult:", parsed.netResult);
+  console.log("profitMarginPercent (net):", profitMarginPercent);
+  console.log("================================");
 
   const guid = `pl_summary_${companyId}_${tallyFrom}_${tallyTo}`;
 
+  // NOTE: gross_profit_percent is NOT a column in this table —
+  // we don't insert/select it. It's derived on the fly below,
+  // from gross_profit / total_sales, which already exist as columns.
   const upsert = await client.query(
     `
     INSERT INTO app_test.profit_loss_summary (
@@ -170,17 +189,27 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
 
   const row = upsert.rows[0];
 
+  const totalSalesNum = Number(row.total_sales);
+  const grossProfitNum = Number(row.gross_profit);
+
+  // Derived at read time — no DB column needed for this.
+  const grossProfitPercent =
+    totalSalesNum > 0
+      ? Number(((grossProfitNum / totalSalesNum) * 100).toFixed(2))
+      : 0;
+
   return {
     fromDate: fromISO,
     toDate: toISO_,
-    totalSales: Number(row.total_sales),
+    totalSales: totalSalesNum,
     totalPurchase: Number(row.total_purchase),
     openingStock: Number(row.opening_stock),
     closingStock: Number(row.closing_stock),
     directIncome: Number(row.direct_income),
     indirectIncome: Number(row.indirect_income),
     indirectExpenses: Number(row.indirect_expenses),
-    grossProfit: Number(row.gross_profit),
+    grossProfit: grossProfitNum,
+    grossProfitPercent,
     netResult: Number(row.net_result),
     resultType: row.result_type,
     profitMarginPercent: Number(row.profit_margin_percent)

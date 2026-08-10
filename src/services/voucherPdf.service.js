@@ -162,6 +162,49 @@ function extractTaxTotals(ledgerEntries) {
   return { cgst, sgst, igst };
 }
 
+// ---------- round off: a small "Round Off" ledger line Tally adds to nudge
+//            the invoice total to a whole number. ----------
+
+/**
+ * Extracts the Round Off amount from ledger_entries, if present.
+ *
+ * IMPORTANT: unlike other amounts in this file we do NOT Math.abs() this
+ * value - the sign determines whether it's added to or subtracted from
+ * the total. Round Off sits on the same side of the entry as items,
+ * additional charges, and tax (all "Yes"/debit legs in the Tally export),
+ * which are summed via Math.abs() to reconstruct the invoice total. To
+ * reconcile against the party ledger (the "No"/credit leg), a debit
+ * ("Yes") Round Off must be ADDED to that total, and a credit ("No")
+ * Round Off must be SUBTRACTED from it.
+ *
+ * Example: party ledger (credit) = 19373.00; items + charges + tax
+ * (debit legs) sum to 19372.82; the debit Round Off of 0.18 makes up
+ * the difference, so it's added: 19372.82 + 0.18 = 19373.00.
+ *
+ * Previously this line was matched by extractAdditionalCharges() and then
+ * silently skipped (`if (lower.includes("round off")) continue;`), which
+ * meant it never appeared on the PDF and never affected the printed total.
+ */
+function extractRoundOff(ledgerEntries) {
+  const list = Array.isArray(ledgerEntries) ? ledgerEntries : [];
+
+  for (const entry of list) {
+    const name = String(pick(entry, ["LEDGERNAME", "ledgerName"], "")).toLowerCase();
+    if (!name.includes("round off") && !name.includes("rounding")) continue;
+
+    const amount = toNumber(pick(entry, ["AMOUNT"], 0));
+    const debitFlag = pick(entry, ["ISDEEMEDPOSITIVE", "is_debit", "isDebit"]);
+    const isDebit =
+      typeof debitFlag === "boolean"
+        ? debitFlag
+        : String(debitFlag).toLowerCase() === "yes" || String(debitFlag).toLowerCase() === "true";
+
+    return isDebit ? Math.abs(amount) : -Math.abs(amount);
+  }
+
+  return 0;
+}
+
 // ---------- everything else that isn't the party, an item, a tax, or
 //            round-off (e.g. "Handling Charges") gets its own line ----------
 
@@ -177,7 +220,7 @@ function extractAdditionalCharges(ledgerEntries, partyName) {
 
     const lower = name.toLowerCase();
     if (lower.includes("cgst") || lower.includes("sgst") || lower.includes("igst") || lower.includes("utgst")) continue;
-    if (lower.includes("round off")) continue;
+    if (lower.includes("round off") || lower.includes("rounding")) continue; // handled separately by extractRoundOff()
 
     charges.push({ label: name, amount: Math.abs(toNumber(pick(entry, ["AMOUNT"], 0))) });
   }
@@ -288,6 +331,7 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
     let items = parseItemLines(row.ledger_entries, hsnMap);
     const { cgst, sgst, igst } = extractTaxTotals(row.ledger_entries);
     const additionalCharges = extractAdditionalCharges(row.ledger_entries, row.party_ledger_name);
+    const roundOff = extractRoundOff(row.ledger_entries);
 
     if (items.length === 0) {
       // Fallback: no itemized lines available, show one summary line.
@@ -322,6 +366,7 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
       placeOfSupply: pick(firstEntry, ["place_of_supply"], companyInfo.state),
       items,
       additionalCharges,
+      roundOff,
       total,
       cgst,
       sgst,
