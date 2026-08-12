@@ -486,7 +486,7 @@ function buildPurchaseHtml(v) {
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
   const roundOffRow = buildRoundOffRowHtml(v.roundOff);
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst + (v.roundOff || 0);
+const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Purchase Invoice")}
@@ -564,7 +564,7 @@ function buildSalesHtml(v) {
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
   const roundOffRow = buildRoundOffRowHtml(v.roundOff);
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst + (v.roundOff || 0);
+const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Tax Invoice")}

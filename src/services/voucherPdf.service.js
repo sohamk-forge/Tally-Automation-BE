@@ -295,7 +295,7 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
         { ledgerName: row.party_ledger_name || "", debit: 0, credit: toNumber(row.credit_amount) },
       ];
     }
-    const total = ledgerEntries.reduce((sum, e) => sum + e.debit, 0) || toNumber(row.debit_amount);
+    const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
     return { ...base, bankAccount: row.parent_group || "", ledgerEntries, total };
   }
 
@@ -308,7 +308,7 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
       parties = [{ partyName: row.party_ledger_name || "", amount: toNumber(row.debit_amount) || toNumber(row.credit_amount) }];
     }
 
-    const amount = parties.reduce((sum, p) => sum + p.amount, 0) || bankLine?.amount || 0;
+    const amount = toNumber(row.debit_amount) || toNumber(row.credit_amount) || bankLine?.amount || 0;
     const closingBalance = toNumber(row.balance);
     // Payment reduces the ledger balance, Receipt increases it, so the
     // opening balance is derived the opposite way for each. Adjust if your
@@ -350,9 +350,8 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
       ];
     }
 
-    const itemsTotal = items.reduce((sum, i) => sum + i.amount, 0);
-    const chargesTotal = additionalCharges.reduce((sum, c) => sum + c.amount, 0);
-    const total = itemsTotal + chargesTotal;
+   // Total comes straight from the DB row, never recomputed from parsed lines.
+const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
 
     const firstEntry = Array.isArray(row.ledger_entries) ? row.ledger_entries[0] : undefined;
 
