@@ -19,7 +19,7 @@ router.get("/closing-balance", async (req, res) => {
   `SELECT closing_balance
      FROM ${DB_SCHEMA}.group_balances
     WHERE LOWER(company_name) = LOWER($1)
-      AND LOWER(group_name) = 'sales accounts'
+      AND LOWER(group_name) = 'purchase accounts'
     ORDER BY updated_at DESC NULLS LAST
     LIMIT 1`,
   [company]
