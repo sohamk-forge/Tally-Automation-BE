@@ -2,7 +2,7 @@ import express from "express";
 import Passwordless from "supertokens-node/recipe/passwordless/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { createInvite, listInvitesForUser, approveInvite, revokeInvite, getPendingInviteForUser, VALID_ROLES } from "../services/invite.service.js";
+import { createInvite, listInvitesForUser, approveInvite, revokeInvite, getPendingInviteForUser, VALID_ROLES, InviteValidationError } from "../services/invite.service.js";
 import { sendInviteEmail } from "../services/mailer.service.js";
 
 const router = express.Router();
@@ -27,10 +27,13 @@ router.post("/", verifySession(), async (req, res) => {
       return res.status(400).json({ status: "error", message: `role must be one of: ${VALID_ROLES.join(", ")}` });
     }
 
+    // Validate (and insert the invites row) before touching SuperTokens —
+    // no point minting a passwordless code/link for an invite that's about
+    // to be rejected (self-invite, or an email that already has access).
+    const invite = await createInvite(userId, email, role);
+
     await Passwordless.signInUp({ tenantId: "public", email });
     const inviteLink = await Passwordless.createMagicLink({ tenantId: "public", email });
-
-    const invite = await createInvite(userId, email, role);
 
     await sendInviteEmail(email, inviteLink);
 
@@ -40,6 +43,9 @@ router.post("/", verifySession(), async (req, res) => {
       data: { ...invite, inviteLink },
     });
   } catch (err) {
+    if (err instanceof InviteValidationError) {
+      return res.status(400).json({ status: "error", message: err.message });
+    }
     console.log("INVITE CREATE ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }

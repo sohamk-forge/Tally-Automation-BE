@@ -1,33 +1,40 @@
-import express from "express";
-import pool from "../db/index.js";
-import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob, discoverCompaniesViaConnector } from "../services/connectorSync.service.js";
-import { resolveUserId } from "../utils/resolveUserId.js";
-import {
-  getCompaniesXML,
-  getUnitsXML,
-  getLedgersXML,
-  getLedgerDetailsXML,
-  getGroupSummaryBankXML,
-  getLedgerVouchersXML,
-  getParentGroupsXML,
-  getGroupBalanceXML,
-  getAllParentGroupDetailsXML,
-  getProfitLossXML,
-  getStockGroupSummaryXML,
-  getAllLedgersXML,
-  getPurchaseSalesLedgersXML,
-  getCompanyDetailsXML,
-  getCompanyGSTDetailsXML,
-  getGodownsXML
-} from "../services/xmlBuilder.js";
-import { parseXML } from "../services/parser.js";
-import { createAuditLog } from "../utils/createAuditLog.js";
-import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
-import {
-  syncQueue,
-  getSyncJobId,
-  SYNC_JOB_OPTIONS
-} from "../queues/sync.queue.js";
+  import express from "express";
+    import pool from "../db/index.js";
+    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
+    import { resolveUserId } from "../utils/resolveUserId.js";
+    import axios from "axios";
+    import {
+      getCompaniesXML,
+        getUnitsXML,
+      getLedgersXML,
+      getLedgerDetailsXML,
+      getGroupSummaryBankXML,
+      getLedgerVouchersXML,
+      getParentGroupsXML,
+      getGroupBalanceXML,
+      getAllParentGroupDetailsXML,
+      getProfitLossXML,
+        getStockGroupSummaryXML,
+          getAllLedgersXML,
+            getPurchaseSalesLedgersXML,
+            getCompanyDetailsXML,
+            getCompanyGSTDetailsXML,
+            getGodownsXML,
+            getSalesGroupXML, getPurchaseGroupXML,
+        
+    } from "../services/xmlBuilder.js";
+    import { parseXML } from "../services/parser.js";
+    import {
+      createAuditLog
+    } from "../utils/createAuditLog.js";
+  import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
+    import {
+      syncQueue,
+      getSyncJobId,
+      SYNC_JOB_OPTIONS
+    } from "../queues/sync.queue.js";
+
+
 
 const router = express.Router();
 
@@ -987,37 +994,34 @@ router.get("/parent-groups", async (req, res) => {
   }
 });
 
-/* ===================================================
-  GROUP BALANCES SYNC
-=================================================== */
+    /* ===================================================
+      GROUP BALANCES SYNC (UPDATED WITH company_id)
+    =================================================== */
+
+
 router.get("/payable-debtors", async (req, res) => {
   const company = req.query.company;
-  if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
+  if (!company) {
+    return res.status(400).json({ status: "error", message: "company query parameter required" });
+  }
 
   const client = await pool.connect();
   try {
-    const userId = await requireUser(req, res);
-    if (!userId) return;
-
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client);
+    const companyId = await getCompanyId(company, client);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
-    if (!owns) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
-    }
-
+    // ── Existing path: used by Debtors / Creditors / Stock-in-Hand ──
+    // These exports come back with a TALLYMESSAGE wrapper.
     const getGroupData = async (groupName) => {
       const xml = getGroupBalanceXML(company, groupName);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
       const parsed = await parseXML(responseXML);
       const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
 
       const originalGuid = group?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, groupName, "groupbalance");
+      const guid = originalGuid || generateFallbackGuid(company, groupName, 'groupbalance');
 
       return {
         guid,
@@ -1030,13 +1034,55 @@ router.get("/payable-debtors", async (req, res) => {
       };
     };
 
-    const debtors = await getGroupData("Sundry Debtors");
+    // ── New path: used by Sales / Purchase (Collection-type export, ──
+    // no TALLYMESSAGE wrapper — path is DATA > COLLECTION > GROUP).
+    // Filters on ReservedName in the XML itself to avoid matching
+    // stray user-created duplicate groups (e.g. "Sales Account" vs
+    // the real reserved "Sales Accounts").
+    const getCollectionGroupData = async (xml, fallbackLabel) => {
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+      const parsed = await parseXML(responseXML);
+
+      let group = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP;
+
+      // Defensive: if Tally ever returns more than one match, prefer
+      // the reserved/built-in group, then any with an actual balance.
+      if (Array.isArray(group)) {
+        const reservedNameOf = (g) => g?.["@_RESERVEDNAME"] ?? g?.$?.RESERVEDNAME ?? g?.["@RESERVEDNAME"];
+        group =
+          group.find(g => reservedNameOf(g) === fallbackLabel) ||
+          group.find(g => parseAmount(g?.CLOSINGBALANCE) !== null) ||
+          group[0];
+      }
+
+      const originalGuid = group?.GUID || null;
+      const guid = originalGuid || generateFallbackGuid(company, fallbackLabel, 'groupbalance');
+
+      return {
+        guid,
+        masterId: group?.MASTERID || null,
+        alterId: group?.ALTERID || null,
+        group_name: clean(group?.["@_NAME"] ?? group?.$?.NAME ?? group?.["@NAME"] ?? fallbackLabel),
+        parent_group: clean(group?.PARENT),
+        opening_balance: parseAmount(group?.OPENINGBALANCE),
+        closing_balance: parseAmount(group?.CLOSINGBALANCE)
+      };
+    };
+
+    const debtors   = await getGroupData("Sundry Debtors");
     const creditors = await getGroupData("Sundry Creditors");
 
+    // ── Stock-in-Hand — Tally sometimes stores this group under a ──
+    // different spelling ("Stock-in-Hand" vs "Stock in Hand"). Retry
+    // the alt spelling if the first comes back empty.
     let stock = await getGroupData("Stock-in-Hand");
     if (!stock.group_name || (!stock.opening_balance && !stock.closing_balance && !stock.guid)) {
       stock = await getGroupData("Stock in Hand");
     }
+
+    // ── Sales & Purchase ─────────────────────────────────────────
+    const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
+    const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
 
     let inserted = 0, updated = 0, ignored = 0;
 
@@ -1055,6 +1101,8 @@ router.get("/payable-debtors", async (req, res) => {
     await upsertGroup(debtors);
     await upsertGroup(creditors);
     await upsertGroup(stock);
+    await upsertGroup(sales);
+    await upsertGroup(purchase);
 
     await client.query("COMMIT");
 
@@ -1063,8 +1111,8 @@ router.get("/payable-debtors", async (req, res) => {
       source: "tally",
       message: "Group balances synced successfully",
       company,
-      summary: { inserted, updated, ignored, total: 3 },
-      data: { debtors, creditors, stock }
+      summary: { inserted, updated, ignored, total: 5 },
+      data: { debtors, creditors, stock, sales, purchase }
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1075,106 +1123,112 @@ router.get("/payable-debtors", async (req, res) => {
   }
 });
 
-/* ===================================================
-  ALL PARENT GROUPS DETAILS SYNC
-=================================================== */
-router.get("/all-parent-groups", async (req, res) => {
-  const company = req.query.company;
-  const groupName = req.query.groupName;
-  if (!company || !groupName) {
-    return res.status(400).json({ status: "error", message: "company and groupName required" });
-  }
+    /* ===================================================
+      ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
+    =================================================== */
 
-  const client = await pool.connect();
-  try {
-    const userId = await requireUser(req, res);
-    if (!userId) return;
-
-    await client.query("BEGIN");
-
-    const companyId = await getCompanyId(userId, company, client);
-    if (!companyId) throw new Error("Company not found");
-
-    const owns = await userOwnsCompany(userId, companyId, client);
-    if (!owns) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
-    }
-
-    const xml = getAllParentGroupDetailsXML(company, groupName);
-    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-    const parsed = await parseXML(responseXML);
-
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
-
-    let inserted = 0, updated = 0, ignored = 0;
-
-    for (const ledger of list) {
-      const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
-      if (!ledgerName) continue;
-
-      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, `${groupName}_${ledgerName}`, "allparentgroup");
-      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
-      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
-      const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
-      const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
-
-      const result = await upsertRecord(
-        "app_test.all_parent_groups", guid, masterId, alterId,
-        [
-          companyId, company, ledgerName, groupName,
-          Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-            ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-            : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
-          clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
-          clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
-          clean(ledger?.PINCODE),
-          clean(ledger?.INCOMETAXNUMBER),
-          clean(ledger?.PARTYGSTIN),
-          clean(ledger?.GSTREGISTRATIONTYPE),
-          clean(ledger?.CONTACTPERSON),
-          clean(ledger?.PHONE || ledger?.LEDGERPHONE),
-          clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
-          clean(ledger?.FAX),
-          clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
-          openingBalance, closingBalance,
-          openingBalance < 0 ? "Cr" : "Dr",
-          closingBalance < 0 ? "Cr" : "Dr"
-        ],
-        [
-          "company_id", "company_name", "ledger_name", "parent_group", "address", "state", "country",
-          "pincode", "pan_number", "gst_number", "gst_registration_type", "contact_name",
-          "phone_number", "primary_phone_number", "fax_no", "email", "opening_balance",
-          "closing_balance", "opening_balance_type", "closing_balance_type"
-        ],
-        client
-      );
-
-      if (result.action === "inserted") inserted++;
-      else if (result.action === "updated") updated++;
-      else ignored++;
-    }
-
-    await client.query("COMMIT");
-
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "All parent groups details synced successfully",
-      company,
-      parent_group: groupName,
-      summary: { inserted, updated, ignored, total: list.length }
+    router.get("/all-parent-groups", async (req, res) => {
+      const company = req.query.company;
+      const groupName = req.query.groupName;
+      
+      if (!company || !groupName) {
+        return res.status(400).json({
+          status: "error",
+          message: "company and groupName required"
+        });
+      }
+      
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        
+        // Get company_id using helper
+        const companyId = await getCompanyId(company, client);
+        if (!companyId) {
+          throw new Error("Company not found");
+        }
+        
+        const xml = getAllParentGroupDetailsXML(company, groupName);
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        const parsed = await parseXML(responseXML);
+        
+        const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+        const list = Array.isArray(collection) ? collection : [collection];
+        
+        let inserted = 0, updated = 0, ignored = 0;
+        
+        for (const ledger of list) {
+          const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
+          if (!ledgerName) continue;
+          
+          const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+          const guid = originalGuid || generateFallbackGuid(company, `${groupName}_${ledgerName}`, 'allparentgroup');
+          const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+          const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+          const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
+          const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+          
+          const result = await upsertRecord(
+            "app_test.all_parent_groups", guid, masterId, alterId,
+            [
+              companyId,
+              company,
+              ledgerName,
+              groupName,
+              Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+                ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+                : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
+              clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
+              clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
+              clean(ledger?.PINCODE),
+              clean(ledger?.INCOMETAXNUMBER),
+              clean(ledger?.PARTYGSTIN),
+              clean(ledger?.GSTREGISTRATIONTYPE),
+              clean(ledger?.CONTACTPERSON),
+              clean(ledger?.PHONE || ledger?.LEDGERPHONE),
+              clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
+              clean(ledger?.FAX),
+              clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
+              openingBalance,
+              closingBalance,
+              openingBalance < 0 ? "Cr" : "Dr",
+              closingBalance < 0 ? "Cr" : "Dr"
+            ],
+            [
+              "company_id", "company_name", "ledger_name", "parent_group", "address", "state", "country",
+              "pincode", "pan_number", "gst_number", "gst_registration_type", "contact_name",
+              "phone_number", "primary_phone_number", "fax_no", "email", "opening_balance",
+              "closing_balance", "opening_balance_type", "closing_balance_type"
+            ],
+            client
+          );
+          
+          if (result.action === "inserted") inserted++;
+          else if (result.action === "updated") updated++;
+          else ignored++;
+        }
+        
+        await client.query("COMMIT");
+        
+        return res.status(200).json({
+          status: "success",
+          source: "tally",
+          message: "All parent groups details synced successfully",
+          company,
+          parent_group: groupName,
+          summary: { inserted, updated, ignored, total: list.length }
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.log("❌ ALL PARENT GROUPS ERROR:", err.message);
+        return res.status(500).json({
+          status: "error",
+          message: err.message
+        });
+      } finally {
+        client.release();
+      }
     });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ ALL PARENT GROUPS ERROR:", err.message);
-    return res.status(500).json({ status: "error", message: err.message });
-  } finally {
-    client.release();
-  }
-});
 
 /* ===================================================
   PROFIT LOSS SYNC
@@ -2428,5 +2482,6 @@ router.get("/profit-margin", async (req, res) => {
     client.release();
   }
 });
+export default router;
 
 export default router;

@@ -217,6 +217,7 @@ const allowedOrigins = [
   "http://100.117.199.124:5173",
   "http://192.168.0.7:5173",
   "http://100.122.51.118:5173",  // add every Tailscale IP you test from
+  "http://103.215.115.12:5173",
 ];
 
 // Logs every incoming request before anything else touches it — including

@@ -11,7 +11,37 @@ import { checkSeatAvailable } from "../utils/companyMembers.js";
  */
 export const VALID_ROLES = ["admin", "accountant", "staff"];
 
+export class InviteValidationError extends Error {}
+
 export const createInvite = async (invitedByUserId, email, role = "staff") => {
+  const inviterResult = await pool.query(
+    `SELECT email FROM ${DB_SCHEMA}.users WHERE id = $1 LIMIT 1`,
+    [invitedByUserId]
+  );
+  const inviterEmail = inviterResult.rows[0]?.email;
+
+  if (inviterEmail && inviterEmail.trim().toLowerCase() === email.trim().toLowerCase()) {
+    throw new InviteValidationError("You can't invite your own email address");
+  }
+
+  // An email that's already an approved member of any company (most likely
+  // the inviter's own company, re-invited by mistake) shouldn't get a
+  // second, redundant pending invite — that's exactly what let a stray
+  // self-invite block the inviter's own access via PendingApprovalGate.
+  const alreadyMemberResult = await pool.query(
+    `
+    SELECT 1
+    FROM ${DB_SCHEMA}.users u
+    JOIN ${DB_SCHEMA}.company_members cm ON cm.user_id = u.id
+    WHERE lower(trim(u.email)) = lower(trim($1))
+    LIMIT 1
+    `,
+    [email]
+  );
+  if (alreadyMemberResult.rows.length > 0) {
+    throw new InviteValidationError("This email already has access to a company");
+  }
+
   const result = await pool.query(
     `
     INSERT INTO ${DB_SCHEMA}.invites (email, invited_by_user_id, status, role)
@@ -78,6 +108,10 @@ export const listInvitesForUser = async (invitedByUserId) => {
  * pending_approval row targeting them is enough.
  */
 export const getPendingInviteForUser = async (userId) => {
+  // Only blocks a user who has NO approved access anywhere yet — a stray
+  // pending invite (e.g. a duplicate/self-invite, or an invite to a second
+  // company) must never lock out a user who already has a real,
+  // approved company_members role somewhere else.
   const result = await pool.query(
     `
     SELECT
@@ -91,6 +125,9 @@ export const getPendingInviteForUser = async (userId) => {
     JOIN ${DB_SCHEMA}.users u ON u.id = i.invited_by_user_id
     WHERE i.invitee_user_id = $1
       AND i.status = 'pending_approval'
+      AND NOT EXISTS (
+        SELECT 1 FROM ${DB_SCHEMA}.company_members cm WHERE cm.user_id = $1
+      )
     ORDER BY i.created_at DESC
     LIMIT 1
     `,

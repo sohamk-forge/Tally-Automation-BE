@@ -16,14 +16,12 @@ router.get("/closing-balance", async (req, res) => {
     }
 
     const result = await pool.query(
-  `SELECT closing_balance
-     FROM ${DB_SCHEMA}.group_balances
-    WHERE LOWER(company_name) = LOWER($1)
-      AND LOWER(group_name) = 'sales accounts'
-    ORDER BY updated_at DESC NULLS LAST
-    LIMIT 1`,
-  [company]
-);
+      `SELECT closing_balance
+         FROM ${DB_SCHEMA}.group_balances
+        WHERE LOWER(company_name) = LOWER($1)
+          AND LOWER(group_name) = 'sales accounts'`,
+      [company]
+    );
 
     if (!result.rows.length) {
       return res.status(404).json({
