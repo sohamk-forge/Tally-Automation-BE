@@ -4443,27 +4443,61 @@ router.get("/profit-margin", async (req, res) => {
 
     const row = existing.rows[0];
 
-    const totalSalesNum = Number(row.total_sales);
-    const grossProfitNum = Number(row.gross_profit);
+const totalSalesNum = Number(row.total_sales);
+const openingStockNum = Number(row.opening_stock);
+const totalPurchaseNum = Number(row.total_purchase);
+const closingStockNum = Number(row.closing_stock);
 
-    const grossProfitPercent =
-      totalSalesNum > 0
-        ? Number(((grossProfitNum / totalSalesNum) * 100).toFixed(2))
-        : 0;
+// ===================================================
+// GROSS PROFIT
+// Formula:
+// Gross Profit = Sales - Opening Stock - Purchases + Closing Stock
+// ===================================================
 
-    return res.status(200).json({
-      status: "success",
-      company_id: companyId,
-      fromDate: row.from_date,
-      toDate: row.to_date,
-      totalSales: totalSalesNum,
-      grossProfit: grossProfitNum,
-      grossProfitPercent,
-      netResult: Number(row.net_result),
-      resultType: row.result_type,
-      profitMarginPercent: Number(row.profit_margin_percent),
-      lastSyncedAt: row.updated_at
-    });
+const calculatedGrossProfit = Number(
+  (
+    totalSalesNum -
+    openingStockNum -
+    totalPurchaseNum +
+    closingStockNum
+  ).toFixed(2)
+);
+
+// ===================================================
+// GROSS PROFIT %
+// Formula:
+// Gross Profit % = (Gross Profit / Sales) × 100
+// ===================================================
+
+const grossProfitPercent =
+  totalSalesNum !== 0
+    ? Number(((calculatedGrossProfit / totalSalesNum) * 100).toFixed(2))
+    : 0;
+
+// ===================================================
+// RESPONSE
+// ===================================================
+
+return res.status(200).json({
+  status: "success",
+  company_id: companyId,
+  fromDate: row.from_date,
+  toDate: row.to_date,
+
+  totalSales: totalSalesNum,
+
+  grossProfit: calculatedGrossProfit,
+
+  grossProfitPercent,
+
+  netResult: Number(row.net_result),
+
+  resultType: row.result_type,
+
+  profitMarginPercent: Number(row.profit_margin_percent),
+
+  lastSyncedAt: row.updated_at
+});
 
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
