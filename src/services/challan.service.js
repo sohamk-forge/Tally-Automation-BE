@@ -698,7 +698,6 @@ export async function getChallanTransactions(companyId, filters = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getChallanById
 // ─────────────────────────────────────────────────────────────────────────────
-
 export async function getChallanById(challanId, companyId) {
   const challanRes = await pool.query(
     `SELECT c.*, dp.name AS delivery_person_name, dp.phone_number AS delivery_person_phone
@@ -716,11 +715,17 @@ export async function getChallanById(challanId, companyId) {
     [challanId]
   );
 
-  const gstStatusRes = await pool.query(
-    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+  // Pull the live company profile (name/address/email/gstin/state/gst_enabled)
+  // for the PDF header, rather than relying only on the snapshot columns
+  // stored on the challans row at creation time.
+  const companyDetailsRes = await pool.query(
+    `SELECT company_name, address, state, email, gstin, gst_enabled
+     FROM ${DB_SCHEMA}.company_details
+     WHERE company_id = $1`,
     [companyId]
   );
-  const gstEnabled = gstStatusRes.rows[0]?.gst_enabled ?? false;
+  const companyDetails = companyDetailsRes.rows[0] || {};
+  const gstEnabled = companyDetails.gst_enabled ?? false;
 
   const {
     delivery_person_name,
@@ -737,9 +742,15 @@ export async function getChallanById(challanId, companyId) {
       : null,
     items: itemsRes.rows,
     gst_enabled: gstEnabled,
+    // Fresh company profile for the PDF — falls back to the stored
+    // challans.company_name snapshot only if company_details has none.
+    company_name:    companyDetails.company_name || challanFields.company_name,
+    company_address: companyDetails.address || null,
+    company_state:   companyDetails.state || null,
+    company_email:   companyDetails.email || null,
+    company_gstin:   companyDetails.gstin || null,
   };
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: updateChallanStatus
 // ─────────────────────────────────────────────────────────────────────────────

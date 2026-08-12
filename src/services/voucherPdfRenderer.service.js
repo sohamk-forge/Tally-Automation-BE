@@ -108,6 +108,13 @@ const SHARED_STYLE = `
 
   .ledger-transaction { padding: 7px 8px; border-top: 1px solid #000; font-size: 10.5px; background: #fafbfc; }
   .ledger-transaction .title { font-weight: bold; color: #1a5fb4; }
+   .narration-block {
+  border-top: 1px solid #000;
+  padding: 6px 8px;
+  font-size: 10.5px;
+  word-break: break-word;
+}
+.narration-block strong { color: #333; }
 </style>`;
 
 function headerHtml(company, title) {
@@ -352,14 +359,13 @@ function buildPaymentHtml(v) {
   const openLabel = v.openingBalance >= 0 ? "(Dr)" : "(Cr)";
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
-  const partyRows = v.parties.map(
-    (p) => `
-      <tr>
-        <td>${esc(p.partyName)}${v.narration ? `<br/>Narration : ${esc(v.narration)}` : ""}</td>
-        <td class="num">${money(p.amount)}</td>
-      </tr>`
-  ).join("");
-
+ const partyRows = v.parties.map(
+  (p) => `
+    <tr>
+      <td>${esc(p.partyName)}</td>
+      <td class="num">${money(p.amount)}</td>
+    </tr>`
+).join("");
   return wrap(`
     ${headerHtml(v.company, "Payment Voucher")}
     <table class="info-table">
@@ -405,12 +411,12 @@ function buildReceiptHtml(v) {
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
   const partyRows = v.parties.map(
-    (p) => `
-      <tr>
-        <td>${esc(p.partyName)}${v.narration ? `<br/>Narration : ${esc(v.narration)}` : ""}</td>
-        <td class="num">${money(p.amount)}</td>
-      </tr>`
-  ).join("");
+  (p) => `
+    <tr>
+      <td>${esc(p.partyName)}</td>
+      <td class="num">${money(p.amount)}</td>
+    </tr>`
+).join("");
 
   return wrap(`
     ${headerHtml(v.company, "Receipt Voucher")}
@@ -448,6 +454,8 @@ function buildReceiptHtml(v) {
       <div>Total : ${money(v.amount)}</div>
     </div>
     <div class="amount-words">${esc(amountToWords(v.amount))}</div>
+${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
+
     ${signatureHtml(v.company)}
   `);
 }
@@ -524,6 +532,7 @@ function buildPurchaseHtml(v) {
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
+    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);
@@ -607,6 +616,7 @@ function buildSalesHtml(v) {
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
+    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);

@@ -4,17 +4,17 @@
  * Renders a single challan (fetched via getChallanById) into a printable
  * PDF buffer using Puppeteer (HTML -> PDF).
  *
- * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
- * challan.gst_enabled is true — set upstream in challan.service.js from
- * app_test.company_details.
+ * Header layout: company details on the left; Challan No / Date and
+ * Delivery Person details stacked on the right (challan no/date on top,
+ * delivery person below it).
  *
- * CHANGE LOG (this revision):
- * - Document title now comes from challan.challan_type (e.g. "Return
- *   Replacement") instead of a hardcoded "DELIVERY CHALLAN", falling
- *   back to "DELIVERY CHALLAN" if none is set.
- * - Movement type (Inward/Outward) shown as a small badge next to the
- *   challan number when present.
- * - Delivery person name/phone shown in the meta block when attached.
+ * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
+ * challan.gst_enabled is true.
+ *
+ * company_name / company_address / company_email / company_gstin /
+ * company_state are expected to be sourced fresh from app_test.company_details
+ * (see challan.service.js#getChallanById) rather than the snapshot columns
+ * on the challans row.
  */
 
 import puppeteer from "puppeteer";
@@ -75,6 +75,119 @@ function formatMovementType(movementType) {
 // HTML template
 // ─────────────────────────────────────────────────────────────────────────
 
+const STYLE = `
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    color: #1f2937;
+    font-size: 12.5px;
+  }
+
+  
+  .page-content { flex: 1 0 auto; }
+
+  /* ---- header: company (left) + challan no/date + delivery person (right) ---- */
+  .header-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #000;
+  }
+  .company-block { flex: 1 1 auto; min-width: 0; }
+  .company-name { font-size: 17px; font-weight: bold; color: #1a5fb4; margin: 0 0 3px 0; line-height: 1.25; }
+  .company-meta { font-size: 10.5px; line-height: 1.5; color: #333; }
+  .company-meta strong { color: #111; }
+
+  .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
+  .doc-meta-row { font-size: 11.5px; margin-bottom: 8px; }
+  .doc-meta-row .label { font-weight: bold; color: #333; }
+  .doc-meta-row .value { color: #111; }
+
+  .delivery-block { font-size: 11px; text-align: right; }
+  .delivery-block .section-label {
+    font-size: 10px; text-transform: uppercase; color: #6b7280;
+    letter-spacing: 0.04em; margin-bottom: 2px;
+  }
+  .delivery-block .name { font-weight: bold; }
+  .delivery-block .muted-line { color: #4b5563; margin-top: 1px; }
+
+  /* ---- title bar ---- */
+ .doc-title-bar {
+    text-align: center; font-weight: bold; font-size: 14px; padding: 8px 0;
+    border-bottom: 2px solid #1a5fb4; background: #fff; color: #1a5fb4;
+    display: flex; justify-content: center; align-items: center; gap: 10px;
+  }
+  .movement-badge {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    color: #374151; background: #eef2f8; border-radius: 4px;
+    padding: 2px 7px; letter-spacing: 0.04em;
+  }
+
+  /* ---- bill-to block ---- */
+  .party-block { border-bottom: 1px solid #000; padding: 6px 8px; }
+  .party-block .section-label { font-size: 10px; text-transform: uppercase; color: #6b7280; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .party-block .name { font-weight: bold; }
+  .party-block .muted-line { color: #4b5563; font-size: 11px; margin-top: 1px; }
+
+  /* ---- items table: full grid ---- */
+  table.items { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.items th, table.items td {
+    border: 1px solid #000; padding: 5px 8px; word-break: break-word; overflow-wrap: break-word;
+  }
+  table.items th { background: #f4f6f9; text-align: left; font-weight: bold; color: #111; font-size: 11px; }
+  table.items td { font-size: 11.5px; vertical-align: top; }
+  table.items td.num, table.items th.num { text-align: right; }
+  .item-name { font-weight: 600; }
+  .item-sub { font-size: 10px; color: #9ca3af; margin-top: 1px; }
+
+  /* ---- totals ---- */
+  table.totals-table { width: 100%; border-collapse: collapse; }
+  table.totals-table td { padding: 4px 8px; font-size: 11.5px; border-top: 1px solid #000; }
+  table.totals-table td.label { color: #333; }
+  table.totals-table td.value { text-align: right; }
+  table.totals-table tr.grand-row td { font-weight: bold; font-size: 13px; background: #f4f6f9; }
+
+  .narration-block { border-top: 1px solid #000; padding: 6px 8px; font-size: 11px; }
+  .narration-block strong { color: #333; }
+
+  table.totals-table tr.grand-row td { font-weight: bold; font-size: 13px; background: #f4f6f9; border-top: 2px solid #000; }
+
+/* ---- signature block ---- */
+  .signature-block { display: flex; border-top: 1px solid #000; min-height: 95px; }
+  .signature-left {
+    flex: 1; padding: 8px 10px; border-right: 1px solid #000;
+    display: flex; align-items: flex-end;
+  }
+  .signature-right {
+    flex: 1; padding: 8px 10px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    align-items: flex-end; text-align: right;
+  }
+  .signature-right .for-company { white-space: nowrap; font-size: 10.5px; }
+  .signature-right .auth-label { font-size: 12px; }
+
+  .footer-divider { border-top: 1px solid #000; }
+  .footer { text-align: center; padding: 5px 0; font-size: 10px; color: #555; }
+  /* bold closing rule, same weight as the Total Payable row above */
+  .footer-divider { border-top: 2px solid #000; }
+  .footer { text-align: center; padding: 5px 0; font-size: 10px; color: #555; }
+  body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    color: #1f2937;
+    font-size: 12.5px;
+    padding: 6px;
+  }
+
+  .page {
+    box-sizing: border-box;
+    border: 1.5px solid #000;
+  }
+</style>`;
+
 function buildItemRows(items = [], gstEnabled = true) {
   return items
     .map((it, idx) => {
@@ -104,7 +217,9 @@ function buildHtml(challan) {
     challan_date,
     company_name,
     company_address,
+    company_email,
     company_gstin,
+    company_state,
     customer_name,
     customer_address,
     customer_gstin,
@@ -136,158 +251,68 @@ function buildHtml(challan) {
   <html>
   <head>
     <meta charset="utf-8" />
-    <style>
-      * { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; height: 100%; }
-      body {
-        font-family: 'Helvetica Neue', Arial, sans-serif;
-        color: #1f2937;
-        font-size: 13px;
-      }
-
-      .page {
-        box-sizing: border-box;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-        border: 1.5px solid #374151;
-        border-radius: 6px;
-        padding: 40px 30px 24px 30px;
-      }
-      .page-content { flex: 1 0 auto; }
-
-      .header-top { text-align: right; margin-bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
-      .doc-title { font-size: 18px; font-weight: 700; color: #2563eb; letter-spacing: 0.03em; }
-      .movement-badge {
-        font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-        color: #374151; background: #eef2f8; border-radius: 4px;
-        padding: 3px 8px; letter-spacing: 0.04em;
-      }
-
-      .header-main {
-        display: flex;
-        flex-direction: row;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 12px;
-      }
-
-      .company-block { flex: 1 1 auto; min-width: 0; }
-      .company-name {
-        font-size: 19px;
-        font-weight: 700;
-        color: #111827;
-        line-height: 1.35;
-        white-space: normal;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
-      .muted-line { color: #9ca3af; font-size: 11.5px; margin-top: 3px; }
-
-      .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
-      .doc-meta { font-size: 12px; }
-      .doc-meta .label { font-weight: 700; color: #1f2937; }
-      .doc-meta .value { color: #4b5563; margin-top: 2px; }
-
-      .divider { border-bottom: 1px solid #e5e7eb; margin: 20px 0; }
-
-      .section-label {
-        font-size: 11px; text-transform: uppercase; color: #9ca3af;
-        letter-spacing: 0.05em; margin-bottom: 4px;
-      }
-      .bill-to-name { font-size: 14px; font-weight: 700; color: #111827; margin-bottom: 3px; }
-      .bill-to .section-label { color: #6b7280; }
-      .bill-to .muted-line { margin-top: 2px; color: #4b5563; }
-
-      .info-row { display: flex; gap: 32px; margin-top: 16px; }
-      .info-block { flex: 1 1 0; min-width: 0; }
-
-      table.items { width: 100%; border-collapse: collapse; margin: 22px 0 18px; }
-      table.items th {
-        background: #eef2f8; color: #374151; text-align: left;
-        padding: 9px 8px; font-size: 11px; font-weight: 700;
-        border-bottom: 1px solid #e2e6ee;
-      }
-      table.items td {
-        padding: 9px 8px; border-bottom: 1px solid #f0f1f4; font-size: 12px; vertical-align: top;
-      }
-      table.items td.num, table.items th.num { text-align: right; }
-      .item-name { font-weight: 600; color: #1f2937; }
-      .item-sub { font-size: 10.5px; color: #9ca3af; margin-top: 1px; }
-
-      .totals { width: 300px; margin-left: auto; }
-      .totals table { width: 100%; border-collapse: collapse; }
-      .totals td { padding: 5px 4px; font-size: 12.5px; }
-      .totals .label { color: #6b7280; }
-      .totals .value { text-align: right; color: #1f2937; }
-      .totals .grand-row td {
-        font-weight: 700; font-size: 15px; padding-top: 10px; padding-bottom: 10px;
-        background: #eff6ff; color: #2563eb;
-      }
-      .totals .grand-row td:first-child { border-radius: 4px 0 0 4px; padding-left: 10px; }
-      .totals .grand-row td:last-child { border-radius: 0 4px 4px 0; padding-right: 10px; }
-
-      .narration { margin-top: 8px; }
-      .narration p { margin: 4px 0 0; color: #374151; font-size: 12px; }
-
-      .footer-divider { border-bottom: 1px solid #e5e7eb; margin: 0 0 12px; }
-      .footer { text-align: center; font-size: 11px; color: #9ca3af; padding-bottom: 8px; }
-      .footer-wrap { margin-top: auto; padding-top: 28px; }
-    </style>
+    ${STYLE}
   </head>
   <body>
   <div class="page">
+    <div class="page-content">
 
-    <div class="header-top">
-      ${movementTag ? `<div class="movement-badge">${esc(movementTag)}</div>` : ""}
-      <div class="doc-title">${esc(docTitle)}</div>
-    </div>
-
-    <div class="header-main">
-      <div class="company-block">
-        <div class="company-name">${esc(company_name || "")}</div>
-        ${company_address ? `<div class="muted-line">${esc(company_address)}</div>` : ""}
-        ${company_gstin ? `<div class="muted-line">GSTIN: ${esc(company_gstin)}</div>` : ""}
+      <div class="doc-title-bar">
+        ${esc(docTitle)}
+        ${movementTag ? `<span class="movement-badge">${esc(movementTag)}</span>` : ""}
       </div>
-      <div class="header-right">
-        <div class="doc-meta">
-          <div class="label">Challan No: ${esc(challan_number || "-")}</div>
-          <div class="value">Date: ${formatDate(challan_date)}</div>
+
+      <div class="header-main">
+        <div class="company-block">
+          <div class="company-name">${esc(company_name || "")}</div>
+          <div class="company-meta">
+            ${esc(company_address || "")}<br/>
+            ${company_email ? `Email: ${esc(company_email)}<br/>` : ""}
+            GSTIN: <strong>${esc(company_gstin || "")}</strong> | State: ${esc(company_state || "")}
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="doc-meta-row">
+            <div><span class="label">Challan No : </span><span class="value">${esc(challan_number || "-")}</span></div>
+            <div><span class="label">Date : </span><span class="value">${formatDate(challan_date)}</span></div>
+          </div>
+          ${delivery_person ? `
+<div class="delivery-block">
+  <div class="section-label">Delivery Person</div>
+  <div class="name">${esc(delivery_person.name)}</div>
+  ${delivery_person.phone_number ? `<div class="muted-line">${esc(delivery_person.phone_number)}</div>` : ""}
+</div>` : ""}
         </div>
       </div>
-    </div>
 
-    <div class="divider"></div>
-
-    <div class="info-row">
-      <div class="info-block bill-to">
+      <div class="party-block">
         <div class="section-label">Bill To</div>
-        <div class="bill-to-name">${esc(customer_name || "-")}</div>
+        <div class="name">${esc(customer_name || "-")}</div>
         ${customer_address ? `<div class="muted-line">${esc(customer_address)}</div>` : ""}
         ${customer_gstin ? `<div class="muted-line">GSTIN: ${esc(customer_gstin)}</div>` : ""}
       </div>
-      ${delivery_person ? `
-      <div class="info-block">
-        <div class="section-label">Delivery Person</div>
-        <div class="bill-to-name">${esc(delivery_person.name)}</div>
-        ${delivery_person.phone_number ? `<div class="muted-line">${esc(delivery_person.phone_number)}</div>` : ""}
-      </div>` : ""}
-    </div>
 
-    <table class="items">
-      <thead>
-        <tr>
-          <th>#</th><th>Item</th><th>HSN</th>
-          <th class="num">Qty</th><th class="num">Rate</th><th class="num">Disc %</th>
-          ${gstEnabled ? '<th class="num">GST %</th>' : ""}
-          <th class="num">Amount</th>
-        </tr>
-      </thead>
-      <tbody>${buildItemRows(items, gstEnabled) || `<tr><td colspan="${gstEnabled ? 8 : 7}" style="text-align:center;color:#9ca3af;padding:16px;">No items</td></tr>`}</tbody>
-    </table>
+     
 
-    <div class="totals">
-      <table>
+      <table class="items">
+        <colgroup>
+          <col style="width:5%"><col style="width:28%"><col style="width:10%">
+          <col style="width:9%"><col style="width:11%"><col style="width:9%">
+          ${gstEnabled ? '<col style="width:9%">' : ""}
+          <col style="width:${gstEnabled ? "19%" : "28%"}">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Sl</th><th>Description of Goods</th><th>HSN/SAC</th>
+            <th class="num">Quantity</th><th class="num">Rate</th><th class="num">Disc %</th>
+            ${gstEnabled ? '<th class="num">GST %</th>' : ""}
+            <th class="num">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${buildItemRows(items, gstEnabled) || `<tr><td colspan="${gstEnabled ? 8 : 7}" style="text-align:center;color:#9ca3af;padding:16px;">No items</td></tr>`}</tbody>
+      </table>
+
+      <table class="totals-table">
         <tr><td class="label">Subtotal</td><td class="value">${money(subTotal)}</td></tr>
         ${totalDiscount > 0 ? `<tr><td class="label">Discount</td><td class="value">- ${money(totalDiscount)}</td></tr>` : ""}
         ${gstEnabled ? (
@@ -298,22 +323,24 @@ function buildHtml(challan) {
           <tr><td class="label">IGST</td><td class="value">${money(totalGst)}</td></tr>
           `
         ) : ""}
-        <tr class="grand-row"><td>Total Payable</td><td class="value">${money(grandTotal)}</td></tr>
+        <tr class="grand-row"><td>Total</td><td class="value">${money(grandTotal)}</td></tr>
       </table>
-    </div>
 
-    ${narration ? `
-    <div class="narration">
-      <div class="section-label">Narration</div>
-      <p>${esc(narration)}</p>
-    </div>` : ""}
+      ${narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(narration)}</div>` : ""}
 
-    <div class="footer-wrap">
-      <div class="footer-divider"></div>
-      <div class="footer">
-        <div>This is a computer generated challan.</div>
+ <div class="signature-block">
+        <div class="signature-left">Receiver's Seal and Signature</div>
+        <div class="signature-right">
+          <div class="for-company">for <strong>${esc(company_name || "")}</strong></div>
+          <div class="auth-label">Authorised Signatory</div>
+        </div>
       </div>
+
+      <div class="footer-divider"></div>
+      <div class="footer">This is a Computer Generated ${esc(docTitle.charAt(0) + docTitle.slice(1).toLowerCase())}</div>
+
     </div>
+  </div>
 
   </div>
   </body>
@@ -339,7 +366,7 @@ export async function buildChallanPdf(challan) {
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
-      margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" },
+      margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
     });
 
     return pdfBuffer;
