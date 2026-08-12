@@ -7,6 +7,14 @@
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true — set upstream in challan.service.js from
  * app_test.company_details.
+ *
+ * CHANGE LOG (this revision):
+ * - Document title now comes from challan.challan_type (e.g. "Return
+ *   Replacement") instead of a hardcoded "DELIVERY CHALLAN", falling
+ *   back to "DELIVERY CHALLAN" if none is set.
+ * - Movement type (Inward/Outward) shown as a small badge next to the
+ *   challan number when present.
+ * - Delivery person name/phone shown in the meta block when attached.
  */
 
 import puppeteer from "puppeteer";
@@ -58,6 +66,11 @@ function formatQty(n) {
   return Number.isInteger(num) ? String(num) : num.toFixed(2);
 }
 
+function formatMovementType(movementType) {
+  if (!movementType) return "";
+  return movementType.charAt(0).toUpperCase() + movementType.slice(1);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // HTML template
 // ─────────────────────────────────────────────────────────────────────────
@@ -97,10 +110,15 @@ function buildHtml(challan) {
     customer_gstin,
     supply_type,
     narration,
+    challan_type,
+    movement_type,
+    delivery_person,
     items = [],
   } = challan;
 
   const gstEnabled = challan.gst_enabled ?? true;
+  const docTitle    = (challan_type || "Delivery Challan").toUpperCase();
+  const movementTag = formatMovementType(movement_type);
 
   let subTotal = 0, totalDiscount = 0, totalGst = 0, grandTotal = 0;
   items.forEach((it) => {
@@ -138,8 +156,13 @@ function buildHtml(challan) {
       }
       .page-content { flex: 1 0 auto; }
 
-      .header-top { text-align: right; margin-bottom: 2px; }
+      .header-top { text-align: right; margin-bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
       .doc-title { font-size: 18px; font-weight: 700; color: #2563eb; letter-spacing: 0.03em; }
+      .movement-badge {
+        font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+        color: #374151; background: #eef2f8; border-radius: 4px;
+        padding: 3px 8px; letter-spacing: 0.04em;
+      }
 
       .header-main {
         display: flex;
@@ -175,6 +198,9 @@ function buildHtml(challan) {
       .bill-to-name { font-size: 14px; font-weight: 700; color: #111827; margin-bottom: 3px; }
       .bill-to .section-label { color: #6b7280; }
       .bill-to .muted-line { margin-top: 2px; color: #4b5563; }
+
+      .info-row { display: flex; gap: 32px; margin-top: 16px; }
+      .info-block { flex: 1 1 0; min-width: 0; }
 
       table.items { width: 100%; border-collapse: collapse; margin: 22px 0 18px; }
       table.items th {
@@ -213,7 +239,8 @@ function buildHtml(challan) {
   <div class="page">
 
     <div class="header-top">
-      <div class="doc-title">DELIVERY CHALLAN</div>
+      ${movementTag ? `<div class="movement-badge">${esc(movementTag)}</div>` : ""}
+      <div class="doc-title">${esc(docTitle)}</div>
     </div>
 
     <div class="header-main">
@@ -232,11 +259,19 @@ function buildHtml(challan) {
 
     <div class="divider"></div>
 
-    <div class="bill-to">
-      <div class="section-label">Bill To</div>
-      <div class="bill-to-name">${esc(customer_name || "-")}</div>
-      ${customer_address ? `<div class="muted-line">${esc(customer_address)}</div>` : ""}
-      ${customer_gstin ? `<div class="muted-line">GSTIN: ${esc(customer_gstin)}</div>` : ""}
+    <div class="info-row">
+      <div class="info-block bill-to">
+        <div class="section-label">Bill To</div>
+        <div class="bill-to-name">${esc(customer_name || "-")}</div>
+        ${customer_address ? `<div class="muted-line">${esc(customer_address)}</div>` : ""}
+        ${customer_gstin ? `<div class="muted-line">GSTIN: ${esc(customer_gstin)}</div>` : ""}
+      </div>
+      ${delivery_person ? `
+      <div class="info-block">
+        <div class="section-label">Delivery Person</div>
+        <div class="bill-to-name">${esc(delivery_person.name)}</div>
+        ${delivery_person.phone_number ? `<div class="muted-line">${esc(delivery_person.phone_number)}</div>` : ""}
+      </div>` : ""}
     </div>
 
     <table class="items">

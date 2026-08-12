@@ -35,6 +35,16 @@
  *
  *   GET  /api/v1/challan/:id?company_id=1
  *        → Plain GET detail view, same data as action:"get".
+ *
+ * ─────────────────────────────────────────────
+ * NOTE ON DELIVERY PERSONS
+ * ─────────────────────────────────────────────
+ * "Select Delivery Person" on the frontend is backed by a separate
+ * resource — see delivery-person.routes.js:
+ *   GET  /api/v1/delivery-person?company_id=1        (list, for the dropdown)
+ *   POST /api/v1/delivery-person                      (the "+ Create new
+ *                                                        Delivery person" form)
+ * Once created there, pass its numeric id back here as delivery_person_id.
  */
 
 import express from "express";
@@ -99,6 +109,11 @@ router.get("/next-number", async (req, res) => {
 //   "customer_address": "Mumbai",               ← optional
 //   "narration":        "Goods delivered",      ← optional
 //   "supply_type":      "intrastate",           ← "intrastate" | "interstate"
+//   "challan_type":      "Return Replacement",  ← optional, defaults to
+//                                                  "Delivery Challan"
+//   "movement_type":     "outward",             ← optional, "inward" | "outward"
+//   "delivery_person_id": 3,                    ← optional, id from
+//                                                  GET /api/v1/delivery-person
 //   "items": [
 //     {
 //       "item_name":         "Item A",
@@ -121,7 +136,8 @@ async function handleCreate(req, res) {
   const {
     company_id, company_name,
     challan_date, customer_name, customer_gstin, customer_address,
-    narration, supply_type, items,
+    narration, supply_type, challan_type, movement_type, delivery_person_id,
+    items,
   } = req.body;
 
   if (!company_id)   return errRes(res, 400, "company_id is required");
@@ -140,6 +156,9 @@ async function handleCreate(req, res) {
       customer_address,
       narration,
       supply_type,
+      challan_type,
+      movement_type,
+      delivery_person_id,
       items,
     });
 
@@ -164,6 +183,9 @@ async function handleCreate(req, res) {
 //   "challan_date": "2026-07-01",
 //   "customer_name": "ABC Traders",
 //   ...same editable fields as create, minus challan_number...
+//   "challan_type":      "Return Replacement",
+//   "movement_type":     "outward",
+//   "delivery_person_id": 3,
 //   "items": [ ... ]
 // }
 //
@@ -174,7 +196,8 @@ async function handleUpdate(req, res) {
   const {
     company_id, challan_id,
     challan_date, customer_name, customer_gstin, customer_address,
-    narration, supply_type, items,
+    narration, supply_type, challan_type, movement_type, delivery_person_id,
+    items,
   } = req.body;
 
   if (!company_id)   return errRes(res, 400, "company_id is required");
@@ -192,6 +215,9 @@ async function handleUpdate(req, res) {
       customer_address,
       narration,
       supply_type,
+      challan_type,
+      movement_type,
+      delivery_person_id,
       items,
     });
 

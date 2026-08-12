@@ -5,11 +5,9 @@ import { sendToTallyViaConnector } from "./connectorSync.service.js";
    DATE HELPERS
 =================================================== */
 
-// Default period = current financial year (1 Apr → today), India-style FY.
-// If your books run on a different FY, just pass fromDate/toDate explicitly.
 function getDefaultFinancialYear() {
   const now = new Date();
-  const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1; // April = month index 3
+  const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
   const from = new Date(fyStartYear, 3, 1);
   return {
     fromISO: toISO(from),
@@ -18,10 +16,9 @@ function getDefaultFinancialYear() {
 }
 
 function toISO(d) {
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  return d.toISOString().slice(0, 10);
 }
 
-// Accepts "2024-04-01" OR "20240401" → returns "2024-04-01"
 function normalizeToISO(dateStr) {
   const s = String(dateStr).trim();
   if (s.includes("-")) return s;
@@ -29,52 +26,84 @@ function normalizeToISO(dateStr) {
   throw new Error(`Unrecognized date format: ${dateStr}`);
 }
 
-// Accepts "2024-04-01" OR "20240401" → returns "20240401" (Tally format)
 function toTallyDate(dateStr) {
   return String(dateStr).replace(/-/g, "");
 }
 
 /* ===================================================
-   XML PARSING (Tally's on-screen P&L report)
+   XML PARSING (Tally's raw EXPORTDATA "Profit and Loss")
+
+   IMPORTANT — how this report is actually structured:
+   - <DSPDISPNAME>Label</DSPDISPNAME> is a SEPARATE sibling
+     block from its amount, not a nested container. The
+     amount for a given label lives in the NEXT <PLAMT>
+     block that follows it.
+   - Group totals (Sales, Direct/Indirect Income, Indirect
+     Expenses, and Tally's own computed "Cost of Sales :"
+     line) live in <BSMAINAMT>.
+   - Sub-line breakdowns (Opening Stock, Purchase Accounts,
+     Closing Stock — the components Tally used to compute
+     "Cost of Sales :") live in <PLSUBAMT> instead, and
+     <BSMAINAMT> is empty for those rows.
+   - This export mode does NOT include "Gross Profit" or
+     "Nett Profit" as their own lines at all — those only
+     appear in Tally's on-screen view, not in this raw XML.
+     So we no longer search for them.
+
+   THE FIX: instead of manually re-deriving Cost of Sales
+   from Opening Stock + Purchases − Closing Stock (which is
+   fragile and was the source of earlier bugs), we read
+   Tally's own already-computed "Cost of Sales :" line
+   directly — literally extracting the number Tally itself
+   calculated, not recomputing it ourselves.
 =================================================== */
 
-function extractAmount(xmlString, labelPattern) {
+// Extracts a value from <BSMAINAMT> following a given <DSPDISPNAME> label.
+// Scoped to stop at the next <DSPDISPNAME> so it can never grab an amount
+// belonging to a different, later section of the report.
+function extractMainAmount(xmlString, labelPattern) {
   const pattern = new RegExp(
-    `<DSPDISPNAME>\\s*${labelPattern}\\s*<\\/DSPDISPNAME>[\\s\\S]*?<BSMAINAMT>([\\d,.-]+)<\\/BSMAINAMT>`,
+    `<DSPDISPNAME>\\s*${labelPattern}\\s*:?\\s*<\\/DSPDISPNAME>((?:(?!<DSPDISPNAME>)[\\s\\S])*?)<BSMAINAMT>([\\d,.-]+)<\\/BSMAINAMT>`,
     "i"
   );
   const match = xmlString.match(pattern);
   if (!match) return null;
-  return Number(match[1].replace(/,/g, ""));
+  return Number(match[2].replace(/,/g, ""));
+}
+
+// Same idea, but for sub-line amounts that live in <PLSUBAMT> instead.
+// Used only for informational/display fields (Opening Stock, Purchase
+// Accounts, Closing Stock) — NOT used to compute Gross Profit anymore.
+function extractSubAmount(xmlString, labelPattern) {
+  const pattern = new RegExp(
+    `<DSPDISPNAME>\\s*${labelPattern}\\s*:?\\s*<\\/DSPDISPNAME>((?:(?!<DSPDISPNAME>)[\\s\\S])*?)<PLSUBAMT>([\\d,.-]+)<\\/PLSUBAMT>`,
+    "i"
+  );
+  const match = xmlString.match(pattern);
+  if (!match) return null;
+  return Number(match[2].replace(/,/g, ""));
 }
 
 function parseProfitLossReport(xmlString) {
-  const totalSales      = Math.abs(extractAmount(xmlString, "Sales Accounts?") || 0);
-  const totalPurchase   = Math.abs(extractAmount(xmlString, "Purchase Accounts?") || 0);
-  const openingStock    = Math.abs(extractAmount(xmlString, "Opening Stock") || 0);
-  const closingStock    = Math.abs(extractAmount(xmlString, "Closing Stock") || 0);
-  const directExpenses  = Math.abs(extractAmount(xmlString, "Direct Expenses") || 0);
-  const directIncome    = Math.abs(extractAmount(xmlString, "Direct Incomes?") || 0);
-  const indirectIncome  = Math.abs(extractAmount(xmlString, "Indirect Incomes?") || 0);
-  const indirectExpenses = Math.abs(extractAmount(xmlString, "Indirect Expenses?") || 0);
+  // ===== Group totals — read directly from Tally, signs preserved =====
+  const totalSales       = extractMainAmount(xmlString, "Sales Accounts?") || 0;
+  const directIncome      = extractMainAmount(xmlString, "Direct Incomes?") || 0;
+  const costOfSales       = extractMainAmount(xmlString, "Cost of Sales") ?? 0;
+  const indirectIncome    = extractMainAmount(xmlString, "Indirect Incomes?") || 0;
+  const indirectExpenses  = extractMainAmount(xmlString, "Indirect Expenses?") || 0;
 
-  // Prefer Tally's own computed Gross/Nett Profit or Loss lines when present —
-  // more reliable than re-deriving them, since Tally already applied its own
-  // adjustments (stock valuation methods, rounding, etc).
-  const grossProfitLine = extractAmount(xmlString, "Gross Profit");
-  const grossLossLine   = extractAmount(xmlString, "Gross Loss");
-  const nettProfitLine  = extractAmount(xmlString, "Nett Profit") ?? extractAmount(xmlString, "Net Profit");
-  const nettLossLine    = extractAmount(xmlString, "Nett Loss") ?? extractAmount(xmlString, "Net Loss");
+  // ===== Informational sub-lines only (not used in the calc below) =====
+  const openingStock = Math.abs(extractSubAmount(xmlString, "Opening Stock") || 0);
+  const totalPurchase = Math.abs(extractSubAmount(xmlString, "Add: Purchase Accounts") ?? extractSubAmount(xmlString, "Purchase Accounts?") ?? 0);
+  const closingStock = Math.abs(extractSubAmount(xmlString, "Less: Closing Stock") ?? extractSubAmount(xmlString, "Closing Stock") ?? 0);
 
-  let grossProfit;
-  if (grossProfitLine != null) grossProfit = Math.abs(grossProfitLine);
-  else if (grossLossLine != null) grossProfit = -Math.abs(grossLossLine);
-  else grossProfit = (totalSales + closingStock + directIncome) - (totalPurchase + openingStock + directExpenses);
-
-  let netResult;
-  if (nettProfitLine != null) netResult = Math.abs(nettProfitLine);
-  else if (nettLossLine != null) netResult = -Math.abs(nettLossLine);
-  else netResult = grossProfit + indirectIncome - indirectExpenses;
+  // ===== Gross Profit / Net Result — using Tally's own Cost of Sales
+  //       line directly, exactly the way Tally itself computes it on
+  //       screen (Sales + Direct Income − Cost of Sales, then
+  //       + Indirect Income − Indirect Expenses). No re-derivation
+  //       from Opening/Purchase/Closing Stock. =====
+  const grossProfit = Number((totalSales + directIncome - costOfSales).toFixed(2));
+  const netResult    = Number((grossProfit + indirectIncome - indirectExpenses).toFixed(2));
 
   return {
     totalSales,
@@ -84,8 +113,8 @@ function parseProfitLossReport(xmlString) {
     directIncome,
     indirectIncome,
     indirectExpenses,
-    grossProfit: Number(grossProfit.toFixed(2)),
-    netResult: Number(netResult.toFixed(2))
+    grossProfit,
+    netResult
   };
 }
 
@@ -119,30 +148,24 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
 
   const resultType = parsed.netResult >= 0 ? "profit" : "loss";
 
-  /* =====================================
-     NET PROFIT MARGIN %
-     Uncapped, signed. A loss CAN exceed
-     100% of sales — that's a valid real
-     result, not a bug. Stored in the
-     existing profit_margin_percent column.
-  ===================================== */
   const profitMarginPercent =
-    parsed.totalSales > 0
+    parsed.totalSales !== 0
       ? Number(((parsed.netResult / parsed.totalSales) * 100).toFixed(2))
       : 0;
 
-  console.log("========== P&L DEBUG ==========");
+  console.log("========== P&L DEBUG (from Tally's own Cost of Sales line) ==========");
   console.log("totalSales:", parsed.totalSales);
+  console.log("directIncome:", parsed.directIncome);
+  console.log("costOfSales (derived internally, not stored):", parsed.totalSales + parsed.directIncome - parsed.grossProfit);
   console.log("grossProfit:", parsed.grossProfit);
+  console.log("indirectIncome:", parsed.indirectIncome);
+  console.log("indirectExpenses:", parsed.indirectExpenses);
   console.log("netResult:", parsed.netResult);
-  console.log("profitMarginPercent (net):", profitMarginPercent);
-  console.log("================================");
+  console.log("profitMarginPercent:", profitMarginPercent);
+  console.log("========================================================================");
 
   const guid = `pl_summary_${companyId}_${tallyFrom}_${tallyTo}`;
 
-  // NOTE: gross_profit_percent is NOT a column in this table —
-  // we don't insert/select it. It's derived on the fly below,
-  // from gross_profit / total_sales, which already exist as columns.
   const upsert = await client.query(
     `
     INSERT INTO app_test.profit_loss_summary (
@@ -192,9 +215,8 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
   const totalSalesNum = Number(row.total_sales);
   const grossProfitNum = Number(row.gross_profit);
 
-  // Derived at read time — no DB column needed for this.
   const grossProfitPercent =
-    totalSalesNum > 0
+    totalSalesNum !== 0
       ? Number(((grossProfitNum / totalSalesNum) * 100).toFixed(2))
       : 0;
 

@@ -190,6 +190,8 @@ from "./api/companyLogo.routes.js";
 import bulkSalesV2Routes from "./api/bulkSalesV2.routes.js";
 
 import proformaRoutes from "./api/proforma.routes.js";
+
+import deliveryPersonRoutes from "./api/delivery-person.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -532,6 +534,8 @@ app.use(
 );
 
 app.use("/api/v1/proforma", ...requireSessionOrApiKey(), proformaRoutes);
+
+app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRoutes);
 
 
 /* =================================
