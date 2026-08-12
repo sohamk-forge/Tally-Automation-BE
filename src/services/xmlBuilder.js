@@ -1359,7 +1359,6 @@ export const getGodownsXML = (company) => {
 `;
 
 };
-
 export const getSalesGroupXML = (company) => {
   return `
 <ENVELOPE>
@@ -1378,15 +1377,19 @@ export const getSalesGroupXML = (company) => {
    <TDL>
     <TDLMESSAGE>
      <SYSTEM TYPE="Formulae" NAME="SalesGroupFilter">
-      $$IsEqual:$Name:"Sales Account" OR $$IsEqual:$Name:"Sales Accounts"
+      $$IsEqual:$ReservedName:"Sales Accounts"
      </SYSTEM>
      <COLLECTION NAME="SalesGroupOnly">
       <TYPE>Group</TYPE>
       <FILTERS>SalesGroupFilter</FILTERS>
       <FETCH>Name</FETCH>
+      <FETCH>ReservedName</FETCH>
       <FETCH>Parent</FETCH>
       <FETCH>OpeningBalance</FETCH>
       <FETCH>ClosingBalance</FETCH>
+      <FETCH>GUID</FETCH>
+      <FETCH>MasterID</FETCH>
+      <FETCH>AlterID</FETCH>
      </COLLECTION>
     </TDLMESSAGE>
    </TDL>
@@ -1395,7 +1398,6 @@ export const getSalesGroupXML = (company) => {
 </ENVELOPE>
   `;
 };
-
 export const getPurchaseGroupXML = (company) => {
   return `
 <ENVELOPE>
@@ -1414,15 +1416,19 @@ export const getPurchaseGroupXML = (company) => {
    <TDL>
     <TDLMESSAGE>
      <SYSTEM TYPE="Formulae" NAME="PurchaseGroupFilter">
-      $$IsEqual:$Name:"Purchase Account" OR $$IsEqual:$Name:"Purchase Accounts"
+      $$IsEqual:$ReservedName:"Purchase Accounts"
      </SYSTEM>
      <COLLECTION NAME="PurchaseGroupOnly">
       <TYPE>Group</TYPE>
       <FILTERS>PurchaseGroupFilter</FILTERS>
       <FETCH>Name</FETCH>
+      <FETCH>ReservedName</FETCH>
       <FETCH>Parent</FETCH>
       <FETCH>OpeningBalance</FETCH>
       <FETCH>ClosingBalance</FETCH>
+      <FETCH>GUID</FETCH>
+      <FETCH>MasterID</FETCH>
+      <FETCH>AlterID</FETCH>
      </COLLECTION>
     </TDLMESSAGE>
    </TDL>

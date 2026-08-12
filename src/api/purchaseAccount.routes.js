@@ -16,34 +16,28 @@ router.get("/closing-balance", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT closing_balance, closing_balance_type
-         FROM ${DB_SCHEMA}.all_ledger_details
-        WHERE LOWER(company_name) = LOWER($1)
-          AND LOWER(parent_group) LIKE '%purchase%'`,
-      [company]
-    );
+  `SELECT closing_balance
+     FROM ${DB_SCHEMA}.group_balances
+    WHERE LOWER(company_name) = LOWER($1)
+      AND LOWER(group_name) = 'sales accounts'
+    ORDER BY updated_at DESC NULLS LAST
+    LIMIT 1`,
+  [company]
+);
 
     if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: `No "Purchase" group ledgers found for "${company}"`
+        message: `No "Purchase Accounts" group found for "${company}"`
       });
     }
 
-    let closingBalance = 0;
-    for (const row of result.rows) {
-      const amount = Math.abs(Number(row.closing_balance) || 0);
-      // Purchase is a Dr-nature group; add Dr, subtract Cr (contra/returns)
-      closingBalance +=
-        (row.closing_balance_type || "").toUpperCase() === "CR"
-          ? -amount
-          : amount;
-    }
+    const closingBalance = Math.abs(Number(result.rows[0].closing_balance) || 0);
 
     return res.status(200).json({
       success: true,
       company,
-      closing_balance: Math.abs(Number(closingBalance.toFixed(2))),
+      closing_balance: Number(closingBalance.toFixed(2)),
       source: "database"
     });
 
