@@ -48,6 +48,9 @@ import "./workers/pushVoucher.worker.js";
 
 import "./workers/bulkSalesV2.worker.js";
 
+
+import "./workers/bulkPurchaseV2.worker.js";
+
 /* =================================
 
    ROUTES
@@ -192,6 +195,9 @@ import bulkSalesV2Routes from "./api/bulkSalesV2.routes.js";
 import proformaRoutes from "./api/proforma.routes.js";
 
 import deliveryPersonRoutes from "./api/delivery-person.routes.js";
+
+
+import bulkPurchaseV2Routes from "./api/bulkPurchaseV2.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -506,6 +512,8 @@ app.use(
   bulkSalesUploadRoutes
 );
 
+
+app.use("/api", ...requireSessionOrApiKey(), bulkPurchaseV2Routes);
 /* =================================
    VOUCHER APIs
 ================================= */
@@ -572,6 +580,7 @@ app.use(
 );
 
 app.use("/api", bulkSalesV2Routes);
+app.use("/api", bulkPurchaseV2Routes);
 /* =================================
    DEFAULT API
 ================================= */

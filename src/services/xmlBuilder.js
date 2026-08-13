@@ -539,105 +539,101 @@ export const getGroupSummaryCRXML = (company) => {
 
   };
 
-  export function getLedgerVouchersXML(
-    company,
-    fromDate,
-    toDate
-  ) {
+ export function getLedgerVouchersXML(company, fromDate, toDate) {
+  return `
 
-    return `
+<ENVELOPE>
 
-  <ENVELOPE>
+    <HEADER>
 
-      <HEADER>
+        <VERSION>1</VERSION>
 
-          <VERSION>1</VERSION>
+        <TALLYREQUEST>
+            Export
+        </TALLYREQUEST>
 
-          <TALLYREQUEST>
-              Export
-          </TALLYREQUEST>
+        <TYPE>
+            Collection
+        </TYPE>
 
-          <TYPE>
-              Collection
-          </TYPE>
+        <ID>
+            LedgerVouchers
+        </ID>
 
-          <ID>
-              LedgerVouchers
-          </ID>
+    </HEADER>
 
-      </HEADER>
+    <BODY>
 
-      <BODY>
+        <DESC>
 
-          <DESC>
+            <STATICVARIABLES>
 
-              <STATICVARIABLES>
+                <SVCURRENTCOMPANY>
+                    ${company}
+                </SVCURRENTCOMPANY>
 
-                  <SVCURRENTCOMPANY>
-                      ${company}
-                  </SVCURRENTCOMPANY>
+                <SVEXPORTFORMAT>
+                    $$SysName:XML
+                </SVEXPORTFORMAT>
 
-                  <SVEXPORTFORMAT>
-                      $$SysName:XML
-                  </SVEXPORTFORMAT>
+                <SVFROMDATE TYPE="Date">
+                    ${fromDate}
+                </SVFROMDATE>
 
-                  <SVFROMDATE TYPE="Date">
-                      ${fromDate}
-                  </SVFROMDATE>
+                <SVTODATE TYPE="Date">
+                    ${toDate}
+                </SVTODATE>
 
-                  <SVTODATE TYPE="Date">
-                      ${toDate}
-                  </SVTODATE>
+            </STATICVARIABLES>
 
-              </STATICVARIABLES>
+            <TDL>
 
-              <TDL>
+                <TDLMESSAGE>
 
-                  <TDLMESSAGE>
+                    <COLLECTION
+                        NAME="LedgerVouchers"
+                        ISMODIFY="No"
+                    >
 
-                      <COLLECTION
-                          NAME="LedgerVouchers"
-                          ISMODIFY="No"
-                      >
+                        <TYPE>
+                            Voucher
+                        </TYPE>
 
-                          <TYPE>
-                              Voucher
-                          </TYPE>
+                        <FETCH>
 
-                          <FETCH>
+                            DATE,
 
-                              DATE,
+                            VOUCHERTYPENAME,
 
-                              VOUCHERTYPENAME,
+                            VOUCHERNUMBER,
 
-                              VOUCHERNUMBER,
+                            PARTYLEDGERNAME,
 
-                              PARTYLEDGERNAME,
+                            NARRATION,
 
-                              NARRATION,
+                            ALLLEDGERENTRIES.LIST,
 
-                              ALLLEDGERENTRIES.LIST
+                            ALLLEDGERENTRIES.ISDEEMEDPOSITIVE
 
-                          </FETCH>
+                        </FETCH>
 
-                      </COLLECTION>
+                    </COLLECTION>
 
-                  </TDLMESSAGE>
+                </TDLMESSAGE>
 
-              </TDL>
+            </TDL>
 
-          </DESC>
+        </DESC>
 
-          <DATA>
-          </DATA>
+        <DATA>
+        </DATA>
 
-      </BODY>
+    </BODY>
 
-  </ENVELOPE>
-
+</ENVELOPE>
   `;
+}
 
-  }
  export function getParentGroupsXML(
   company
 ) {

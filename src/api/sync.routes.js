@@ -380,6 +380,7 @@ router.get("/companies", async (req, res) => {
         financial_year_end: item?.ENDINGAT ? String(item.ENDINGAT).slice(0, 4) : null
       }))
     });
+<<<<<<< HEAD
   } catch (err) {
     await client.query("ROLLBACK");
     console.log("❌ COMPANY SYNC ERROR:", err.message);
@@ -390,15 +391,509 @@ router.get("/companies", async (req, res) => {
       });
     }
     return res.status(500).json({ status: "error", message: err.message });
+=======
+
+    /* ===================================================
+      VOUCHER SYNC (FIXED - PROPER TRANSACTION HANDLING)
+    =================================================== */
+
+  function getSignedAmount(entry) {
+  const amount = Number(entry?.AMOUNT || 0);
+  return amount < 0
+    ? { debit: Math.abs(amount), credit: 0 }
+    : { debit: 0, credit: amount };
+}
+
+router.get("/voucher-sync", async (req, res) => {
+  const startTime = Date.now();
+  const company = req.query.company;
+  const fromDate = req.query.fromDate;
+  const toDate = req.query.toDate;
+  const voucherType = req.query.voucherType;
+  const party = req.query.party;
+
+  /* =========================================
+    VALIDATION
+  ========================================= */
+  if (!company || !fromDate || !toDate) {
+    await createAuditLog({
+      action: "SYNC_VALIDATION_FAILED",
+      entity: "voucher-sync",
+      metadata: { company, fromDate, toDate },
+      logType: "ERROR"
+    });
+    return res.status(400).json({
+      status: "error",
+      message: "company, fromDate and toDate required"
+    });
+  }
+
+  /* =========================================
+    SYNC START LOG
+  ========================================= */
+  await createAuditLog({
+    action: "SYNC_START",
+    entity: "voucher-sync",
+    metadata: { company, fromDate, toDate, voucherType, party }
+  });
+
+  const client = await pool.connect();
+
+  try {
+    /* =====================================
+      GET COMPANY ID (OUTSIDE TRANSACTION)
+    ===================================== */
+    const companyId = await getCompanyId(company, client);
+    if (!companyId) {
+      throw new Error("Company not found");
+    }
+
+    /* =====================================
+      BUILD XML & FETCH FROM TALLY
+    ===================================== */
+    const xml = getLedgerVouchersXML(company, fromDate, toDate);
+    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+    const parsed = await parseXML(responseXML);
+
+    /* =====================================
+      COLLECTION
+    ===================================== */
+    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
+    const list = Array.isArray(collection) ? collection : [collection];
+
+    /* =====================================
+      TALLY RESPONSE LOG
+    ===================================== */
+    await createAuditLog({
+      action: "TALLY_RESPONSE",
+      entity: "voucher-sync",
+      metadata: { company, totalRecords: list.length }
+    });
+
+    /* =====================================
+      COUNTERS
+    ===================================== */
+    let inserted = 0;
+    let updated = 0;
+    let ignored = 0;
+    let failed = 0;
+
+    /* =====================================
+      PROCESS EACH VOUCHER IN SEPARATE TRANSACTION
+      (To prevent one failure from breaking everything)
+    ===================================== */
+    for (const voucher of list) {
+      try {
+        const voucherNumber = clean(voucher?.VOUCHERNUMBER);
+        if (!voucherNumber) {
+          failed++;
+          continue;
+        }
+
+        /* =================================
+          LEDGER ENTRIES
+        ================================= */
+        const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
+        const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+
+        /* ================================
+          BASIC VALUES
+        ================================= */
+        const originalGuid = voucher?.GUID || null;
+        const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+        const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
+        const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
+
+        /* =================================
+          AMOUNTS
+          NOTE: sign now comes from ISDEEMEDPOSITIVE via
+          getSignedAmount(), not the raw AMOUNT sign.
+          This is what fixes the Round Off sign issue.
+        ================================= */
+        let debitAmount = 0;
+        let creditAmount = 0;
+
+        const partyEntry = normalized.find(
+          entry => clean(entry?.LEDGERNAME) === partyLedgerName
+        );
+
+        if (partyEntry) {
+          const { debit, credit } = getSignedAmount(partyEntry);
+          debitAmount = debit;
+          creditAmount = credit;
+        }
+
+        const balance = debitAmount - creditAmount;
+
+        // Normalize every ledger entry (incl. Round Off) with an explicit,
+        // unambiguous debit/credit before persisting the JSON blob.
+        const normalizedWithSign = normalized.map(entry => {
+          const { debit, credit } = getSignedAmount(entry);
+          return {
+            ...entry,
+            _debit: debit,
+            _credit: credit
+          };
+        });
+
+        console.log("VOUCHER DEBUG");
+        console.log({
+          voucherNumber,
+          debitAmount,
+          creditAmount,
+          balance,
+          roundOffEntries: normalizedWithSign.filter(e =>
+            clean(e?.LEDGERNAME)?.toLowerCase().includes("round off")
+          )
+        });
+
+        /* ================================
+          FILTERS
+        ================================ */
+        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
+          ignored++;
+          continue;
+        }
+        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
+          ignored++;
+          continue;
+        }
+
+        /* ================================
+          START TRANSACTION FOR THIS VOUCHER
+        ================================ */
+        const voucherClient = await pool.connect();
+
+        try {
+          await voucherClient.query("BEGIN");
+
+          /* ================================
+            INSERT VOUCHER
+          ================================ */
+          const guid =
+            originalGuid ||
+            generateFallbackGuid(
+              company,
+              `${voucherDate}_${voucherTypeName}_${voucherNumber}`,
+              "voucher"
+            );
+
+          const masterId = voucher?.MASTERID || null;
+          const alterId = voucher?.ALTERID || 0;
+
+          const upsertResult = await voucherClient.query(
+            `
+            INSERT INTO app_test.vouchers (
+              guid,
+              master_id,
+              alter_id,
+              company_id,
+              company_name,
+              voucher_date,
+              voucher_type,
+              voucher_number,
+              party_ledger_name,
+              narration,
+              ledger_entries,
+              debit_amount,
+              credit_amount,
+              balance,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5,
+              $6, $7, $8, $9, $10,
+              $11, $12, $13, $14,
+              NOW(), NOW()
+            )
+            ON CONFLICT (company_id, voucher_number, voucher_date)
+            DO UPDATE SET
+              voucher_type = EXCLUDED.voucher_type,
+              party_ledger_name = EXCLUDED.party_ledger_name,
+              narration = EXCLUDED.narration,
+              ledger_entries = EXCLUDED.ledger_entries,
+              debit_amount = EXCLUDED.debit_amount,
+              credit_amount = EXCLUDED.credit_amount,
+              balance = EXCLUDED.balance,
+              updated_at = NOW()
+            RETURNING (xmax = 0) AS was_inserted
+            `,
+            [
+              guid,
+              masterId,
+              alterId,
+              companyId,
+              company,
+              voucherDate,
+              voucherTypeName,
+              voucherNumber,
+              partyLedgerName,
+              clean(voucher?.NARRATION),
+              JSON.stringify(normalizedWithSign),
+              debitAmount,
+              creditAmount,
+              balance
+            ]
+          );
+
+          if (upsertResult.rows[0]?.was_inserted) {
+            inserted++;
+          } else {
+            updated++;
+          }
+
+          /* ================================
+            INSERT SALES ITEMS
+          ================================ */
+          for (const entry of normalizedWithSign) {
+            const inventoryAllocations = entry?.["INVENTORYALLOCATIONS.LIST"];
+            const allocations = Array.isArray(inventoryAllocations)
+              ? inventoryAllocations
+              : inventoryAllocations
+              ? [inventoryAllocations]
+              : [];
+
+            if (allocations.length === 0) {
+              continue;
+            }
+
+            for (const item of allocations) {
+              if (!item?.STOCKITEMNAME) {
+                continue;
+              }
+
+              await voucherClient.query(
+                `
+                INSERT INTO app_test.sales_items (
+                  company_id,
+                  company_name,
+                  voucher_number,
+                  description,
+                  actual_quantity,
+                  billed_quantity,
+                  total_amount,
+                  created_at,
+                  updated_at
+                )
+                VALUES (
+                  $1, $2, $3, $4,
+                  $5, $6, $7,
+                  NOW(),
+                  NOW()
+                )
+                `,
+                [
+                  companyId,
+                  company,
+                  voucherNumber,
+                  item?.STOCKITEMNAME || null,
+                  parseFloat(String(item?.ACTUALQTY || 0).replace(/[^\d.-]/g, "")),
+                  parseFloat(String(item?.BILLEDQTY || 0).replace(/[^\d.-]/g, "")),
+                  Math.abs(creditAmount)
+                ]
+              );
+            }
+          }
+
+          /* ================================
+            COMMIT
+          ================================ */
+          await voucherClient.query("COMMIT");
+        } catch (voucherError) {
+          await voucherClient.query("ROLLBACK");
+          failed++;
+
+          console.log(`❌ Voucher ${voucherNumber} failed:`, voucherError.message);
+
+          await createAuditLog({
+            action: "VOUCHER_SYNC_RECORD_FAILED",
+            entity: "voucher-sync",
+            metadata: {
+              company,
+              error: voucherError.message,
+              voucher: voucherNumber
+            },
+            logType: "ERROR"
+          });
+        } finally {
+          voucherClient.release();
+        }
+      } catch (loopError) {
+        failed++;
+        console.log(`❌ Voucher ${voucher?.VOUCHERNUMBER} failed:`, loopError.message);
+
+        await createAuditLog({
+          action: "VOUCHER_SYNC_RECORD_FAILED",
+          entity: "voucher-sync",
+          metadata: { company, error: loopError.message, voucher: voucher?.VOUCHERNUMBER },
+          logType: "ERROR"
+        });
+      }
+    }
+
+    /* =====================================
+      EXECUTION TIME
+    ===================================== */
+    const executionTime = Date.now() - startTime;
+
+    /* =====================================
+      FINAL SUCCESS LOG
+    ===================================== */
+    await createAuditLog({
+      action: "SYNC_COMPLETE",
+      entity: "voucher-sync",
+      metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, totalRecords: list.length, executionTime }
+    });
+
+    /* =====================================
+      FINAL RESPONSE
+    ===================================== */
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Vouchers synced successfully",
+      company,
+      fromDate,
+      toDate,
+      summary: { inserted, updated, ignored, failed, total: list.length, executionTime },
+      data: list.map((voucher) => {
+        const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
+        const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+        const normalizedWithSign = normalized.map(entry => {
+          const { debit, credit } = getSignedAmount(entry);
+          return { ...entry, _debit: debit, _credit: credit };
+        });
+
+        return {
+          guid: voucher?.GUID || null,
+          master_id: voucher?.MASTERID || null,
+          alter_id: voucher?.ALTERID || null,
+          company_name: company,
+          date: clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
+          voucher_type: clean(voucher?.VOUCHERTYPENAME),
+          voucher_number: clean(voucher?.VOUCHERNUMBER),
+          party_ledger_name: clean(voucher?.PARTYLEDGERNAME),
+          narration: clean(voucher?.NARRATION),
+          ledger_entries: normalizedWithSign
+        };
+      })
+    });
+  } catch (err) {
+    /* =====================================
+      ERROR LOG
+    ===================================== */
+    await createAuditLog({
+      action: "SYNC_FAILED",
+      entity: "voucher-sync",
+      metadata: { company, fromDate, toDate, error: err.message },
+      logType: "ERROR"
+    });
+    console.log("❌ VOUCHER SYNC ERROR:", err.message);
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+>>>>>>> c3ab92d (Update sync routes, app, challan PDF and XML builder)
   } finally {
     client.release();
   }
 });
 
+<<<<<<< HEAD
 /* ===================================================
   LEDGERS SYNC
 =================================================== */
 router.get("/ledgers", async (req, res) => {
+=======
+
+    /* ===================================================
+      PARENT GROUPS SYNC (UPDATED WITH company_id)
+    =================================================== */
+
+    router.get("/parent-groups", async (req, res) => {
+      const company = req.query.company;
+      if (!company) {
+        return res.status(400).json({
+          status: "error",
+          message: "company required"
+        });
+      }
+      
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        
+        // Get company_id using helper
+        const companyId = await getCompanyId(company, client);
+        if (!companyId) {
+          throw new Error("Company not found");
+        }
+        
+        const xml = getParentGroupsXML(company);
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        const parsed = await parseXML(responseXML);
+        
+        const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
+        const list = Array.isArray(collection) ? collection : collection ? [collection] : [];
+        
+        let inserted = 0, updated = 0, ignored = 0;
+        
+        for (const group of list) {
+          const groupName = clean(
+            group?.NAME ||
+            (Array.isArray(group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME)
+              ? group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME?.[0]
+              : group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME)
+          );
+          
+          if (!groupName) continue;
+          
+          const originalGuid = group?.GUID || group?.$?.GUID || null;
+          const guid = originalGuid || generateFallbackGuid(company, groupName, 'parentgroup');
+          const masterId = group?.MASTERID || group?.$?.MASTERID || null;
+          const alterId = group?.ALTERID || group?.$?.ALTERID || null;
+          
+          const result = await upsertRecord(
+            "app_test.parent_groups", guid, masterId, alterId,
+            [companyId, company, groupName],
+            ["company_id", "company_name", "group_name"],
+            client
+          );
+          
+          if (result.action === "inserted") inserted++;
+          else if (result.action === "updated") updated++;
+          else ignored++;
+        }
+        
+        await client.query("COMMIT");
+        
+        return res.status(200).json({
+          status: "success",
+          source: "tally",
+          message: "Parent groups synced successfully",
+          company,
+          summary: { inserted, updated, ignored, total: list.length }
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.log("❌ PARENT GROUPS ERROR:", err.message);
+        return res.status(500).json({
+          status: "error",
+          message: err.message
+        });
+      } finally {
+        client.release();
+      }
+    });
+
+    /* ===================================================
+      GROUP BALANCES SYNC (UPDATED WITH company_id)
+    =================================================== */
+
+
+router.get("/payable-debtors", async (req, res) => {
+>>>>>>> c3ab92d (Update sync routes, app, challan PDF and XML builder)
   const company = req.query.company;
   if (!company) {
     return res.status(400).json({ status: "error", message: "company query parameter required" });
