@@ -24,5 +24,9 @@ export async function resolveUserId(req) {
     return req.connectorMachine.userId;
   }
 
+  if (req.internalUserId) {
+    return req.internalUserId;
+  }
+
   return null;
 }
