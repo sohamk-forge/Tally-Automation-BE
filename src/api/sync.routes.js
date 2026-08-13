@@ -1501,64 +1501,167 @@ router.post("/manual", async (req, res) => {
 
 /* ===================================================
   DASHBOARD SYNC (AUTO)
+  Syncs the company currently opened/selected in dashboard.
+
+  IMPORTANT:
+  The dashboard must send:
+    {
+      "companyId": 12
+    }
+
+  We DO NOT select the latest paired company.
+  We use the exact companyId selected in the dashboard
+  and verify that it belongs to the logged-in user.
 =================================================== */
 router.post("/manual-auto", async (req, res) => {
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
+    const { companyId } = req.body;
+
+    // -------------------------------------------------
+    // VALIDATE COMPANY ID
+    // -------------------------------------------------
+    const numericCompanyId = Number(companyId);
+
+    if (!companyId || !Number.isInteger(numericCompanyId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid companyId is required"
+      });
+    }
+
+    // -------------------------------------------------
+    // GET THE EXACT SELECTED COMPANY
+    // AND VERIFY USER OWNS/IS PAIRED WITH IT
+    // -------------------------------------------------
     const companyResult = await pool.query(
       `
-      SELECT c.id, c.name, c.financial_year_start, c.financial_year_end
+      SELECT
+        c.id,
+        c.name,
+        c.financial_year_start,
+        c.financial_year_end
       FROM app_test.companies c
-      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
-      WHERE cpt.user_id = $1
+      JOIN app_test.connector_pairing_tokens cpt
+        ON cpt.company_id = c.id
+      WHERE c.id = $1
+        AND cpt.user_id = $2
         AND cpt.is_used = TRUE
         AND c.financial_year_start IS NOT NULL
         AND c.financial_year_end IS NOT NULL
       ORDER BY cpt.created_at DESC
       LIMIT 1
       `,
-      [userId]
+      [numericCompanyId, userId]
     );
 
     if (!companyResult.rows.length) {
-      return res.status(400).json({ status: "error", message: "No synced company found for this user." });
+      return res.status(403).json({
+        status: "error",
+        message: "This company is not synced or not paired with your account."
+      });
     }
 
-    const { id: syncCompanyId, name: company_name, financial_year_start: from_year, financial_year_end: to_year } = companyResult.rows[0];
+    // -------------------------------------------------
+    // EXACT COMPANY SELECTED FROM DASHBOARD
+    // -------------------------------------------------
+    const {
+      id: syncCompanyId,
+      name: company_name,
+      financial_year_start: from_year,
+      financial_year_end: to_year
+    } = companyResult.rows[0];
 
-    const payload = { company: company_name, fromYear: from_year, toYear: to_year };
+    console.log("===============================================");
+    console.log("🔄 DASHBOARD AUTO SYNC");
+    console.log("===============================================");
+    console.log("User ID       :", userId);
+    console.log("Company ID    :", syncCompanyId);
+    console.log("Company       :", company_name);
+    console.log("From Year     :", from_year);
+    console.log("To Year       :", to_year);
+    console.log("===============================================");
 
+    // -------------------------------------------------
+    // CREATE JOB PAYLOAD
+    // -------------------------------------------------
+    const payload = {
+      company: company_name,
+      companyId: syncCompanyId,
+      fromYear: from_year,
+      toYear: to_year
+    };
+
+    // -------------------------------------------------
+    // CREATE JOB LOG
+    // -------------------------------------------------
     const result = await pool.query(
       `
-      INSERT INTO app_test.job_logs (job_type, status, payload, user_id)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO app_test.job_logs
+        (job_type, status, payload, user_id)
+      VALUES
+        ($1, $2, $3, $4)
       RETURNING id
       `,
-      ["manual_sync", "pending", payload, userId]
+      [
+        "manual_sync",
+        "pending",
+        payload,
+        userId
+      ]
     );
 
     const jobLogId = result.rows[0].id;
 
+    // -------------------------------------------------
+    // ADD SYNC JOB TO BULLMQ
+    // -------------------------------------------------
     await syncQueue.add(
       "manual-sync",
-      { jobLogId, company: company_name, fromYear: from_year, toYear: to_year, userId },
-      { ...SYNC_JOB_OPTIONS, jobId: getSyncJobId(jobLogId) }
+      {
+        jobLogId,
+        company: company_name,
+        companyId: syncCompanyId,
+        fromYear: from_year,
+        toYear: to_year,
+        userId
+      },
+      {
+        ...SYNC_JOB_OPTIONS,
+        jobId: getSyncJobId(jobLogId)
+      }
     );
 
+    // -------------------------------------------------
+    // RESPONSE
+    // -------------------------------------------------
     return res.status(200).json({
       status: "success",
       message: "Dashboard sync started successfully.",
-      data: { jobId: jobLogId, company: company_name, fromYear: from_year, toYear: to_year, status: "pending" }
+      data: {
+        jobId: jobLogId,
+        companyId: syncCompanyId,
+        company: company_name,
+        fromYear: from_year,
+        toYear: to_year,
+        status: "pending"
+      }
     });
 
   } catch (err) {
-    console.log(err);
-    return res.status(500).json({ status: "error", message: err.message });
+    console.error(
+      "❌ DASHBOARD AUTO SYNC ERROR:",
+      err.message
+    );
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
   }
 });
-
 /* ===================================================
   UNITS SYNC
 =================================================== */
