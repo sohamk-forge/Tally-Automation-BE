@@ -109,7 +109,7 @@ const STYLE = `
 
   .delivery-block { font-size: 11px; text-align: right; }
   .delivery-block .section-label {
-    font-size: 10px; text-transform: uppercase; color: #111;
+    font-size: 10px; text-transform: uppercase; color: #6b7280;
     letter-spacing: 0.04em; margin-bottom: 2px;
   }
   .delivery-block .name { font-weight: bold; }
