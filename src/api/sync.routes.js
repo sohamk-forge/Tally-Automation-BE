@@ -106,11 +106,20 @@ const parseAmount = (value) => {
 /* ===================================================
   COMPANY ID HELPER
 =================================================== */
-async function getCompanyId(company, client = null) {
+async function getCompanyId(userId, company, client = null) {
   const dbClient = client || pool;
   const result = await dbClient.query(
-    `SELECT id FROM app_test.companies WHERE name = $1`,
-    [company]
+    `
+    SELECT c.id
+    FROM app_test.companies c
+    JOIN app_test.connector_pairing_tokens cpt
+      ON cpt.company_id = c.id
+    WHERE cpt.user_id = $1
+      AND cpt.is_used = TRUE
+      AND c.name = $2
+    LIMIT 1
+    `,
+    [userId, company]
   );
   return result.rows[0]?.id || null;
 }
@@ -411,7 +420,7 @@ router.get("/ledgers", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -574,7 +583,7 @@ router.get("/group-summary-bank", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -703,7 +712,7 @@ router.get("/voucher-sync", async (req, res) => {
       metadata: { company, fromDate, toDate, voucherType, party }
     });
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -916,7 +925,7 @@ router.get("/parent-groups", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -992,7 +1001,7 @@ router.get("/payable-debtors", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1083,7 +1092,7 @@ router.get("/all-parent-groups", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1187,7 +1196,19 @@ router.get("/profit-loss-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyResult = await client.query(`SELECT id FROM app_test.companies WHERE name = $1`, [company]);
+    const companyResult = await client.query(
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt
+        ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND c.name = $2
+      LIMIT 1
+      `,
+      [userId, company]
+    );
     const companyId = companyResult.rows[0]?.id;
     if (!companyId) throw new Error("Company not found");
 
@@ -1299,7 +1320,7 @@ router.get("/stock-group-summary-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1437,8 +1458,17 @@ router.post("/manual", async (req, res) => {
     const trimmedCompany = company.trim();
 
     const existingCompany = await pool.query(
-      `SELECT id FROM app_test.companies WHERE name = $1`,
-      [trimmedCompany]
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt
+        ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND c.name = $2
+      LIMIT 1
+      `,
+      [userId, trimmedCompany]
     );
 
     if (!existingCompany.rows.length) {
@@ -1677,7 +1707,7 @@ router.get("/units-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1746,7 +1776,7 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1878,7 +1908,7 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -1973,7 +2003,7 @@ router.get("/godown-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -2152,7 +2182,7 @@ router.get("/company-details", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
@@ -2287,7 +2317,7 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
