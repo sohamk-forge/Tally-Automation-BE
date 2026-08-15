@@ -3,6 +3,10 @@
 // GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
 // quotation.gst_enabled is true — set upstream in quotation.service.js
 // from app_test.company_details.
+//
+// Versioned quotations (quotation_number like "0001.01") render an extra
+// "Revision NN" badge next to the quotation number so it's obvious the PDF
+// is not the original document.
 
 import puppeteer from "puppeteer";
 
@@ -56,6 +60,7 @@ function buildItemRows(items = [], gstEnabled = true) {
         </td>
         <td>${escapeHtml(it.hsn_code || "-")}</td>
         <td class="num">${formatQty(it.qty)}</td>
+        <td>${escapeHtml(it.unit || "-")}</td>
         <td class="num">${formatCurrency(it.rate)}</td>
         <td class="num">${Number(it.discount_percent) > 0 ? Number(it.discount_percent).toFixed(2).replace(/\.00$/, "") + "%" : "-"}</td>
         ${gstEnabled ? `<td class="num">${escapeHtml(it.gst_rate)}</td>` : ""}
@@ -89,6 +94,10 @@ function buildHtml(quotation) {
   const gstEnabled = quotation.gst_enabled ?? true;
   const isInterstate = Number(total_igst) > 0;
 
+  const versionSeq  = Number(quotation.version_seq) || 0;
+  const isRevision  = versionSeq > 0;
+  const baseNumber  = String(quotation_number || "").split(".")[0];
+
   const totalDiscount = items.reduce((sum, it) => {
     const gross = (Number(it.qty) || 0) * (Number(it.rate) || 0);
     return sum + (gross - (Number(it.taxable_amount) || 0));
@@ -119,8 +128,13 @@ function buildHtml(quotation) {
       }
       .page-content { flex: 1 0 auto; }
 
-      .header-top { text-align: right; margin-bottom: 2px; }
+      .header-top { text-align: right; margin-bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
       .doc-title { font-size: 18px; font-weight: 700; color: #2563eb; letter-spacing: 0.03em; }
+      .revision-badge {
+        display: inline-block; font-size: 10.5px; font-weight: 700;
+        color: #b45309; background: #fef3c7; border: 1px solid #fcd34d;
+        border-radius: 10px; padding: 2px 9px; letter-spacing: 0.02em;
+      }
 
       .header-main {
         display: flex;
@@ -194,6 +208,7 @@ function buildHtml(quotation) {
   <div class="page">
 
     <div class="header-top">
+      ${isRevision ? `<span class="revision-badge">REVISION ${String(versionSeq).padStart(2, "0")} · OF ${escapeHtml(baseNumber)}</span>` : ""}
       <div class="doc-title">QUOTATION</div>
     </div>
 
@@ -225,7 +240,7 @@ function buildHtml(quotation) {
       <thead>
         <tr>
           <th>#</th><th>Item</th><th>HSN</th>
-          <th class="num">Qty</th><th class="num">Rate</th><th class="num">Disc %</th>
+          <th class="num">Qty</th><th>Unit</th><th class="num">Rate</th><th class="num">Disc %</th>
           ${gstEnabled ? '<th class="num">GST %</th>' : ""}
           <th class="num">Amount</th>
         </tr>
@@ -258,7 +273,7 @@ function buildHtml(quotation) {
     <div class="footer-wrap">
       <div class="footer-divider"></div>
       <div class="footer">
-        <div>This is a computer generated quotation.</div>
+        <div>This is a computer generated quotation${isRevision ? ` (revision ${String(versionSeq).padStart(2, "0")})` : ""}.</div>
       </div>
     </div>
 

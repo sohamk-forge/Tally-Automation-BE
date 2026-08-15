@@ -208,8 +208,7 @@ router.get("/jobs", verifyConnectorApiKey, async (req, res) => {
         id: job.id,
         job_type: job.job_type,
         request_xml: job.request_xml,
-        payload: job.payload,
-        tally_url: process.env.TALLY_URL || "http://localhost:9000"
+        payload: job.payload
       }))
     });
 
@@ -224,13 +223,20 @@ router.get("/jobs", verifyConnectorApiKey, async (req, res) => {
 
 router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
   const client = await pool.connect();
+  let transactionStarted = false;
 
   try {
     const { userId } = req.connectorMachine;
-    const { job_id: jobId, status, response_xml: responseXml, result } = req.body;
+    const {
+      job_id: jobId,
+      status,
+      response_xml: responseXml,
+      result
+    } = req.body;
 
     if (!jobId || !status) {
       client.release();
+
       return res.status(400).json({
         status: "error",
         message: "jobId and status are required"
@@ -252,22 +258,19 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
 
     if (!job) {
       client.release();
+
       return res.status(404).json({
         status: "error",
         message: "Job not found"
       });
     }
 
-    await client.query("BEGIN");
+    // =========================================
+    // RECORD CONNECTOR RESULT
+    // =========================================
 
-    await processConnectorJobResult(client, {
-      id: job.id,
-      job_type: job.job_type,
-      status,
-      response_xml: responseXml || null,
-      result: result || null,
-      payload: job.payload
-    });
+    await client.query("BEGIN");
+    transactionStarted = true;
 
     await client.query(
       `
@@ -280,87 +283,97 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
         completed_at = NOW(),
         updated_at = NOW()
       WHERE id = $5
+        AND user_id = $6
       `,
       [
         status,
         responseXml || null,
         result || null,
-        status === "failed" ? (result?.line_error || null) : null,
-        jobId
+        status === "failed"
+          ? (result?.line_error || null)
+          : null,
+        jobId,
+        userId
       ]
     );
 
     await client.query("COMMIT");
+    transactionStarted = false;
 
-    /* =========================================
-       CHAIN OPENING STOCK (after COMMIT)
-       A stock item does not exist in Tally until the connector has actually
-       run its create job, so the successful create result is the only safe
-       point to queue the opening-balance alteration.
-       - Runs AFTER commit on purpose: Redis is not part of the transaction,
-         so enqueueing inside it could leave an orphan job if we rolled back.
-       - Uses `pool`, not `client`: the transaction is finished and the client
-         is about to be released.
-       - Conditions on the persisted row rather than the connector's reported
-         status string, so a 'success'/'completed'/'SUCCESS' casing mismatch
-         can't silently skip the chain.
-       - The opening_quantity > 0 guard stops plain item creations from
-         queueing a pointless alter that pushes zeros to Tally.
-       - userId is carried forward from the original create job's payload
-         (requested_by_user_id), so pushAlterStockItem.worker.js can route
-         to the SAME user's connector as the create job — not an ambiguous
-         "most recently paired token" lookup.
-       - Wrapped in its own try/catch: the result is already committed, so a
-         Redis hiccup must not turn a recorded result into a 500 and make the
-         connector retry a job that already succeeded.
-    ========================================= */
+    // =========================================
+    // BUSINESS PROCESSING
+    // =========================================
 
-    if (job.job_type === "stock_item") {
+    if (job.job_type !== "sync") {
       try {
-        const stockItemId = job.payload?.stock_item_id;
-        const requestedByUserId = job.payload?.requested_by_user_id;
-
-        if (stockItemId) {
-          const { rows } = await pool.query(
-            `
-            SELECT opening_quantity
-            FROM ${DB_SCHEMA}.push_stock_item
-            WHERE id = $1
-              AND status = 'success'
-            `,
-            [stockItemId]
-          );
-
-          if (Number(rows[0]?.opening_quantity) > 0) {
-
-            if (!requestedByUserId) {
-              console.error(
-                `⚠️ Cannot chain opening stock for item ${stockItemId} — original job payload missing requested_by_user_id`
-              );
-            } else {
-              await alterStockItemQueue.add(
-                "push-alter-stock-item",
-                {
-                  stockItemId,
-                  userId: requestedByUserId
-                },
-                {
-                  ...ALTER_STOCK_ITEM_JOB_OPTIONS,
-                  jobId: `${stockItemId}-${Date.now()}`
-                }
-              );
-
-              console.log(`🔗 Opening stock chained for stock item ${stockItemId} (User: ${requestedByUserId})`);
-            }
-          }
-        }
-      } catch (chainError) {
+        await processConnectorJobResult(pool, {
+          id: job.id,
+          job_type: job.job_type,
+          status,
+          response_xml: responseXml || null,
+          result: result || null,
+          payload: job.payload
+        });
+      } catch (processingError) {
         console.error(
-          `⚠️ Failed to chain opening stock for job ${jobId}:`,
-          chainError.message
+          `⚠️ Business processing failed for connector job ${jobId}:`,
+          processingError.message
         );
       }
     }
+
+    // =========================================
+    // STOCK ITEM CHAIN
+    // =========================================
+
+   if (job.job_type === "stock_item") {
+  try {
+    const stockItemId = job.payload?.stock_item_id;
+    const requestedByUserId = job.payload?.requested_by_user_id;
+
+    if (stockItemId) {
+      const { rows } = await pool.query(
+        `
+        SELECT opening_quantity
+        FROM ${DB_SCHEMA}.push_stock_item
+        WHERE id = $1
+          AND status = 'success'
+        `,
+        [stockItemId]
+      );
+
+      if (Number(rows[0]?.opening_quantity) > 0) {
+
+        if (!requestedByUserId) {
+          console.error(
+            `⚠️ Cannot chain opening stock for item ${stockItemId} — original job payload missing requested_by_user_id`
+          );
+        } else {
+          await alterStockItemQueue.add(
+            "push-alter-stock-item",
+            {
+              stockItemId,
+              userId: requestedByUserId
+            },
+            {
+              ...ALTER_STOCK_ITEM_JOB_OPTIONS,
+              jobId: `${stockItemId}-${Date.now()}`
+            }
+          );
+
+          console.log(
+            `🔗 Opening stock chained for stock item ${stockItemId} (User: ${requestedByUserId})`
+          );
+        }
+      }
+    }
+  } catch (chainError) {
+    console.error(
+      `⚠️ Failed to chain opening stock for job ${jobId}:`,
+      chainError.message
+    );
+  }
+}
 
     return res.status(200).json({
       status: "success",
@@ -368,12 +381,18 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+
+    if (transactionStarted) {
+      await client.query("ROLLBACK");
+    }
+
     console.error("Connector Job Result Error:", err);
+
     return res.status(500).json({
       status: "error",
       message: err.message
     });
+
   } finally {
     client.release();
   }

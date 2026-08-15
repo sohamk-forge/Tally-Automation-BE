@@ -108,6 +108,13 @@ const SHARED_STYLE = `
 
   .ledger-transaction { padding: 7px 8px; border-top: 1px solid #000; font-size: 10.5px; background: #fafbfc; }
   .ledger-transaction .title { font-weight: bold; color: #1a5fb4; }
+   .narration-block {
+  border-top: 1px solid #000;
+  padding: 6px 8px;
+  font-size: 10.5px;
+  word-break: break-word;
+}
+.narration-block strong { color: #333; }
 </style>`;
 
 function headerHtml(company, title) {
@@ -140,7 +147,6 @@ function signatureHtml(company) {
 function invoiceFooterHtml(company) {
   return `
 <div class="jurisdiction-footer">
-  SUBJECT TO ${esc((company.state || "").toUpperCase())} JURISDICTION<br/>
   This is a Computer Generated Invoice
 </div>`;
 }
@@ -149,15 +155,44 @@ function wrap(bodyHtml) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8" />${SHARED_STYLE}</head><body><div class="sheet">${bodyHtml}</div></body></html>`;
 }
 
+// ---------- round off row builder shared by purchase + sales ----------
+
+/**
+ * Renders the "Round Off" row for the items table, if a round-off amount
+ * was extracted from ledger_entries. Negative amounts (debit round-off,
+ * i.e. total was rounded down) are shown with a leading "(-)" the way
+ * Tally itself prints it; positive amounts (credit round-off, rounded up)
+ * are shown plain.
+ */
+function buildRoundOffRowHtml(roundOff) {
+  if (!roundOff) return "";
+  const sign = roundOff < 0 ? "(-) " : "";
+  return `<tr><td colspan="6"><em>Round Off</em></td><td class="num">${sign}${money(Math.abs(roundOff))}</td></tr>`;
+}
+
 // ---------- tax-table builder shared by purchase + sales ----------
 
-function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal) {
+function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal, chargesTotal = 0) {
   const grouped = {};
   for (const item of items) {
     const key = item.hsnSac || "N/A";
     if (!grouped[key]) grouped[key] = { hsnSac: key, taxableValue: 0 };
     grouped[key].taxableValue += item.amount;
   }
+
+  // additionalCharges (e.g. Handling Charges) carry no HSN of their own but
+  // are still part of the value GST was calculated on. Apportion them into
+  // each group's taxableValue using that group's existing item-value share,
+  // so the displayed rate (amt / taxableValue) reflects the true rate
+  // instead of being inflated by an undercounted denominator.
+  const totalItemTaxable = Object.values(grouped).reduce((s, g) => s + g.taxableValue, 0) || 1;
+  if (chargesTotal) {
+    for (const g of Object.values(grouped)) {
+      const itemShare = g.taxableValue / totalItemTaxable;
+      g.taxableValue += chargesTotal * itemShare;
+    }
+  }
+
   const totalTaxable = Object.values(grouped).reduce((s, g) => s + g.taxableValue, 0) || 1;
 
   return Object.values(grouped).map((g) => {
@@ -176,7 +211,8 @@ function buildTaxRows(items, cgstTotal, sgstTotal, igstTotal) {
 }
 
 function buildTaxTableHtml(v) {
-  const taxRows = buildTaxRows(v.items, v.cgst, v.sgst, v.igst);
+  const chargesTotal = (v.additionalCharges || []).reduce((s, c) => s + c.amount, 0);
+  const taxRows = buildTaxRows(v.items, v.cgst, v.sgst, v.igst, chargesTotal);
   const isInterstate = v.igst > 0;
 
   if (isInterstate) {
@@ -246,7 +282,7 @@ function buildContraHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank A/C</td>
@@ -292,7 +328,7 @@ function buildJournalHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Party</td>
@@ -323,14 +359,13 @@ function buildPaymentHtml(v) {
   const openLabel = v.openingBalance >= 0 ? "(Dr)" : "(Cr)";
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
-  const partyRows = v.parties.map(
-    (p) => `
-      <tr>
-        <td>${esc(p.partyName)}${v.narration ? `<br/>Narration : ${esc(v.narration)}` : ""}</td>
-        <td class="num">${money(p.amount)}</td>
-      </tr>`
-  ).join("");
-
+ const partyRows = v.parties.map(
+  (p) => `
+    <tr>
+      <td>${esc(p.partyName)}</td>
+      <td class="num">${money(p.amount)}</td>
+    </tr>`
+).join("");
   return wrap(`
     ${headerHtml(v.company, "Payment Voucher")}
     <table class="info-table">
@@ -340,7 +375,7 @@ function buildPaymentHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
@@ -376,12 +411,12 @@ function buildReceiptHtml(v) {
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
   const partyRows = v.parties.map(
-    (p) => `
-      <tr>
-        <td>${esc(p.partyName)}${v.narration ? `<br/>Narration : ${esc(v.narration)}` : ""}</td>
-        <td class="num">${money(p.amount)}</td>
-      </tr>`
-  ).join("");
+  (p) => `
+    <tr>
+      <td>${esc(p.partyName)}</td>
+      <td class="num">${money(p.amount)}</td>
+    </tr>`
+).join("");
 
   return wrap(`
     ${headerHtml(v.company, "Receipt Voucher")}
@@ -392,7 +427,7 @@ function buildReceiptHtml(v) {
       </colgroup>
       <tr>
         <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Date</td><td>${esc(v.date)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
         <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
@@ -419,6 +454,8 @@ function buildReceiptHtml(v) {
       <div>Total : ${money(v.amount)}</div>
     </div>
     <div class="amount-words">${esc(amountToWords(v.amount))}</div>
+${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
+
     ${signatureHtml(v.company)}
   `);
 }
@@ -430,15 +467,15 @@ function buildPurchaseHtml(v) {
         <td>${idx + 1}</td>
         <td><strong>${esc(item.stockItemName)}</strong></td>
         <td>${esc(item.hsnSac)}</td>
-        <td class="num">${esc(item.quantity)}</td>
-        <td class="num">${money(item.rate)}</td>
+        <td class="num">${item.quantity ? esc(item.quantity) : "-"}</td>
+        <td class="num">${item.rate ? money(item.rate) : "-"}</td>
         <td>${esc(item.unit)}</td>
         <td class="num">${money(item.amount)}</td>
       </tr>`
   ).join("");
 
   const chargeRows = (v.additionalCharges || [])
-    .map((c) => `<tr><td colspan="6"><em>${esc(v.narration ? v.narration : "Total")}</em></td><td class="num">${money(c.amount)}</td></tr>`)
+    .map((c) => `<tr><td colspan="6"><em>${esc(c.label)}</em></td><td class="num">${money(c.amount)}</td></tr>`)
     .join("");
 
   const isInterstate = v.igst > 0;
@@ -448,15 +485,21 @@ function buildPurchaseHtml(v) {
       <tr><td colspan="6"><em>Cgst</em></td><td class="num">${money(v.cgst)}</td></tr>
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst;
+  const roundOffRow = buildRoundOffRowHtml(v.roundOff);
+const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Purchase Invoice")}
     <table class="info-table">
+      <colgroup>
+        <col style="width:16%"><col style="width:12%">
+        <col style="width:8%"><col style="width:14%">
+        <col style="width:16%"><col style="width:34%">
+      </colgroup>
       <tr>
-        <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Dated</td><td>${esc(v.date)}</td>
-        <td class="label">Supplier Invoice No.</td><td>${esc(v.supplierInvoiceNo)}</td>
+        <td class="label">Invoice Voucher No :</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
+        <td class="label">Supplier Invoice No :</td><td>${esc(v.supplierInvoiceNo)}</td>
       </tr>
     </table>
     <div class="party-block">
@@ -477,6 +520,7 @@ function buildPurchaseHtml(v) {
       ${itemRows}
       ${chargeRows}
       ${taxLineRows}
+      ${roundOffRow}
       <tr class="total-row">
         <td colspan="6">Total</td><td class="num">Rs. ${money(grandTotal)}</td>
       </tr>
@@ -488,6 +532,7 @@ function buildPurchaseHtml(v) {
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
+    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);
@@ -500,15 +545,15 @@ function buildSalesHtml(v) {
         <td>${idx + 1}</td>
         <td><strong>${esc(item.stockItemName)}</strong></td>
         <td>${esc(item.hsnSac)}</td>
-        <td class="num">${esc(item.quantity)}</td>
-        <td class="num">${money(item.rate)}</td>
+        <td class="num">${item.quantity ? esc(item.quantity) : "-"}</td>
+        <td class="num">${item.rate ? money(item.rate) : "-"}</td>
         <td>${esc(item.unit)}</td>
         <td class="num">${money(item.amount)}</td>
       </tr>`
   ).join("");
 
   const chargeRows = (v.additionalCharges || [])
-    .map((c) => `<tr><td colspan="6"><em>${esc(v.narration ? v.narration : "Total")}</em></td><td class="num">${money(c.amount)}</td></tr>`)
+    .map((c) => `<tr><td colspan="6"><em>${esc(c.label)}</em></td><td class="num">${money(c.amount)}</td></tr>`)
     .join("");
 
   const isInterstate = v.igst > 0;
@@ -518,15 +563,21 @@ function buildSalesHtml(v) {
       <tr><td colspan="6"><em>Cgst</em></td><td class="num">${money(v.cgst)}</td></tr>
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
-  const grandTotal = v.total + v.cgst + v.sgst + v.igst;
+  const roundOffRow = buildRoundOffRowHtml(v.roundOff);
+const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Tax Invoice")}
     <table class="info-table">
+      <colgroup>
+        <col style="width:16%"><col style="width:12%">
+        <col style="width:8%"><col style="width:14%">
+        <col style="width:16%"><col style="width:34%">
+      </colgroup>
       <tr>
-        <td class="label">Invoice Voucher No.</td><td>${esc(v.voucherNumber)}</td>
-        <td class="label">Dated</td><td>${esc(v.date)}</td>
-        <td class="label">Buyer's Order No.</td><td>${esc(v.buyerOrderNo)}</td>
+        <td class="label">Invoice Voucher No :</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Date :</td><td>${esc(v.date)}</td>
+        <td class="label">Buyer's Order No :</td><td>${esc(v.buyerOrderNo)}</td>
       </tr>
     </table>
     <div class="party-block">
@@ -553,6 +604,7 @@ function buildSalesHtml(v) {
       ${itemRows}
       ${chargeRows}
       ${taxLineRows}
+      ${roundOffRow}
       <tr class="total-row">
         <td colspan="6">Total</td><td class="num">Rs. ${money(grandTotal)}</td>
       </tr>
@@ -564,6 +616,7 @@ function buildSalesHtml(v) {
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
+    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);

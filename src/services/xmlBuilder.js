@@ -1020,88 +1020,36 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
-
 export const getStockGroupSummaryXML = (company) => {
   return `
 <ENVELOPE>
- 
   <HEADER>
- 
     <VERSION>1</VERSION>
- 
-    <TALLYREQUEST>
-      Export
-    </TALLYREQUEST>
- 
-    <TYPE>
-      Collection
-    </TYPE>
- 
-    <ID>
-      StockItemSummary
-    </ID>
- 
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockItemSummary</ID>
   </HEADER>
- 
   <BODY>
- 
     <DESC>
- 
       <STATICVARIABLES>
- 
-        <SVCURRENTCOMPANY>
-          ${company}
-        </SVCURRENTCOMPANY>
- 
-        <SVEXPORTFORMAT>
-          $$SysName:XML
-        </SVEXPORTFORMAT>
- 
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
- 
       <TDL>
- 
         <TDLMESSAGE>
- 
-          <COLLECTION
-            NAME="StockItemSummary"
-          >
- 
-            <TYPE>
-              StockItem
-            </TYPE>
- 
-          <FETCH>
- 
-  NAME,
- 
-  PARENT,
- 
-  HSNDETAILS.LIST,
- 
-  GSTDETAILS.LIST,
- 
-  STANDARDPRICE,
- 
-  CLOSINGBALANCE,
- 
-  CLOSINGVALUE
- 
-</FETCH>
- 
+          <COLLECTION NAME="StockItemSummary">
+            <TYPE>StockItem</TYPE>
+            <FETCH>
+              NAME, PARENT, BASEUNITS, HSNDETAILS.LIST,
+              GSTDETAILS.LIST, STANDARDPRICE,
+              CLOSINGBALANCE, CLOSINGVALUE
+            </FETCH>
           </COLLECTION>
- 
         </TDLMESSAGE>
- 
       </TDL>
- 
     </DESC>
- 
   </BODY>
- 
-</ENVELOPE>
- 
-`;
+</ENVELOPE>`;
 };
 /* ===================================================
    SIMPLE UNITS XML
@@ -1411,7 +1359,6 @@ export const getGodownsXML = (company) => {
 `;
 
 };
-
 export const getSalesGroupXML = (company) => {
   return `
 <ENVELOPE>
@@ -1430,15 +1377,19 @@ export const getSalesGroupXML = (company) => {
    <TDL>
     <TDLMESSAGE>
      <SYSTEM TYPE="Formulae" NAME="SalesGroupFilter">
-      $$IsEqual:$Name:"Sales Account" OR $$IsEqual:$Name:"Sales Accounts"
+      $$IsEqual:$ReservedName:"Sales Accounts"
      </SYSTEM>
      <COLLECTION NAME="SalesGroupOnly">
       <TYPE>Group</TYPE>
       <FILTERS>SalesGroupFilter</FILTERS>
       <FETCH>Name</FETCH>
+      <FETCH>ReservedName</FETCH>
       <FETCH>Parent</FETCH>
       <FETCH>OpeningBalance</FETCH>
       <FETCH>ClosingBalance</FETCH>
+      <FETCH>GUID</FETCH>
+      <FETCH>MasterID</FETCH>
+      <FETCH>AlterID</FETCH>
      </COLLECTION>
     </TDLMESSAGE>
    </TDL>
@@ -1447,7 +1398,6 @@ export const getSalesGroupXML = (company) => {
 </ENVELOPE>
   `;
 };
-
 export const getPurchaseGroupXML = (company) => {
   return `
 <ENVELOPE>
@@ -1466,15 +1416,19 @@ export const getPurchaseGroupXML = (company) => {
    <TDL>
     <TDLMESSAGE>
      <SYSTEM TYPE="Formulae" NAME="PurchaseGroupFilter">
-      $$IsEqual:$Name:"Purchase Account" OR $$IsEqual:$Name:"Purchase Accounts"
+      $$IsEqual:$ReservedName:"Purchase Accounts"
      </SYSTEM>
      <COLLECTION NAME="PurchaseGroupOnly">
       <TYPE>Group</TYPE>
       <FILTERS>PurchaseGroupFilter</FILTERS>
       <FETCH>Name</FETCH>
+      <FETCH>ReservedName</FETCH>
       <FETCH>Parent</FETCH>
       <FETCH>OpeningBalance</FETCH>
       <FETCH>ClosingBalance</FETCH>
+      <FETCH>GUID</FETCH>
+      <FETCH>MasterID</FETCH>
+      <FETCH>AlterID</FETCH>
      </COLLECTION>
     </TDLMESSAGE>
    </TDL>
@@ -1588,7 +1542,7 @@ export const getCompanyGSTDetailsXML = (company) => {
 </ENVELOPE>
 `;
 };
-export const getProfitLossReportXML = (company, fromDate, toDate) => {
+export const getProfitLossReportXML = (company) => {
   return `
 <ENVELOPE>
   <HEADER>
@@ -1596,14 +1550,10 @@ export const getProfitLossReportXML = (company, fromDate, toDate) => {
   </HEADER>
 
   <BODY>
-
     <EXPORTDATA>
-
       <REQUESTDESC>
 
-        <REPORTNAME>
-          Profit and Loss
-        </REPORTNAME>
+        <REPORTNAME>Profit and Loss</REPORTNAME>
 
         <STATICVARIABLES>
 
@@ -1615,22 +1565,11 @@ export const getProfitLossReportXML = (company, fromDate, toDate) => {
             ${company}
           </SVCURRENTCOMPANY>
 
-          <SVFROMDATE TYPE="Date">
-            ${fromDate}
-          </SVFROMDATE>
-
-          <SVTODATE TYPE="Date">
-            ${toDate}
-          </SVTODATE>
-
         </STATICVARIABLES>
 
       </REQUESTDESC>
-
     </EXPORTDATA>
-
   </BODY>
-
 </ENVELOPE>
 `;
 };

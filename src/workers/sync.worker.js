@@ -1,6 +1,7 @@
-﻿import axios from "axios";
-import { Worker } from "bullmq";
+﻿import { Worker } from "bullmq";
 import IORedis from "ioredis";
+import axios from "axios";
+
 import pool from "../db/index.js";
 import { SYNC_QUEUE_NAME } from "../queues/sync.queue.js";
 
@@ -10,180 +11,360 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
-async function safeSync(name, fn, results) {
-  try {
-    console.log(`⏳ Syncing ${name}...`);
-    await fn();
-    console.log(`✅ ${name} Synced`);
-    results.push({ name, status: '✅ SUCCESS' });
-  } catch (err) {
-    console.error(`❌ ${name} Failed: ${err.message}`);
-    results.push({ name, status: `❌ FAILED: ${err.message}` });
+/* ===================================================
+  AXIOS CLIENT
+  Only shared, non-user-specific config lives here.
+  "x-user-id" is deliberately NOT set here — this client
+  is a module-level singleton reused across every job the
+  worker processes. Baking a specific userId into its
+  default headers would leak the first job's user into
+  every subsequent job's requests (the same class of bug
+  this whole fix chain has been chasing). Each request
+  below sets "x-user-id" explicitly, per call, from that
+  job's own job.data.userId.
+=================================================== */
+
+const api = axios.create({
+  baseURL: process.env.BASE_URL || "http://localhost:5000",
+  timeout: 300000,
+  headers: {
+    "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
   }
+});
+
+/* ===================================================
+  DATE HELPERS
+  fromYear/toYear come in as plain years (e.g. "2026",
+  "2027") from job.data — Tally's voucher-sync route
+  expects full YYYYMMDD dates, financial-year style
+  (1 Apr fromYear → 31 Mar toYear).
+=================================================== */
+
+function financialYearDates(fromYear, toYear) {
+  const fromDate = `${fromYear}0401`;
+  const toDate = `${toYear}0331`;
+  return { fromDate, toDate };
 }
 
-async function processJob(job) {
-  const { jobLogId, company, fromYear, toYear, userId } = job.data;
-  const id = jobLogId;
+/* ===================================================
+  JOB LOG STATUS HELPERS
+=================================================== */
 
-  const api = axios.create({
-    baseURL: process.env.BASE_URL || "http://localhost:5000",
-    timeout: 300000,
-    headers: {
-      "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
-    }
-  });
-
-  const claimResult = await pool.query(
+async function markJobRunning(jobLogId) {
+  await pool.query(
     `
     UPDATE app_test.job_logs
-    SET
-      status = 'running',
-      started_at = NOW()
+    SET status = 'running', started_at = NOW()
     WHERE id = $1
-      AND status = 'pending'
-    RETURNING id
     `,
-    [id]
+    [jobLogId]
   );
+}
 
-  if (claimResult.rowCount === 0) {
-    console.log(`⚠️ Sync job ${id} already claimed or not pending`);
-    return {
-      skipped: true,
-      reason: "Job already claimed or not pending"
-    };
-  }
+async function markJobCompleted(jobLogId) {
+  await pool.query(
+    `
+    UPDATE app_test.job_logs
+    SET status = 'completed', completed_at = NOW()
+    WHERE id = $1
+    `,
+    [jobLogId]
+  );
+}
 
-  console.log(`\n===== PROCESSING JOB: ${id} =====`);
-  console.log(`Company: ${company} | userId: ${userId}`);
+async function markJobFailed(jobLogId, errorMessage) {
+  await pool.query(
+    `
+    UPDATE app_test.job_logs
+    SET status = 'failed', completed_at = NOW(), error_message = $2
+    WHERE id = $1
+    `,
+    [jobLogId, errorMessage]
+  );
+}
 
-  const finalFromDate = `${fromYear}0401`;
-  const finalToDate = `${toYear}0331`;
+/* ===================================================
+  RUN ONE SYNC STEP
+  Wraps a single api.get() call with consistent logging
+  and error handling, so one step's failure doesn't stop
+  the rest of the sync from attempting to run.
+=================================================== */
 
-  const results = [];
+async function runSyncStep({ label, path, params, userId, results }) {
+  console.log(`\n➡️  [${label}] STARTING`);
+  console.log(`   GET ${path}`, { params, userId });
+
+  const startedAt = Date.now();
 
   try {
-    await Promise.allSettled([
-      safeSync("All Ledgers", () =>
-        api.get("/api/sync/all-ledgers-sync", { params: { company } }), results),
-      safeSync("Banks", () =>
-        api.get("/api/sync/group-summary-bank", { params: { company } }), results),
-      safeSync("Stock", () =>
-        api.get("/api/sync/stock-group-summary-sync", { params: { company } }), results),
-      safeSync("Units", () =>
-        api.get("/api/sync/units-sync", { params: { company } }), results),
-      safeSync("Godowns", () =>
-        api.get("/api/sync/godown-sync", { params: { company } }), results),
-      safeSync("Vouchers", () =>
-        api.get("/api/sync/voucher-sync", {
-          params: { company, fromDate: finalFromDate, toDate: finalToDate }
-        }), results),
-    ]);
+    const response = await api.get(path, {
+      params,
+      headers: {
+        "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET,
+        "x-internal-user-id": String(userId)
+      }
+    });
 
-    await safeSync("Purchase/Sales Ledgers", () =>
-      api.get("/api/sync/purchase-sales-ledgers-sync", { params: { company } }), results);
+    const durationMs = Date.now() - startedAt;
 
-    await safeSync("Payable/Debtors", () =>
-      api.get("/api/sync/payable-debtors", { params: { company } }), results);
-
-    let parentGroups = [];
-    try {
-      const pgResponse = await api.get("/api/sync/parent-groups", { params: { company } });
-      parentGroups = pgResponse?.data?.data || [];
-      console.log(`✅ Parent Groups Synced (${parentGroups.length} groups)`);
-      results.push({ name: "Parent Groups", status: '✅ SUCCESS' });
-    } catch (err) {
-      console.error(`❌ Parent Groups Failed: ${err.message}`);
-      results.push({ name: "Parent Groups", status: `❌ FAILED: ${err.message}` });
+    // GREEN TICK
+    console.log(`✅ [${label}] SYNC COMPLETED (${durationMs}ms)`);
+    if (response.data?.summary) {
+      console.log(`   Summary:`, response.data.summary);
     }
 
-    for (const group of parentGroups) {
-      const groupName = group?.group_name;
-      if (!groupName) continue;
-      await safeSync(`Parent Group: ${groupName}`, () =>
-        api.get("/api/sync/all-parent-groups", {
-          params: { company, groupName }
-        }), results);
-    }
-
-    await safeSync("Profit Loss", () =>
-      api.get("/api/sync/profit-loss-sync", {
-        params: { company, fromDate: finalFromDate, toDate: finalToDate }
-      }), results);
-
-    const failed = results.filter(r => r.status.includes('FAILED'));
-    const success = results.filter(r => r.status.includes('SUCCESS'));
-
-    console.log(`\n========== SYNC SUMMARY ==========`);
-    results.forEach(r => console.log(`${r.status} | ${r.name}`));
-    console.log(`===================================`);
-    console.log(`✅ Passed: ${success.length} | ❌ Failed: ${failed.length}\n`);
-
-    if (failed.length > 0) {
-      const errorSummary = failed
-        .map(r => `${r.name}: ${r.status}`)
-        .join(" | ");
-
-      await pool.query(
-        `
-        UPDATE app_test.job_logs
-        SET
-          status = 'failed',
-          error_message = $1,
-          completed_at = NOW()
-        WHERE id = $2
-        `,
-        [errorSummary, id]
-      );
-
-      console.log(`⚠️ JOB FINISHED WITH FAILURES: ${id} (${failed.length} failed)`);
-
-      return {
-        status: "failed",
-        passed: success.length,
-        failed: failed.length,
-        results
-      };
-    }
-
-    await pool.query(
-      `
-      UPDATE app_test.job_logs
-      SET
-        status = 'completed',
-        error_message = NULL,
-        completed_at = NOW()
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    console.log(`🎉 JOB COMPLETED SUCCESSFULLY: ${id}`);
-
-    return {
-      status: "completed",
-      passed: success.length,
-      failed: 0,
-      results
-    };
+    results.push({
+      step: label,
+      status: "success",
+      durationMs,
+      summary: response.data?.summary || null
+    });
 
   } catch (err) {
-    await pool.query(
-      `UPDATE app_test.job_logs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2`,
-      [`${err.message}`, id]
-    );
-    throw err;
+    const durationMs = Date.now() - startedAt;
+    const status = err.response?.status;
+    const message = err.response?.data?.message || err.message;
+
+    // RED CROSS
+    console.log(`❌ [${label}] SYNC FAILED (${durationMs}ms)`);
+    console.log(`   Status : ${status || "no response"}`);
+    console.log(`   Error  : ${message}`);
+
+    results.push({
+      step: label,
+      status: "failed",
+      durationMs,
+      error: message
+    });
+
+    // Intentionally does NOT re-throw — one step failing (e.g. a
+    // company-specific data issue in Tally) shouldn't prevent the
+    // remaining independent sync steps from being attempted.
   }
 }
 
-const worker = new Worker(SYNC_QUEUE_NAME, async (job) => {
-  return await processJob(job);
-}, { connection, concurrency: 1 });
+/* ===================================================
+  MAIN JOB PROCESSOR
+=================================================== */
 
-worker.on("completed", (job) => {
-  console.log(`SYNC WORKER EXECUTION FINISHED: ${job.id}`, job.returnvalue);
+const worker = new Worker(
+  SYNC_QUEUE_NAME,
+
+  async (job) => {
+    const { jobLogId, company, fromYear, toYear, userId } = job.data;
+
+    console.log("\n=================================================");
+    console.log("🔄 SYNC JOB STARTED");
+    console.log("=================================================");
+    console.log(`Job ID     : ${job.id}`);
+    console.log(`Job Log ID : ${jobLogId}`);
+    console.log(`Company    : ${company}`);
+    console.log(`From Year  : ${fromYear}`);
+    console.log(`To Year    : ${toYear}`);
+    console.log(`User ID    : ${userId}`);
+    console.log("=================================================\n");
+
+    if (!userId) {
+      const msg = `Missing userId for sync job ${job.id} (jobLogId=${jobLogId}) — refusing to run, this would fall back to resolveConnectorForCompany()'s "any live connector for this company" path and could route to the wrong user's Tally.`;
+      console.log(`🚨 ${msg}`);
+      await markJobFailed(jobLogId, msg);
+      throw new Error(msg);
+    }
+
+    await markJobRunning(jobLogId);
+
+    const { fromDate, toDate } = financialYearDates(fromYear, toYear);
+
+    const results = [];
+
+    /* ===============================================
+      RUN EACH SYNC STEP IN SEQUENCE
+      (sequential, not parallel — sendToTallyViaConnector
+      blocks per call inside each route, so running these
+      in parallel would just contend for the same single
+      connector job slot rather than actually speeding
+      anything up.)
+    =============================================== */
+
+    await runSyncStep({
+      label: "COMPANY DETAILS",
+      path: "/api/sync/company-details",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "ALL LEDGERS",
+      path: "/api/sync/all-ledgers-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "BANK ACCOUNTS",
+      path: "/api/sync/group-summary-bank",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "STOCK GROUP SUMMARY",
+      path: "/api/sync/stock-group-summary-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "UNITS",
+      path: "/api/sync/units-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "GODOWNS",
+      path: "/api/sync/godown-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "PURCHASE/SALES LEDGERS",
+      path: "/api/sync/purchase-sales-ledgers-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "PAYABLE/DEBTORS",
+      path: "/api/sync/payable-debtors",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "PARENT GROUPS",
+      path: "/api/sync/parent-groups",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "PROFIT & LOSS",
+      path: "/api/sync/profit-loss-sync",
+      params: { company, fromDate, toDate },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "PROFIT & LOSS SUMMARY",
+      path: "/api/sync/profit-loss-summary-sync",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "VOUCHERS",
+      path: "/api/sync/voucher-sync",
+      params: { company, fromDate, toDate },
+      userId,
+      results
+    });
+
+    /* ===============================================
+      FINAL SUMMARY LOG
+    =============================================== */
+
+    const succeeded = results.filter((r) => r.status === "success").length;
+    const failed = results.filter((r) => r.status === "failed").length;
+
+    console.log("\n=================================================");
+    console.log("📊 SYNC JOB SUMMARY");
+    console.log("=================================================");
+    console.log(`Company        : ${company}`);
+    console.log(`User ID        : ${userId}`);
+    console.log("-------------------------------------------------");
+
+    /*
+     * SHOW EVERY SYNC STEP
+     */
+    results.forEach((r) => {
+      if (r.status === "success") {
+        console.log(`✅ ${r.step}`);
+      } else {
+        console.log(`❌ ${r.step}`);
+        console.log(`   Reason: ${r.error}`);
+      }
+    });
+
+    console.log("-------------------------------------------------");
+    console.log(`Steps Succeeded: ${succeeded}/${results.length}`);
+    console.log(`Steps Failed   : ${failed}/${results.length}`);
+
+    /*
+     * FAILED STEPS DETAILS
+     */
+    if (failed > 0) {
+      console.log("\n❌ FAILED STEPS:");
+      results
+        .filter((r) => r.status === "failed")
+        .forEach((r) => {
+          console.log(`   - ${r.step}: ${r.error}`);
+        });
+    }
+
+    console.log("=================================================\n");
+
+    // The overall job is marked "completed" even if some individual
+    // steps failed — each step already recorded its own success/failure
+    // in `results`, and a partial sync (e.g. vouchers succeeded but
+    // godowns failed) is still meaningful progress, not a hard job
+    // failure. Only a missing userId (checked above) hard-fails the job.
+    await markJobCompleted(jobLogId);
+
+    return {
+      company,
+      userId,
+      totalSteps: results.length,
+      succeeded,
+      failed,
+      results
+    };
+  },
+
+  {
+    connection,
+    concurrency: 1
+  }
+);
+
+worker.on("completed", (job, returnValue) => {
+  console.log(`✅ SYNC WORKER — Job ${job.id} completed:`, {
+    company: returnValue?.company,
+    succeeded: returnValue?.succeeded,
+    failed: returnValue?.failed
+  });
 });
-worker.on("failed", (job, err) => console.error(`SYNC JOB FAILED: ${job?.id}`, err.message));
 
-console.log("SYNC WORKER STARTED (OPTIMIZED - PARALLEL)");
+worker.on("failed", (job, error) => {
+  console.error(`❌ SYNC WORKER — Job ${job?.id} failed:`, error.message);
+});
+
+worker.on("error", (error) => {
+  console.error("❌ SYNC WORKER ERROR:", error.message);
+});
+
+console.log("🚀 Sync Worker Started");
+
+export default worker;

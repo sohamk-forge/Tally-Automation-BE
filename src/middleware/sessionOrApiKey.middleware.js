@@ -25,14 +25,32 @@ const fallbackToApiKey = (req, res, next) => {
   // Same-process internal calls (e.g. sync.worker.js hitting its own
   // /api/sync/* routes over HTTP) — not a browser or the desktop connector,
   // so neither a session nor a connector API key applies here.
-  const internalSecret = req.headers["x-internal-secret"];
-  if (
-    internalSecret &&
-    process.env.INTERNAL_SERVICE_SECRET &&
-    internalSecret === process.env.INTERNAL_SERVICE_SECRET
-  ) {
-    return next();
+ const internalSecret = req.headers["x-internal-secret"];
+const internalUserId = req.headers["x-internal-user-id"];
+
+if (
+  internalSecret &&
+  process.env.INTERNAL_SERVICE_SECRET &&
+  internalSecret === process.env.INTERNAL_SERVICE_SECRET
+) {
+  if (!internalUserId) {
+    return res.status(401).json({
+      status: "error",
+      message: "Internal user ID is missing"
+    });
   }
+
+  req.internalUserId = Number(internalUserId);
+
+  if (!Number.isInteger(req.internalUserId) || req.internalUserId <= 0) {
+    return res.status(401).json({
+      status: "error",
+      message: "Invalid internal user ID"
+    });
+  }
+
+  return next();
+}
 
   return verifyConnectorApiKey(req, res, next);
 };

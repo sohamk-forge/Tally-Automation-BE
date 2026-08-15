@@ -398,8 +398,7 @@ router.post("/create", async (req, res) => {
 /* ===========================
    PROCESS A SINGLE UPLOADED FILE
 =========================== */
-
-async function processStatementFile({ file, company_id, company_name, bank_ledger, password }) {
+async function processStatementFile({ file, company_id, company_name, bank_ledger, bank_name, password }) {
   const originalFileName = file.originalname;
   const fileName = await getUniqueFileName(company_id, originalFileName);
   const wasRenamed = fileName !== originalFileName;
@@ -422,8 +421,12 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  // ── Bank/ledger cross-check — BEFORE any row is touched ──
-  const bankCheck = validateBankMatchesLedger(sheet, bank_ledger, xlsx.utils);
+
+  // ── Bank NAME cross-check — BEFORE any row is touched.
+  // Validated against bank_name (the fixed dropdown value, e.g.
+  // "HDFC Bank"), NOT bank_ledger (which is a free-form Tally ledger
+  // account name and could be anything the user typed there).
+  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils);
   if (!bankCheck.ok) {
     return {
       file_name: fileName,
@@ -436,7 +439,9 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
       message: bankCheck.message
     };
   }
+
   const headerRowIndex = findHeaderRowIndex(sheet);
+  // ...rest of the function stays exactly the same
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
     defval: null,
@@ -586,18 +591,18 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
         }
       } else {
         const r = await db.query(
-          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-           (company_id, company_name, voucher_date, bank_ledger,
-            amount, narration, instrument_number,
-            debit_credit, voucher_type, party_ledger, status,
-            statement_password, file_name, merchant_name, group_key)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'CREDIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-           RETURNING *`,
-          [company_id, company_name, txnDate, bank_ledger,
-           depositAmt, narration, chequeRef, password || null, fileName,
-           merchantName, groupKey]
-        );
-        inserted.push({ ...r.rows[0], _action: 'inserted' });
+  `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+   (company_id, company_name, voucher_date, bank_ledger, bank_name,
+    amount, narration, instrument_number,
+    debit_credit, voucher_type, party_ledger, status,
+    statement_password, file_name, merchant_name, group_key)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'CREDIT',NULL,NULL,'WAITING_LEDGER',$9,$10,$11,$12)
+   RETURNING *`,
+  [company_id, company_name, txnDate, bank_ledger, bank_name,
+   depositAmt, narration, chequeRef, password || null, fileName,
+   merchantName, groupKey]
+);
+inserted.push({ ...r.rows[0], _action: 'inserted' });
       }
     }
   }
@@ -642,7 +647,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 /* ===========================
    UPLOAD BANK STATEMENT(S) (EXCEL)
 =========================== */
-
 router.post(
   "/upload-statement",
   (req, res, next) => {
@@ -659,7 +663,7 @@ router.post(
   },
   async (req, res) => {
     try {
-      const { company_id, company_name, bank_ledger, password } = req.body;
+      const { company_id, company_name, bank_ledger, bank_name, password } = req.body;
 
       if (!req.files || !req.files.length) {
         return res.status(400).json({ success: false, message: "At least one Excel file is required" });
@@ -670,12 +674,18 @@ router.post(
           message: "company_id, company_name and bank_ledger are required"
         });
       }
+      if (!bank_name) {
+        return res.status(400).json({
+          success: false,
+          message: "bank_name is required (the bank selected from the dropdown, e.g. \"HDFC Bank\")"
+        });
+      }
 
       const results = [];
       for (const file of req.files) {
         try {
           const outcome = await processStatementFile({
-            file, company_id, company_name, bank_ledger, password
+            file, company_id, company_name, bank_ledger, bank_name, password
           });
           results.push(outcome);
         } catch (fileErr) {

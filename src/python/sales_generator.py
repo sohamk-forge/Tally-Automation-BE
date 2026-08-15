@@ -62,6 +62,16 @@ reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("customer_name", "")
 party_gstin    = invoice.get("customer_gstin") or invoice.get("gstin") or ""
 
+# GST registration type:
+# GSTIN present  -> Regular
+# GSTIN absent  -> Unregistered/Consumer
+party_gstin = str(party_gstin).strip()
+
+if party_gstin:
+    gst_registration_type = "Regular"
+else:
+    gst_registration_type = "Unregistered/Consumer"
+
 GST_STATE_MAP = {
     "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
     "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana",
@@ -203,6 +213,7 @@ sub(vch, "VOUCHERTYPENAME", "Sales")
 sub(vch, "REFERENCE",       reference)
 sub(vch, "PARTYNAME",       party_name)
 sub(vch, "PARTYLEDGERNAME", party_name)
+sub(vch, "GSTREGISTRATIONTYPE", gst_registration_type)
 
 if party_gstin:
     sub(vch, "PARTYGSTIN", party_gstin)
