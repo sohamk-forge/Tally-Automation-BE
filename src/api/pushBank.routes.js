@@ -2,11 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import {
-  bankQueue,
-  BANK_JOB_OPTIONS,
-  getBankJobId
-} from "../queues/bank.queue.js";
+import { safeEnqueueBank } from "../queues/bank.queue.js";
 
 const router = express.Router();
 
@@ -128,6 +124,7 @@ router.post(
         mobile,
         email,
         sync_status,
+        user_id,
         created_at,
         updated_at
       )
@@ -152,6 +149,7 @@ router.post(
         $17,
         $18,
         $19,
+        $20,
         NOW(),
         NOW()
       )
@@ -176,31 +174,22 @@ router.post(
         contact_person || "",
         mobile || "",
         email || "",
-        "pending"
+        "pending",
+        userId
       ]
     );
 
     const bankId = insertResult.rows[0].id;
     console.log(`✅ Bank created: ID ${bankId}`);
 
-    const job = await bankQueue.add(
-      "push-bank",
-      {
-        bankId,
-        userId
-      },
-      {
-        ...BANK_JOB_OPTIONS,
-        jobId: getBankJobId(bankId)
-      }
-    );
+    const { jobId } = await safeEnqueueBank(bankId, userId);
 
-    console.log(`📤 Bank job queued: ${job.id}`);
+    console.log(`📤 Bank job queued: ${jobId}`);
 
     return res.status(200).json({
       status: "success",
       message: "Bank queued for processing",
-      jobId: job.id,
+      jobId,
       bankId,
       companyId
     });

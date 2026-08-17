@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
-import { BANK_QUEUE_NAME } from "../queues/bank.queue.js";
+import { BANK_QUEUE_NAME, safeEnqueueBank } from "../queues/bank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { createBankLedgerXML } from "../services/pushXmlBuilder.js";
@@ -37,17 +37,11 @@ function isTemporaryBankError(error) {
 const worker = new Worker(
   BANK_QUEUE_NAME,
   async (job) => {
-    const { bankId, userId } = job.data;
+    const { bankId } = job.data;
 
     if (!bankId) {
       throw new Error("bankId is required");
     }
-
-    if (!userId) {
-      throw new Error(`Missing userId for bank ${bankId}`);
-    }
-
-    console.log(`Processing bank ID ${bankId} requested by user ${userId}`);
 
     const result = await pool.query(
       `SELECT * FROM app_test.push_bank WHERE id = $1`,
@@ -58,6 +52,17 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`Bank ${bankId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { bankId }, no rich job payload, so the row is the source of
+    // truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for bank ${bankId}`);
+    }
+
+    console.log(`Processing bank ID ${bankId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.push_bank SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -194,6 +199,61 @@ worker.on("failed", async (job, error) => {
 worker.on("error", (error) => {
   console.error("❌ Bank worker error:", error.message);
 });
+
+/*
+====================================
+STARTUP RECOVERY
+
+Mirrors pushVoucher.worker.js's recovery pair. pushBank.routes.js inserts
+the row and enqueues the BullMQ job as two separate steps — if the process
+dies in between (e.g. a backend restart), the row is left at sync_status
+'pending' with no job ever created for it, silently, forever. This runs on
+every startup to self-heal that: anything stuck too long is marked failed
+(can't be safely retried — too old to trust), anything recent gets a fresh
+job in case it's simply missing one.
+====================================
+*/
+
+async function markStalePendingBankAsFailed() {
+  const result = await pool.query(
+    `UPDATE app_test.push_bank
+     SET
+       sync_status = 'failed',
+       error_message = 'Upload interrupted / worker restarted',
+       updated_at = NOW()
+     WHERE sync_status = 'pending'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
+     RETURNING id`
+  );
+  console.log(`Marked ${result.rowCount} stale pending bank pushes as failed`);
+}
+
+async function enqueuePendingBankJobs() {
+  const result = await pool.query(
+    `SELECT id, user_id FROM app_test.push_bank
+     WHERE sync_status = 'pending'
+     ORDER BY id ASC`
+  );
+
+  let enqueuedCount = 0;
+
+  for (const row of result.rows) {
+    if (!row.user_id) continue; // pre-migration row — no safe way to attribute it, leave for manual cleanup
+    const { action } = await safeEnqueueBank(row.id, row.user_id);
+    if (action === "enqueued") enqueuedCount++;
+  }
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending bank jobs (rest already queued/active)`);
+}
+
+(async () => {
+  try {
+    await markStalePendingBankAsFailed();
+    await enqueuePendingBankJobs();
+  } catch (error) {
+    console.error("Bank startup recovery failed:", error.message);
+  }
+})();
 
 console.log("✅ Push Bank BullMQ worker started (using Connector)");
 
