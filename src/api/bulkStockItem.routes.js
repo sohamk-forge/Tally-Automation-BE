@@ -86,13 +86,19 @@ router.post(
         });
       }
 
+      // Scoped to this acting user's own pairing, not a bare global name
+      // match — see the identical fix + rationale in salesInvoices.routes.js.
       const companyResult = await pool.query(
         `
-        SELECT id
-        FROM ${DB_SCHEMA}.companies
-        WHERE TRIM(name)=TRIM($1)
+        SELECT c.id
+        FROM ${DB_SCHEMA}.companies c
+        JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
+        WHERE cpt.user_id = $1
+          AND cpt.is_used = TRUE
+          AND lower(trim(c.name)) = lower(trim($2))
+        LIMIT 1
         `,
-        [company]
+        [userId, company]
       );
 
       const companyId =

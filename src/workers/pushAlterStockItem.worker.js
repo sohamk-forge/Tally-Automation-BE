@@ -39,17 +39,11 @@ function isTemporaryAlterStockItemError(error) {
 const worker = new Worker(
   ALTER_STOCK_ITEM_QUEUE_NAME,
   async (job) => {
-    const { stockItemId, userId } = job.data;
+    const { stockItemId } = job.data;
 
     if (!stockItemId) {
       throw new Error("stockItemId is required");
     }
-
-    if (!userId) {
-      throw new Error(`Missing userId for alter stock item ${stockItemId}`);
-    }
-
-    console.log(`Processing alter stock item ID ${stockItemId} requested by user ${userId}`);
 
     const result = await pool.query(
       `SELECT * FROM app_test.push_stock_item WHERE id = $1`,
@@ -60,6 +54,17 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`Stock item ${stockItemId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { stockItemId }, no rich job payload, so the row is the source
+    // of truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for alter stock item ${stockItemId}`);
+    }
+
+    console.log(`Processing alter stock item ID ${stockItemId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.push_stock_item SET status = 'processing', updated_at = NOW() WHERE id = $1`,

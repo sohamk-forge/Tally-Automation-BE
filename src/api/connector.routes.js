@@ -6,10 +6,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
-import {
-  alterStockItemQueue,
-  ALTER_STOCK_ITEM_JOB_OPTIONS
-} from "../queues/alterStockItem.queue.js";
+import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -349,17 +346,16 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
             `⚠️ Cannot chain opening stock for item ${stockItemId} — original job payload missing requested_by_user_id`
           );
         } else {
-          await alterStockItemQueue.add(
-            "push-alter-stock-item",
-            {
-              stockItemId,
-              userId: requestedByUserId
-            },
-            {
-              ...ALTER_STOCK_ITEM_JOB_OPTIONS,
-              jobId: `${stockItemId}-${Date.now()}`
-            }
+          await pool.query(
+            `
+            UPDATE ${DB_SCHEMA}.push_stock_item
+            SET status = 'pending', user_id = $1, pending_job_type = 'alter', updated_at = NOW()
+            WHERE id = $2
+            `,
+            [requestedByUserId, stockItemId]
           );
+
+          await safeEnqueueAlterStockItem(stockItemId, requestedByUserId);
 
           console.log(
             `🔗 Opening stock chained for stock item ${stockItemId} (User: ${requestedByUserId})`

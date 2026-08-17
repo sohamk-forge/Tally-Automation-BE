@@ -9,10 +9,7 @@ import {
   BULK_STOCK_ITEM_QUEUE_NAME
 } from "../queues/bulkStockItem.queue.js";
 
-import {
-  stockItemQueue,
-  STOCK_ITEM_JOB_OPTIONS
-} from "../queues/stockItem.queue.js";
+import { safeEnqueueStockItem } from "../queues/stockItem.queue.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -185,8 +182,10 @@ const worker = new Worker(
               status = 'pending',
               error_count = 0,
               last_error = NULL,
+              user_id = $14,
+              pending_job_type = 'create',
               updated_at = NOW()
-            WHERE id = $14
+            WHERE id = $15
             `,
             [
               company,
@@ -202,6 +201,7 @@ const worker = new Worker(
               itemData.opening_quantity,
               itemData.opening_rate,
               itemData.opening_value,
+              userId,
               stockItemId
             ]
           );
@@ -225,6 +225,8 @@ const worker = new Worker(
               opening_rate,
               opening_value,
               status,
+              user_id,
+              pending_job_type,
               created_at,
               updated_at
             )
@@ -232,6 +234,8 @@ const worker = new Worker(
               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
               $13,$14,$15,
               'pending',
+              $16,
+              'create',
               NOW(),
               NOW()
             )
@@ -252,27 +256,20 @@ const worker = new Worker(
               itemData.parent_group,
               itemData.opening_quantity,
               itemData.opening_rate,
-              itemData.opening_value
+              itemData.opening_value,
+              userId
             ]
           );
 
           stockItemId = insertResult.rows[0].id;
         }
 
-        // The job id MUST be unique per push — a fixed id per item would let
-        // BullMQ silently ignore add() on re-upload (see bulkSales.worker.js
-        // for the incident this pattern was fixed for).
-        await stockItemQueue.add(
-          "push-stock-item",
-          {
-            stockItemId,
-            userId
-          },
-          {
-            ...STOCK_ITEM_JOB_OPTIONS,
-            jobId: `stock-item-${stockItemId}-${Date.now()}`
-          }
-        );
+        // safeEnqueueStockItem uses a fixed jobId (not a timestamp-suffixed
+        // one) but checks/removes any stale job under it first — the actual
+        // fix for the re-upload incident this comment used to describe a
+        // workaround for (see bulkSales.worker.js / safeEnqueueSales for the
+        // same fix applied there).
+        await safeEnqueueStockItem(stockItemId, userId);
 
         console.log(`✅ Stock Item Queued : ${stockItemId} (${itemName}, User: ${userId})`);
         successCount++;

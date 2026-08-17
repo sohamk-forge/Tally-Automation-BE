@@ -41,4 +41,47 @@ export const alterStockItemQueue =
     }
   );
 
+/*
+====================================
+SAFE ENQUEUE
+
+Mirrors safeEnqueueStockItem (stockItem.queue.js). Single source of truth
+for enqueueing an "alter" stock item job — pushStockItemOpening.routes.js,
+the auto-chain in connector.routes.js, and worker startup recovery should
+all use this instead of calling alterStockItemQueue.add() directly.
+====================================
+*/
+
+const PROCESSABLE_STATES = [
+  "waiting",
+  "active",
+  "delayed",
+  "prioritized",
+  "paused",
+  "waiting-children"
+];
+
+export async function safeEnqueueAlterStockItem(stockItemId, userId) {
+  const jobId = getAlterStockItemJobId(stockItemId);
+  const existingJob = await alterStockItemQueue.getJob(jobId);
+
+  if (existingJob) {
+    const state = await existingJob.getState();
+
+    if (PROCESSABLE_STATES.includes(state)) {
+      return { action: "already_queued", jobId, state };
+    }
+
+    await existingJob.remove();
+  }
+
+  await alterStockItemQueue.add(
+    "push-alter-stock-item",
+    { stockItemId, userId },
+    { ...ALTER_STOCK_ITEM_JOB_OPTIONS, jobId }
+  );
+
+  return { action: "enqueued", jobId };
+}
+
 export default alterStockItemQueue;

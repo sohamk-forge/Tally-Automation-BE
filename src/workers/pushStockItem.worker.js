@@ -2,7 +2,8 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
-import { STOCK_ITEM_QUEUE_NAME } from "../queues/stockItem.queue.js";
+import { STOCK_ITEM_QUEUE_NAME, safeEnqueueStockItem } from "../queues/stockItem.queue.js";
+import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { getStockItemCreateXML } from "../services/pushXmlBuilder.js";
@@ -41,15 +42,7 @@ function isTemporaryStockItemError(error) {
 const worker = new Worker(
   STOCK_ITEM_QUEUE_NAME,
   async (job) => {
-    const { stockItemId, userId } = job.data;
-
-    if (!userId) {
-      throw new Error(`Missing userId for stock item job ${stockItemId}`);
-    }
-
-    console.log(
-      `Processing stock item ID ${stockItemId} requested by user ${userId}`
-    );
+    const { stockItemId } = job.data;
 
     const result = await pool.query(
       `
@@ -65,6 +58,19 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`Stock item ${stockItemId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { stockItemId }, no rich job payload, so the row is the source
+    // of truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for stock item ${stockItemId}`);
+    }
+
+    console.log(
+      `Processing stock item ID ${stockItemId} requested by user ${userId}`
+    );
 
     await pool.query(
       `
@@ -378,6 +384,68 @@ worker.on("error", (error) => {
     error.message
   );
 });
+
+/*
+====================================
+STARTUP RECOVERY
+
+Mirrors pushBank.worker.js / pushVoucher.worker.js's recovery pair.
+push_stock_item is shared by two independent flows — "create" (this file,
+bulkStockItem.worker.js) and "alter" (pushAlterStockItem.worker.js,
+triggered from pushStockItemOpening.routes.js and the auto-chain in
+connector.routes.js) — both leave a row at status 'pending' with no job
+ever created for it if the process dies between the DB write and the
+Redis enqueue call. pending_job_type records which queue a stuck row
+belongs to, so recovery re-enqueues to the correct one instead of guessing.
+Runs once here (not duplicated in pushAlterStockItem.worker.js) since both
+workers load into the same process.
+====================================
+*/
+
+async function markStalePendingStockItemsAsFailed() {
+  const result = await pool.query(
+    `UPDATE ${DB_SCHEMA}.push_stock_item
+     SET
+       status = 'failed',
+       last_error = 'Upload interrupted / worker restarted',
+       updated_at = NOW()
+     WHERE status = 'pending'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
+     RETURNING id`
+  );
+  console.log(`Marked ${result.rowCount} stale pending stock items as failed`);
+}
+
+async function enqueuePendingStockItemJobs() {
+  const result = await pool.query(
+    `SELECT id, user_id, pending_job_type FROM ${DB_SCHEMA}.push_stock_item
+     WHERE status = 'pending'
+     ORDER BY id ASC`
+  );
+
+  let enqueuedCount = 0;
+
+  for (const row of result.rows) {
+    if (!row.user_id) continue; // pre-migration row — no safe way to attribute it, leave for manual cleanup
+
+    const { action } = row.pending_job_type === "alter"
+      ? await safeEnqueueAlterStockItem(row.id, row.user_id)
+      : await safeEnqueueStockItem(row.id, row.user_id);
+
+    if (action === "enqueued") enqueuedCount++;
+  }
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending stock item jobs (rest already queued/active)`);
+}
+
+(async () => {
+  try {
+    await markStalePendingStockItemsAsFailed();
+    await enqueuePendingStockItemJobs();
+  } catch (error) {
+    console.error("Stock item startup recovery failed:", error.message);
+  }
+})();
 
 console.log(
   "✅ Push Stock Item BullMQ worker started (using Connector)"

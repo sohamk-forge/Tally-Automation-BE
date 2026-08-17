@@ -4,10 +4,7 @@ import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 
-import {
-  alterStockItemQueue,
-  ALTER_STOCK_ITEM_JOB_OPTIONS
-} from "../queues/alterStockItem.queue.js";
+import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 
 const router = express.Router();
 
@@ -141,8 +138,11 @@ router.post(
           opening_quantity = $1,
           opening_rate = $2,
           opening_value = $3,
+          status = 'pending',
+          user_id = $4,
+          pending_job_type = 'alter',
           updated_at = NOW()
-        WHERE id = $4
+        WHERE id = $5
         RETURNING
           id,
           item_name,
@@ -154,6 +154,7 @@ router.post(
           data.opening_quantity || 0,
           data.opening_rate || 0,
           data.opening_value || 0,
+          userId,
           stockItem.id
         ]
       );
@@ -161,17 +162,7 @@ router.post(
       console.log("UPDATED DB RECORD:");
       console.log(updateResult.rows[0]);
 
-      await alterStockItemQueue.add(
-        "push-alter-stock-item",
-        {
-          stockItemId: stockItem.id,
-          userId
-        },
-        {
-          ...ALTER_STOCK_ITEM_JOB_OPTIONS,
-          jobId: `${stockItem.id}-${Date.now()}`
-        }
-      );
+      await safeEnqueueAlterStockItem(stockItem.id, userId);
 
       console.log(
         `Opening stock queued: ${data.item_name} (User: ${userId})`

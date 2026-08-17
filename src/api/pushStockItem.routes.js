@@ -3,11 +3,7 @@ import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 
-import {
-  stockItemQueue,
-  STOCK_ITEM_JOB_OPTIONS,
-  getStockItemJobId
-} from "../queues/stockItem.queue.js";
+import { safeEnqueueStockItem } from "../queues/stockItem.queue.js";
 
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
@@ -226,8 +222,10 @@ router.post(
               status = 'pending',
               error_count = 0,
               last_error = NULL,
+              user_id = $15,
+              pending_job_type = 'create',
               updated_at = NOW()
-            WHERE id = $15
+            WHERE id = $16
             RETURNING *
             `,
             [
@@ -251,6 +249,7 @@ router.post(
               Number(
                 data.opening_value || 0
               ),
+              userId,
               existingItem.rows[0].id
             ]
           );
@@ -300,6 +299,8 @@ router.post(
               opening_rate,
               opening_value,
               status,
+              user_id,
+              pending_job_type,
               created_at,
               updated_at
             )
@@ -321,6 +322,8 @@ router.post(
               $14,
               $15,
               'pending',
+              $16,
+              'create',
               NOW(),
               NOW()
             )
@@ -347,7 +350,8 @@ router.post(
               ),
               Number(
                 data.opening_value || 0
-              )
+              ),
+              userId
             ]
           );
 
@@ -376,73 +380,22 @@ router.post(
       );
 
 
-      const jobId =
-        getStockItemJobId(
-          stockItemRecord.id
-        );
-
-
-      const existingJob =
-        await stockItemQueue.getJob(
-          jobId
-        );
-
-
-      if (existingJob) {
-
-        const state =
-          await existingJob.getState();
-
-
-        if (
-          [
-            "completed",
-            "failed"
-          ].includes(state)
-        ) {
-
-          await existingJob.remove();
-
-        }
-
-        else if (
-          [
-            "active",
-            "waiting",
-            "delayed"
-          ].includes(state)
-        ) {
-
-          return res.status(200).json({
-            status: "success",
-            message:
-              "Push already in progress for this item",
-            data: stockItemRecord
-          });
-        }
-      }
-
-
       // ========================================================
       // 11. ADD JOB
-      //    IMPORTANT: SEND COMPANY ID
       // ========================================================
 
-      await stockItemQueue.add(
-        "push-stock-item",
-        {
-          stockItemId:
-            stockItemRecord.id,
-
-          userId,
-
-          companyId
-        },
-        {
-          ...STOCK_ITEM_JOB_OPTIONS,
-          jobId
-        }
+      const { action } = await safeEnqueueStockItem(
+        stockItemRecord.id,
+        userId
       );
+
+      if (action === "already_queued") {
+        return res.status(200).json({
+          status: "success",
+          message: "Push already in progress for this item",
+          data: stockItemRecord
+        });
+      }
 
 
       console.log(
