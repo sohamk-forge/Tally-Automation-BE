@@ -259,7 +259,7 @@ router.post(
             [company_id, bank_ledger, txnDate, depositAmt, narration]
           );
 
-          if (existingCredit.rows.length > 0) {
+          if (existingCredit.rows.length > 0) { 
             const ex = existingCredit.rows[0];
             if (ex.status === 'FAILED') {
               const r = await db.query(
