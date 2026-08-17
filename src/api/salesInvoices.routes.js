@@ -52,9 +52,24 @@ router.post("/sales-invoices", async (req, res) => {
     console.log("SALES INVOICE API HIT");
     console.log("====================================");
 
+    // Scoped to this acting user's own pairing, not a bare global name
+    // match — two unrelated companies can share a name, and a global
+    // lookup here would silently resolve to whichever row Postgres
+    // happens to return, possibly someone else's company. This also
+    // doubles as the ownership check (a company this user has no access
+    // to simply won't match), replacing the disabled checkCompanyAccess
+    // call that used to check the vestigial user_companies table.
     const companyResult = await pool.query(
-      `SELECT id FROM app_test.companies WHERE TRIM(name) = TRIM($1)`,
-      [company]
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND lower(trim(c.name)) = lower(trim($2))
+      LIMIT 1
+      `,
+      [userId, company]
     );
 
     const companyId = companyResult.rows[0]?.id;
@@ -65,14 +80,6 @@ router.post("/sales-invoices", async (req, res) => {
         message: `Company '${company}' not found`
       });
     }
-
-    // const hasAccess = await checkCompanyAccess(userId, companyId);
-    // if (!hasAccess) {
-    //   return res.status(403).json({
-    //     status: "error",
-    //     message: "You don't have access to this company"
-    //   });
-    // }
 
     const cleanInvoiceData = JSON.parse(JSON.stringify(invoice_data));
 
