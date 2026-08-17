@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
-import { OD_BANK_QUEUE_NAME } from "../queues/odBank.queue.js";
+import { OD_BANK_QUEUE_NAME, safeEnqueueOdBank } from "../queues/odBank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { createOdBankXML } from "../services/pushXmlBuilder.js";
@@ -37,19 +37,11 @@ function isTemporaryOdBankError(error) {
 const worker = new Worker(
   OD_BANK_QUEUE_NAME,
   async (job) => {
-    const { odBankId, userId } = job.data;
+    const { odBankId } = job.data;
 
     if (!odBankId) {
       throw new Error("odBankId is required");
     }
-
-    if (!userId) {
-      throw new Error(`Missing userId for OD/OC bank ${odBankId}`);
-    }
-
-    console.log(
-      `Processing OD/OC bank ID ${odBankId} requested by user ${userId}`
-    );
 
     const result = await pool.query(
       `SELECT * FROM app_test.bank_od_accounts WHERE id = $1`,
@@ -60,6 +52,19 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`OD/OC bank ${odBankId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { odBankId }, no rich job payload, so the row is the source of
+    // truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for OD/OC bank ${odBankId}`);
+    }
+
+    console.log(
+      `Processing OD/OC bank ID ${odBankId} requested by user ${userId}`
+    );
 
     await pool.query(
       `UPDATE app_test.bank_od_accounts SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -200,6 +205,58 @@ worker.on("failed", async (job, error) => {
 worker.on("error", (error) => {
   console.error("❌ OD/OC bank worker error:", error.message);
 });
+
+/*
+====================================
+STARTUP RECOVERY
+
+Mirrors pushBank.worker.js's recovery pair — see that file for the full
+rationale. bank_od_accounts inserts the row and enqueues the BullMQ job as
+two separate steps; if the process dies in between, the row is left at
+sync_status 'pending' with no job ever created for it, silently, forever.
+====================================
+*/
+
+async function markStalePendingOdBankAsFailed() {
+  const result = await pool.query(
+    `UPDATE app_test.bank_od_accounts
+     SET
+       sync_status = 'failed',
+       error_message = 'Upload interrupted / worker restarted',
+       updated_at = NOW()
+     WHERE sync_status = 'pending'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
+     RETURNING id`
+  );
+  console.log(`Marked ${result.rowCount} stale pending OD/OC bank pushes as failed`);
+}
+
+async function enqueuePendingOdBankJobs() {
+  const result = await pool.query(
+    `SELECT id, user_id FROM app_test.bank_od_accounts
+     WHERE sync_status = 'pending'
+     ORDER BY id ASC`
+  );
+
+  let enqueuedCount = 0;
+
+  for (const row of result.rows) {
+    if (!row.user_id) continue; // pre-migration row — no safe way to attribute it, leave for manual cleanup
+    const { action } = await safeEnqueueOdBank(row.id, row.user_id);
+    if (action === "enqueued") enqueuedCount++;
+  }
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending OD/OC bank jobs (rest already queued/active)`);
+}
+
+(async () => {
+  try {
+    await markStalePendingOdBankAsFailed();
+    await enqueuePendingOdBankJobs();
+  } catch (error) {
+    console.error("OD/OC bank startup recovery failed:", error.message);
+  }
+})();
 
 console.log("✅ Push OD/OC Bank BullMQ worker started (using Connector)");
 

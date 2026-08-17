@@ -3,11 +3,7 @@ import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import {
-  odBankQueue,
-  OD_BANK_JOB_OPTIONS,
-  getOdBankJobId
-} from "../queues/odbank.queue.js";
+import { safeEnqueueOdBank } from "../queues/odBank.queue.js";
 
 const router = express.Router();
 
@@ -137,6 +133,7 @@ router.post(
         mobile,
         email,
         sync_status,
+        user_id,
         created_at,
         updated_at
       )
@@ -162,6 +159,7 @@ router.post(
         $18,
         $19,
         $20,
+        $21,
         NOW(),
         NOW()
       )
@@ -187,31 +185,22 @@ router.post(
         contact_person || "",
         mobile || "",
         email || "",
-        "pending"
+        "pending",
+        userId
       ]
     );
 
     const odBankId = insertResult.rows[0].id;
     console.log(`✅ OD/OC Bank created: ID ${odBankId}`);
 
-    const job = await odBankQueue.add(
-      "push-od-bank",
-      {
-        odBankId,
-        userId
-      },
-      {
-        ...OD_BANK_JOB_OPTIONS,
-        jobId: getOdBankJobId(odBankId)
-      }
-    );
+    const { jobId } = await safeEnqueueOdBank(odBankId, userId);
 
-    console.log(`📤 OD/OC Bank job queued: ${job.id}`);
+    console.log(`📤 OD/OC Bank job queued: ${jobId}`);
 
     return res.status(200).json({
       status: "success",
       message: "OD/OC Bank queued for processing",
-      jobId: job.id,
+      jobId,
       odBankId,
       companyId
     });
