@@ -1,7 +1,6 @@
 import express from "express";
 import pool from "../db/index.js";
-import { checkCompanyAccess } from "../utils/companyAccess.js";
-import { purchaseQueue, getPurchaseJobId } from "../queues/purchase.queue.js";
+import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { DB_SCHEMA } from "../config/db.js";
 
@@ -44,10 +43,24 @@ router.post("/invoices", async (req, res) => {
 
     console.log(`🔍 Looking up company: ${company.trim()}`);
 
+    // Scoped to this acting user's own pairing, not a bare global name
+    // match — two unrelated companies can share a name, and a global
+    // lookup here would silently resolve to whichever row Postgres
+    // happens to return, possibly someone else's company. This also
+    // doubles as the ownership check (a company this user has no access
+    // to simply won't match), replacing the old checkCompanyAccess call
+    // that checked the vestigial user_companies table.
     const companyResult = await pool.query(
-      `SELECT id FROM ${DB_SCHEMA}.companies
-       WHERE name = $1 LIMIT 1`,
-      [company.trim()]
+      `
+      SELECT c.id
+      FROM ${DB_SCHEMA}.companies c
+      JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND lower(trim(c.name)) = lower(trim($2))
+      LIMIT 1
+      `,
+      [userId, company.trim()]
     );
 
     if (!companyResult.rows.length) {
@@ -59,16 +72,6 @@ router.post("/invoices", async (req, res) => {
 
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
-
-    const hasAccess = await checkCompanyAccess(userId, companyId);
-    if (!hasAccess) {
-      return res.status(403).json({
-        status: "error",
-        message: "You don't have access to this company"
-      });
-    }
-
-    console.log(`✅ User ${userId} has access to company ${companyId}`);
 
     console.log(`📝 Creating new purchase invoice: ${invoice_no}`);
 
@@ -83,11 +86,12 @@ router.post("/invoices", async (req, res) => {
          invoice_date,
          raw_json,
          sync_status,
+         user_id,
          created_at,
          updated_at
        )
        VALUES
-       ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+       ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
        RETURNING id`,
       [
         companyId,
@@ -97,35 +101,22 @@ router.post("/invoices", async (req, res) => {
         invoice_no?.trim(),
         invoice_date || "",
         JSON.stringify(invoice_data),
-        "pending"
+        "pending",
+        userId
       ]
     );
 
     const invoiceId = insertResult.rows[0].id;
     console.log(`✅ Purchase Invoice created: ID ${invoiceId}`);
 
-    const job = await purchaseQueue.add(
-      "push-invoice",
-      {
-        invoiceId,
-        userId
-      },
-      {
-        attempts: 3,
-        backoff: {
-          type: "exponential",
-          delay: 5000
-        },
-        jobId: getPurchaseJobId(invoiceId)
-      }
-    );
+    const { jobId } = await safeEnqueuePurchase(invoiceId, userId);
 
-    console.log(`📤 Purchase Invoice job queued: ${job.id}`);
+    console.log(`📤 Purchase Invoice job queued: ${jobId}`);
 
     return res.status(200).json({
       status: "success",
       message: "Purchase Invoice queued for processing",
-      jobId: job.id,
+      jobId,
       invoiceId,
       companyId
     });

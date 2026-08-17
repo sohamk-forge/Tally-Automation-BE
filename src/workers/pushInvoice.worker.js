@@ -3,7 +3,7 @@ console.log("🚀 pushInvoice.worker.js loaded");
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
-import { PURCHASE_QUEUE_NAME } from "../queues/purchase.queue.js";
+import { PURCHASE_QUEUE_NAME, safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateXml } from "../services/xmlGenerator.js";
@@ -39,17 +39,11 @@ function isTemporaryInvoiceError(error) {
 const worker = new Worker(
   PURCHASE_QUEUE_NAME,
   async (job) => {
-    const { invoiceId, userId } = job.data;
+    const { invoiceId } = job.data;
 
     if (!invoiceId) {
       throw new Error("invoiceId is required");
     }
-
-    if (!userId) {
-      throw new Error(`Missing userId for purchase invoice ${invoiceId}`);
-    }
-
-    console.log(`Processing purchase invoice ID ${invoiceId} requested by user ${userId}`);
 
     const result = await pool.query(
       `SELECT * FROM app_test.invoice_extractions WHERE id = $1`,
@@ -60,6 +54,17 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`Invoice ${invoiceId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { invoiceId }, no rich job payload, so the row is the source of
+    // truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for purchase invoice ${invoiceId}`);
+    }
+
+    console.log(`Processing purchase invoice ID ${invoiceId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -225,6 +230,59 @@ worker.on("failed", async (job, error) => {
 worker.on("error", (error) => {
   console.error("❌ Purchase invoice worker error:", error.message);
 });
+
+/*
+====================================
+STARTUP RECOVERY
+
+Mirrors pushBank.worker.js / pushSalesInvoice.worker.js's recovery pair —
+see those for the full rationale. invoices.routes.js inserts the row and
+enqueues the BullMQ job as two separate steps; if the process dies in
+between, the row is left at sync_status 'pending' with no job ever created
+for it, silently, forever.
+====================================
+*/
+
+async function markStalePendingInvoicesAsFailed() {
+  const result = await pool.query(
+    `UPDATE app_test.invoice_extractions
+     SET
+       sync_status = 'failed',
+       error_message = 'Upload interrupted / worker restarted',
+       updated_at = NOW()
+     WHERE sync_status = 'pending'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
+     RETURNING id`
+  );
+  console.log(`Marked ${result.rowCount} stale pending purchase invoices as failed`);
+}
+
+async function enqueuePendingInvoiceJobs() {
+  const result = await pool.query(
+    `SELECT id, user_id FROM app_test.invoice_extractions
+     WHERE sync_status = 'pending'
+     ORDER BY id ASC`
+  );
+
+  let enqueuedCount = 0;
+
+  for (const row of result.rows) {
+    if (!row.user_id) continue; // pre-migration row — no safe way to attribute it, leave for manual cleanup
+    const { action } = await safeEnqueuePurchase(row.id, row.user_id);
+    if (action === "enqueued") enqueuedCount++;
+  }
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending purchase invoice jobs (rest already queued/active)`);
+}
+
+(async () => {
+  try {
+    await markStalePendingInvoicesAsFailed();
+    await enqueuePendingInvoiceJobs();
+  } catch (error) {
+    console.error("Purchase invoice startup recovery failed:", error.message);
+  }
+})();
 
 console.log("✅ Push Purchase Invoice BullMQ worker started (using Connector)");
 
