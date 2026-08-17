@@ -25,6 +25,7 @@ router.post(
     }
 
     const {
+      company_id,
       company,
       ledger_name,
       parent,
@@ -44,9 +45,9 @@ router.post(
       email
     } = req.body;
 
-    if (!company?.trim()) {
+    if (!company_id || !company?.trim()) {
       return res.status(400).json({
-        error: "Company is required"
+        error: "company_id and company are required"
       });
     }
 
@@ -56,27 +57,51 @@ router.post(
       });
     }
 
-    console.log(`🔍 Looking up company: ${company.trim()}`);
+    const companyId = Number(company_id);
 
-    const companyResult = await pool.query(
-      `
-      SELECT id
-      FROM app_test.companies
-      WHERE name = $1
-      LIMIT 1
-      `,
-      [company.trim()]
-    );
-
-    if (companyResult.rows.length === 0) {
+    if (!Number.isInteger(companyId) || companyId <= 0) {
       return res.status(400).json({
         status: "error",
-        message: `Company not found: ${company.trim()}`
+        message: "Invalid company_id"
       });
     }
 
-    const companyId = companyResult.rows[0].id;
-    console.log(`✅ Company found: ID ${companyId}`);
+    console.log("========== PUSH BANK ==========");
+    console.log("Request userId:", userId);
+    console.log("Request companyId:", companyId);
+    console.log("Request company:", company);
+    console.log("Ledger:", ledger_name);
+
+    // =====================================================
+    // GET EXACT COMPANY BY ID
+    // =====================================================
+
+    const companyResult = await pool.query(
+      `
+      SELECT
+        id,
+        name
+      FROM app_test.companies
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [companyId]
+    );
+
+    if (companyResult.rows.length === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: `Company not found: ${companyId}`
+      });
+    }
+
+    const companyRow = companyResult.rows[0];
+
+    console.log("✅ COMPANY SELECTED:", {
+      companyId: companyRow.id,
+      companyName: companyRow.name,
+      userId
+    });
 
     console.log(`📝 Creating new bank: ${bank_name}`);
 
@@ -134,7 +159,7 @@ router.post(
       `,
       [
         companyId,
-        company?.trim(),
+        companyRow.name,
         ledger_name?.trim(),
         parent || "Bank Accounts",
         opening_balance || 0,

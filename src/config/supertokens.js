@@ -1,5 +1,6 @@
 import supertokens from "supertokens-node";
 import EmailPassword from "supertokens-node/recipe/emailpassword/index.js";
+import { SMTPService as EmailPasswordSMTPService } from "supertokens-node/recipe/emailpassword/emaildelivery/index.js";
 import Passwordless from "supertokens-node/recipe/passwordless/index.js";
 import Session from "supertokens-node/recipe/session/index.js";
 import UserRoles from "supertokens-node/recipe/userroles/index.js";
@@ -23,6 +24,36 @@ export const initSupertokens = () => {
     },
     recipeList: [
       EmailPassword.init({
+        // Powers the "Forgot password?" flow already linked from AuthPage
+        // (/login/reset-password, handled by SuperTokens' default prebuilt
+        // UI) — without this override, password-reset emails go through
+        // SuperTokens' own hosted email service instead of our SMTP, same
+        // gap the invite flow already worked around via mailer.service.js.
+        emailDelivery: {
+          service: new EmailPasswordSMTPService({
+            smtpSettings: {
+              host: process.env.SMTP_HOST,
+              port: Number(process.env.SMTP_PORT) || 465,
+              secure: Number(process.env.SMTP_PORT) === 465,
+              authUsername: process.env.SMTP_USER,
+              password: process.env.SMTP_PASSWORD,
+              from: {
+                name: process.env.SMTP_FROM_NAME || "Tally Automation",
+                email: process.env.SMTP_USER,
+              },
+            },
+            override: (originalImplementation) => ({
+              ...originalImplementation,
+              sendRawEmail: async (input) => {
+                if (!process.env.SMTP_USER || !process.env.SMTP_PASSWORD) {
+                  console.log(`SMTP not configured — password reset email for ${input.toEmail} not sent (subject: ${input.subject})`);
+                  return;
+                }
+                await originalImplementation.sendRawEmail(input);
+              },
+            }),
+          }),
+        },
         signUpFeature: {
           formFields: [
             { id: "first_name" },

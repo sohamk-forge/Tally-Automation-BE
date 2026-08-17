@@ -46,15 +46,66 @@ router.post(
       );
 
       if (
+        !data.company_id ||
         !data.company ||
         !data.item_name
       ) {
         return res.status(400).json({
           status: "error",
           message:
-            "company and item_name are required"
+            "company_id, company and item_name are required"
         });
       }
+
+      const companyId = Number(data.company_id);
+
+      if (!Number.isInteger(companyId) || companyId <= 0) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid company_id"
+        });
+      }
+
+      console.log("========== PUSH STOCK ITEM OPENING ==========");
+      console.log("Request userId:", userId);
+      console.log("Request companyId:", companyId);
+      console.log("Request company:", data.company);
+      console.log("Item:", data.item_name);
+
+      // =====================================================
+      // GET EXACT COMPANY BY ID
+      // =====================================================
+
+      const companyResult = await pool.query(
+        `
+        SELECT
+          id,
+          name
+        FROM ${DB_SCHEMA}.companies
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [companyId]
+      );
+
+      if (companyResult.rows.length === 0) {
+        return res.status(404).json({
+          status: "error",
+          message: `Company not found: ${companyId}`
+        });
+      }
+
+      const company = companyResult.rows[0];
+
+      console.log("✅ COMPANY SELECTED:", {
+        companyId: company.id,
+        companyName: company.name,
+        userId
+      });
+
+      // =====================================================
+      // FIND SYNCED STOCK ITEM BY COMPANY_ID
+      // =====================================================
 
       const stockItemResult =
         await pool.query(
@@ -62,12 +113,12 @@ router.post(
           SELECT id
           FROM ${DB_SCHEMA}.push_stock_item
           WHERE
-            TRIM(company_name) = TRIM($1)
+            company_id = $1
             AND TRIM(item_name) = TRIM($2)
             AND status = 'success'
           `,
           [
-            data.company,
+            companyId,
             data.item_name
           ]
         );
