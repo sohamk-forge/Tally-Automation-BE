@@ -73,8 +73,13 @@ router.post("/invoices", async (req, res) => {
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
 
-    console.log(`📝 Creating new purchase invoice: ${invoice_no}`);
+    console.log(`📝 Creating/updating purchase invoice: ${invoice_no}`);
 
+    // Upsert on (company_id, invoice_no) — the same combination the unique
+    // constraint enforces. A retry, a corrected resubmission, or a simple
+    // double-click on the same invoice_no must update and re-queue the
+    // existing row, not crash with a raw duplicate-key error (see
+    // bulkSales.worker.js for the identical pattern on the sales side).
     const insertResult = await pool.query(
       `INSERT INTO ${DB_SCHEMA}.invoice_extractions
        (
@@ -92,6 +97,17 @@ router.post("/invoices", async (req, res) => {
        )
        VALUES
        ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       ON CONFLICT (company_id, invoice_no)
+       DO UPDATE SET
+         company_name = EXCLUDED.company_name,
+         vendor_name = EXCLUDED.vendor_name,
+         gstin = EXCLUDED.gstin,
+         invoice_date = EXCLUDED.invoice_date,
+         raw_json = EXCLUDED.raw_json,
+         sync_status = 'pending',
+         error_message = NULL,
+         user_id = EXCLUDED.user_id,
+         updated_at = NOW()
        RETURNING id`,
       [
         companyId,
@@ -107,7 +123,7 @@ router.post("/invoices", async (req, res) => {
     );
 
     const invoiceId = insertResult.rows[0].id;
-    console.log(`✅ Purchase Invoice created: ID ${invoiceId}`);
+    console.log(`✅ Purchase Invoice saved: ID ${invoiceId}`);
 
     const { jobId } = await safeEnqueuePurchase(invoiceId, userId);
 
