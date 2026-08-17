@@ -4,7 +4,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
-import { SALES_QUEUE_NAME } from "../queues/sales.queue.js";
+import { SALES_QUEUE_NAME, safeEnqueueSales } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateSalesXml } from "../services/xmlGenerator.js";
@@ -205,16 +205,7 @@ function formatValidationError(validation) {
 const worker = new Worker(
   SALES_QUEUE_NAME,
   async (job) => {
-    const { salesId, userId } = job.data;
-
-    if (!userId) {
-      throw new Error(`Missing userId for sales invoice job ${salesId}`);
-    }
-
-    console.log("Processing sales invoice", {
-      salesId,
-      userId
-    });
+    const { salesId } = job.data;
 
     const result = await pool.query(
       `SELECT * FROM ${DB_SCHEMA}.sales_invoice_extractions WHERE id = $1`,
@@ -225,6 +216,20 @@ const worker = new Worker(
     if (!row) {
       throw new Error(`Sales invoice ${salesId} not found`);
     }
+
+    // Read from the row, not job.data — startup recovery re-enqueues with
+    // just { salesId }, no rich job payload, so the row is the source of
+    // truth for who requested this push.
+    const userId = row.user_id;
+
+    if (!userId) {
+      throw new Error(`Missing user_id for sales invoice ${salesId}`);
+    }
+
+    console.log("Processing sales invoice", {
+      salesId,
+      userId
+    });
 
     const logCtx = {
       salesId,
@@ -510,6 +515,61 @@ worker.on("failed", async (job, error) => {
 worker.on("error", (error) => {
   console.error("❌ Sales invoice worker error", { error: error.message });
 });
+
+/*
+====================================
+STARTUP RECOVERY
+
+Mirrors pushBank.worker.js / pushVoucher.worker.js's recovery pair. All
+three writers of sales_invoice_extractions (the direct push route,
+bulkSales.worker.js, bulkSalesV2.worker.js) insert the row and enqueue the
+BullMQ job as two separate steps — if the process dies in between (e.g. a
+backend restart), the row is left at sync_status 'pending' with no job
+ever created for it, silently, forever. This runs on every startup to
+self-heal that.
+====================================
+*/
+
+async function markStalePendingSalesAsFailed() {
+  const result = await pool.query(
+    `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+     SET
+       sync_status = 'failed',
+       error_message = 'Upload interrupted / worker restarted',
+       updated_at = NOW()
+     WHERE sync_status = 'pending'
+       AND updated_at < NOW() - INTERVAL '5 minutes'
+     RETURNING id`
+  );
+  console.log(`Marked ${result.rowCount} stale pending sales invoices as failed`);
+}
+
+async function enqueuePendingSalesJobs() {
+  const result = await pool.query(
+    `SELECT id, user_id FROM ${DB_SCHEMA}.sales_invoice_extractions
+     WHERE sync_status = 'pending'
+     ORDER BY id ASC`
+  );
+
+  let enqueuedCount = 0;
+
+  for (const row of result.rows) {
+    if (!row.user_id) continue; // pre-migration row — no safe way to attribute it, leave for manual cleanup
+    const { action } = await safeEnqueueSales(row.id, row.user_id);
+    if (action === "enqueued") enqueuedCount++;
+  }
+
+  console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending sales invoice jobs (rest already queued/active)`);
+}
+
+(async () => {
+  try {
+    await markStalePendingSalesAsFailed();
+    await enqueuePendingSalesJobs();
+  } catch (error) {
+    console.error("Sales invoice startup recovery failed:", error.message);
+  }
+})();
 
 console.log("✅ Push Sales Invoice BullMQ worker started (using Connector)");
 

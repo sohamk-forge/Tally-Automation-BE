@@ -10,7 +10,7 @@ import {
 } from "../queues/bulkSalesV2.queue.js";
 
 import {
-  salesQueue
+  safeEnqueueSales
 } from "../queues/sales.queue.js";
 
 const connection = new IORedis({
@@ -507,9 +507,9 @@ const worker = new Worker(
           (
               company_id, company_name, customer_name, gstin,
               invoice_no, invoice_date, godown_name, raw_json,
-              sync_status, error_count, last_error, created_at, updated_at
+              sync_status, error_count, last_error, user_id, created_at, updated_at
           )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,NOW(),NOW())
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,NULL,$9,NOW(),NOW())
           ON CONFLICT (company_id, invoice_no)
           DO UPDATE
           SET
@@ -521,11 +521,12 @@ const worker = new Worker(
               sync_status = 'pending',
               error_count = 0,
               last_error = NULL,
+              user_id = EXCLUDED.user_id,
               updated_at = NOW()
           RETURNING id;
           `,
           [companyId, company, invoiceData.customer_name, invoiceData.customer_gstin,
-          invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData]
+          invoiceData.invoice_no, invoiceData.invoice_date, invoiceData.godown_name, invoiceData, userId]
         );
 
         if (!insertResult.rows.length) {
@@ -535,11 +536,7 @@ const worker = new Worker(
 
         const salesId = insertResult.rows[0].id;
 
-        await salesQueue.add(
-          "sales-invoice",
-          { salesId, userId },
-          { jobId: `${salesId}-${Date.now()}` }
-        );
+        await safeEnqueueSales(salesId, userId);
 
         console.log(`✅ Sales Queued (V2/${format}) : ${salesId} (Invoice: ${invoiceNo}, User: ${userId})`);
         successCount++;

@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { salesQueue, getSalesJobId } from "../queues/sales.queue.js";
+import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
 
 const router = express.Router();
 
@@ -276,8 +276,9 @@ router.post("/sales-invoices", async (req, res) => {
           last_error = NULL,
           error_message = NULL,
           gst_details = NULL,
+          user_id = $7,
           updated_at = NOW()
-        WHERE id = $7
+        WHERE id = $8
         RETURNING id
         `,
         [
@@ -287,6 +288,7 @@ router.post("/sales-invoices", async (req, res) => {
           invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData,
           invoice_data.invoice_no || "",
+          userId,
           existingInvoice.rows[0].id
         ]
       );
@@ -313,12 +315,13 @@ router.post("/sales-invoices", async (req, res) => {
           sync_status,
           error_count,
           last_error,
+          user_id,
           created_at,
           updated_at
         )
         VALUES
         (
-          $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0, NULL, NOW(), NOW()
+          $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0, NULL, $9, NOW(), NOW()
         )
         RETURNING id
         `,
@@ -330,7 +333,8 @@ router.post("/sales-invoices", async (req, res) => {
           invoice_data.invoice_no || "",
           invoice_data.invoice_date || "",
           invoice_data.godown_name ?? "Main Location",
-          cleanInvoiceData
+          cleanInvoiceData,
+          userId
         ]
       );
 
@@ -338,22 +342,8 @@ router.post("/sales-invoices", async (req, res) => {
       console.log(`New invoice created: ${invoiceId}`);
     }
 
-    const jobId = getSalesJobId(invoiceId);
-    const existingJob = await salesQueue.getJob(jobId);
-    if (existingJob) {
-      await existingJob.remove();
-      console.log(`Old job removed: ${jobId}`);
-    }
-
-    const job = await salesQueue.add(
-      "sales-invoice",
-      { salesId: invoiceId, userId },
-      { jobId: jobId }
-    );
-
-    console.log("Job ID:", job.id);
-    console.log("Job Name:", job.name);
-    console.log(`Sales Invoice Queued: ${invoiceId}`);
+    const { jobId, action } = await safeEnqueueSales(invoiceId, userId);
+    console.log(`Sales Invoice Queued: ${invoiceId} (job ${jobId}, ${action})`);
 
     return res.status(200).json({
       status: "success",
