@@ -1398,6 +1398,7 @@ export const getSalesGroupXML = (company) => {
 </ENVELOPE>
   `;
 };
+
 export const getPurchaseGroupXML = (company) => {
   return `
 <ENVELOPE>

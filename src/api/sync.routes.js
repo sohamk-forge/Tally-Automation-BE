@@ -998,7 +998,9 @@ router.get("/parent-groups", async (req, res) => {
       GROUP BALANCES SYNC (UPDATED WITH company_id)
     =================================================== */
 
-
+/* ===================================================
+   GROUP BALANCES SYNC (UPDATED WITH company_id)
+=================================================== */
 router.get("/payable-debtors", async (req, res) => {
   const company = req.query.company;
   if (!company) {
@@ -1007,16 +1009,25 @@ router.get("/payable-debtors", async (req, res) => {
 
   const client = await pool.connect();
   try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
     await client.query("BEGIN");
 
-    const companyId = await getCompanyId(company, client);
+    const companyId = await getCompanyId(userId, company, client);
     if (!companyId) throw new Error("Company not found");
+
+    const owns = await userOwnsCompany(userId, companyId, client);
+    if (!owns) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
+    }
 
     // ── Existing path: used by Debtors / Creditors / Stock-in-Hand ──
     // These exports come back with a TALLYMESSAGE wrapper.
     const getGroupData = async (groupName) => {
       const xml = getGroupBalanceXML(company, groupName);
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
       const parsed = await parseXML(responseXML);
       const group = parsed?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.GROUP;
 
@@ -1040,7 +1051,7 @@ router.get("/payable-debtors", async (req, res) => {
     // stray user-created duplicate groups (e.g. "Sales Account" vs
     // the real reserved "Sales Accounts").
     const getCollectionGroupData = async (xml, fallbackLabel) => {
-      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+      const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
       const parsed = await parseXML(responseXML);
 
       let group = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP;
