@@ -9,7 +9,7 @@
 import pool from "../db/index.js";
 import { createConnectorJob } from "./connectorJob.service.js";
 
-const POLL_INTERVAL_MS = 1000; // check every 1 second
+const POLL_INTERVAL_MS = 250; // check every 1 second
 const TIMEOUT_MS = 600000;     // 10 minutes
 
 function sleep(ms) {
