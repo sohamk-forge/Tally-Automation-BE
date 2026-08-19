@@ -10,6 +10,35 @@ function safeNumber(value) {
   const num = Number(value);
   return isNaN(num) ? 0 : num;
 }
+const GST_STATE_CODES = {
+  "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+  "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana",
+  "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+  "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
+  "13": "Nagaland", "14": "Manipur", "15": "Mizoram",
+  "16": "Tripura", "17": "Meghalaya", "18": "Assam",
+  "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
+  "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+  "26": "Dadra and Nagar Haveli and Daman and Diu",
+  "27": "Maharashtra", "28": "Andhra Pradesh", "29": "Karnataka", "30": "Goa",
+  "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
+  "34": "Puducherry", "35": "Andaman and Nicobar Islands",
+  "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh"
+};
+
+function getCustomerState(customerState, gstin) {
+  if (customerState && customerState.trim()) {
+    return customerState.trim();
+  }
+  if (gstin && gstin.length >= 2) {
+    return GST_STATE_CODES[gstin.substring(0, 2)] || "";
+  }
+  return "";
+}
+
+function getGstRegistrationType(gstin) {
+  return gstin && gstin.trim() ? "Regular" : "Unregistered/Consumer";
+}
 
 router.post("/sales-invoices", async (req, res) => {
 
@@ -437,11 +466,28 @@ router.get("/sales-invoices", async (req, res) => {
 
     const result = await pool.query(query, params);
 
+    // Only failed rows get state / gst_registration_type added — everything
+    // else passes through unchanged, exactly as the DB returned it.
+    const data = result.rows.map((row) => {
+      if (row.sync_status !== 'failed') {
+        return row;
+      }
+
+      const raw = row.raw_json || {};
+      const gstin = row.gstin || raw.customer_gstin || "";
+
+      return {
+        ...row,
+        state: getCustomerState(raw.customer_state, gstin),
+        gst_registration_type: getGstRegistrationType(gstin)
+      };
+    });
+
     return res.status(200).json({
       status: "success",
       company_id: companyId,
-      count: result.rows.length,
-      data: result.rows
+      count: data.length,
+      data
     });
 
   } catch (err) {

@@ -345,7 +345,7 @@ const worker = new Worker(
 
   {
     connection,
-    concurrency: 2
+    concurrency: 1
   }
 );
 
