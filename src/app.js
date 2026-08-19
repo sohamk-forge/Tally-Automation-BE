@@ -195,7 +195,7 @@ import deliveryPersonRoutes from "./api/delivery-person.routes.js";
 
 import userRoutes from "./api/user.routes.js";
 
-// import gstAuthRoutes from "./api/gstAuth.routes.js";
+import gstAuthRoutes from "./api/gstAuth.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -545,7 +545,7 @@ app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRo
 
 app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
 
-// app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
+app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
 /* =================================
    INVITE APIs
 ================================= */
