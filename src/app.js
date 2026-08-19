@@ -194,6 +194,8 @@ import proformaRoutes from "./api/proforma.routes.js";
 import deliveryPersonRoutes from "./api/delivery-person.routes.js";
 
 import userRoutes from "./api/user.routes.js";
+
+import gstAuthRoutes from "./api/gstAuth.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -542,6 +544,8 @@ app.use("/api/v1/proforma", ...requireSessionOrApiKey(), proformaRoutes);
 app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRoutes);
 
 app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
+
+app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
 /* =================================
    INVITE APIs
 ================================= */
