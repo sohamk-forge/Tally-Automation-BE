@@ -468,20 +468,16 @@ router.get("/sales-invoices", async (req, res) => {
 
     // Only failed rows get state / gst_registration_type added — everything
     // else passes through unchanged, exactly as the DB returned it.
-    const data = result.rows.map((row) => {
-      if (row.sync_status !== 'failed') {
-        return row;
-      }
+ const data = result.rows.map((row) => {
+  const raw = row.raw_json || {};
+  const gstin = row.gstin || raw.customer_gstin || "";
 
-      const raw = row.raw_json || {};
-      const gstin = row.gstin || raw.customer_gstin || "";
-
-      return {
-        ...row,
-        state: getCustomerState(raw.customer_state, gstin),
-        gst_registration_type: getGstRegistrationType(gstin)
-      };
-    });
+  return {
+    ...row,
+    state: getCustomerState(raw.customer_state, gstin),
+    gst_registration_type: getGstRegistrationType(gstin)
+  };
+});
 
     return res.status(200).json({
       status: "success",
