@@ -241,7 +241,7 @@ const worker = new Worker(
 
     console.log("");
     console.log("================================");
-    console.log(`🚀 PROCESSING VOUCHER ID ${voucher.id}`);
+    console.log(`[VOUCHER] Processing voucher ID ${voucher.id}`);
     console.log(`   Type: ${voucher.voucher_type} | Amount: ${voucher.amount}`);
     console.log(`   Party: ${voucher.party_ledger} | Bank: ${voucher.bank_ledger}`);
     console.log("================================");
@@ -376,11 +376,11 @@ WORKER EVENTS
 */
 
 worker.on("completed", (job) => {
-  console.log(`Voucher job completed: ${job.id}`);
+  console.log(`[VOUCHER] ✅ Job completed: ${job.id}`);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`Voucher job failed: ${job?.id}`, error.message);
+  console.error(`[VOUCHER] ❌ Job failed: ${job?.id}`, error.message);
 
   if (!job) return;
 
@@ -406,7 +406,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("Voucher worker error:", error.message);
+  console.error("[VOUCHER] ❌ Worker error:", error.message);
 });
 
 /*

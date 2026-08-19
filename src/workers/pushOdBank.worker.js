@@ -63,7 +63,7 @@ const worker = new Worker(
     }
 
     console.log(
-      `Processing OD/OC bank ID ${odBankId} requested by user ${userId}`
+      `[OD-BANK] Processing OD/OC bank ID ${odBankId} requested by user ${userId}`
     );
 
     await pool.query(
@@ -179,11 +179,11 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ OD/OC bank job completed: ${job.id}`, job.returnvalue);
+  console.log(`[OD-BANK] ✅ Job completed: ${job.id}`, job.returnvalue);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`❌ OD/OC bank job failed: ${job?.id}`, error.message);
+  console.error(`[OD-BANK] ❌ Job failed: ${job?.id}`, error.message);
 
   if (!job) return;
 
@@ -203,7 +203,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("❌ OD/OC bank worker error:", error.message);
+  console.error("[OD-BANK] ❌ Worker error:", error.message);
 });
 
 /*

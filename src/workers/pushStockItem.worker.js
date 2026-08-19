@@ -69,7 +69,7 @@ const worker = new Worker(
     }
 
     console.log(
-      `Processing stock item ID ${stockItemId} requested by user ${userId}`
+      `[STOCK-ITEM] Processing stock item ID ${stockItemId} requested by user ${userId}`
     );
 
     await pool.query(
@@ -331,14 +331,14 @@ const worker = new Worker(
 
 worker.on("completed", (job) => {
   console.log(
-    `✅ Stock item job completed: ${job.id}`,
+    `[STOCK-ITEM] ✅ Job completed: ${job.id}`,
     job.returnvalue
   );
 });
 
 worker.on("failed", async (job, error) => {
   console.error(
-    `❌ Stock item job failed: ${job?.id}`,
+    `[STOCK-ITEM] ❌ Job failed: ${job?.id}`,
     error.message
   );
 
@@ -380,7 +380,7 @@ worker.on("failed", async (job, error) => {
 
 worker.on("error", (error) => {
   console.error(
-    "❌ Stock item worker error:",
+    "[STOCK-ITEM] ❌ Worker error:",
     error.message
   );
 });

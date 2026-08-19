@@ -351,7 +351,7 @@ const worker = new Worker(
       throw new Error(`Missing userId for bulk sales V2 job ${job.id}`);
     }
 
-    console.log(`Reading Sales Excel (multi-format) : ${filePath}`, { userId });
+    console.log(`[BULK-SALES-V2] Processing job ${job.id} — reading Excel (multi-format): ${filePath}`, { userId });
 
     // The route now resolves and passes companyId directly (it already
     // looked the company up to validate the upload before queuing) — use
@@ -564,15 +564,15 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Bulk Sales V2 Job Completed : ${job.id}`);
+  console.log(`[BULK-SALES-V2] ✅ Job completed: ${job.id}`);
 });
 
 worker.on("failed", (job, error) => {
-  console.error(`❌ Bulk Sales V2 Job Failed : ${job?.id}`, error.message);
+  console.error(`[BULK-SALES-V2] ❌ Job failed: ${job?.id}`, error.message);
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Bulk Sales V2 Worker Error:", error.message);
+  console.error("[BULK-SALES-V2] ❌ Worker error:", error.message);
 });
 
 console.log("🚀 Bulk Sales V2 (Multi-Format) Worker Started");

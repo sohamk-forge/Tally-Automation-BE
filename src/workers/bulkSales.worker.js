@@ -98,29 +98,23 @@ const worker = new Worker(
 
   async (job) => {
 
-    const { company, filePath, userId } = job.data;
+    // companyId comes from job.data — already resolved and user-scoped by
+    // bulkSalesUpload.routes.js before this job was enqueued. Re-resolving
+    // it here by a bare name match (as this used to do) reintroduces the
+    // exact company name-collision bug already fixed at the route layer:
+    // two different users' companies can share a name, and an unscoped
+    // lookup can silently pick the wrong one.
+    const { company, companyId, filePath, userId } = job.data;
 
     if (!userId) {
       throw new Error(`Missing userId for bulk sales job ${job.id}`);
     }
 
-    console.log(`Reading Sales Excel : ${filePath}`, { userId });
-
-    const companyResult = await pool.query(
-      `
-      SELECT id
-      FROM ${DB_SCHEMA}.companies
-      WHERE TRIM(name) = TRIM($1)
-      LIMIT 1
-      `,
-      [company]
-    );
-
-    const companyId = companyResult.rows[0]?.id;
-
     if (!companyId) {
-      throw new Error(`Company not found: ${company}`);
+      throw new Error(`Missing companyId for bulk sales job ${job.id} (company: ${company})`);
     }
+
+    console.log(`[BULK-SALES] Processing job ${job.id} — reading Excel: ${filePath}`, { userId, companyId });
 
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
@@ -481,15 +475,15 @@ invoice.igst_amount = 0;
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Bulk Sales Job Completed : ${job.id}`);
+  console.log(`[BULK-SALES] ✅ Job completed: ${job.id}`);
 });
 
 worker.on("failed", (job, error) => {
-  console.error(`❌ Bulk Sales Job Failed : ${job?.id}`, error.message);
+  console.error(`[BULK-SALES] ❌ Job failed: ${job?.id}`, error.message);
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Bulk Sales Worker Error:", error.message);
+  console.error("[BULK-SALES] ❌ Worker error:", error.message);
 });
 
 console.log("🚀 Bulk Sales Worker Started");

@@ -169,7 +169,7 @@ const worker = new Worker(
     const { jobLogId, company, fromYear, toYear, userId } = job.data;
 
     console.log("\n=================================================");
-    console.log("🔄 SYNC JOB STARTED");
+    console.log("[SYNC] 🔄 Job started");
     console.log("=================================================");
     console.log(`Job ID     : ${job.id}`);
     console.log(`Job Log ID : ${jobLogId}`);
@@ -365,7 +365,7 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job, returnValue) => {
-  console.log(`✅ SYNC WORKER — Job ${job.id} completed:`, {
+  console.log(`[SYNC] ✅ Job completed: ${job.id}`, {
     company: returnValue?.company,
     succeeded: returnValue?.succeeded,
     failed: returnValue?.failed
@@ -373,11 +373,11 @@ worker.on("completed", (job, returnValue) => {
 });
 
 worker.on("failed", (job, error) => {
-  console.error(`❌ SYNC WORKER — Job ${job?.id} failed:`, error.message);
+  console.error(`[SYNC] ❌ Job failed: ${job?.id}`, error.message);
 });
 
 worker.on("error", (error) => {
-  console.error("❌ SYNC WORKER ERROR:", error.message);
+  console.error("[SYNC] ❌ Worker error:", error.message);
 });
 
 /*

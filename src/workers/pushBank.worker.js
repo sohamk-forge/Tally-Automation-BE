@@ -62,7 +62,7 @@ const worker = new Worker(
       throw new Error(`Missing user_id for bank ${bankId}`);
     }
 
-    console.log(`Processing bank ID ${bankId} requested by user ${userId}`);
+    console.log(`[BANK] Processing bank ID ${bankId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.push_bank SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -173,11 +173,11 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Bank job completed: ${job.id}`, job.returnvalue);
+  console.log(`[BANK] ✅ Job completed: ${job.id}`, job.returnvalue);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`❌ Bank job failed: ${job?.id}`, error.message);
+  console.error(`[BANK] ❌ Job failed: ${job?.id}`, error.message);
 
   if (!job) return;
 
@@ -197,7 +197,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Bank worker error:", error.message);
+  console.error("[BANK] ❌ Worker error:", error.message);
 });
 
 /*

@@ -226,7 +226,7 @@ const worker = new Worker(
       throw new Error(`Missing user_id for sales invoice ${salesId}`);
     }
 
-    console.log("Processing sales invoice", {
+    console.log("[SALES-INVOICE] Processing invoice", {
       salesId,
       userId
     });
@@ -489,11 +489,11 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log("✅ Sales invoice job completed", { jobId: job.id, result: job.returnvalue });
+  console.log("[SALES-INVOICE] ✅ Job completed", { jobId: job.id, result: job.returnvalue });
 });
 
 worker.on("failed", async (job, error) => {
-  console.error("❌ Sales invoice job failed", { jobId: job?.id, error: error.message });
+  console.error("[SALES-INVOICE] ❌ Job failed", { jobId: job?.id, error: error.message });
 
   if (!job) return;
 
@@ -513,7 +513,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Sales invoice worker error", { error: error.message });
+  console.error("[SALES-INVOICE] ❌ Worker error", { error: error.message });
 });
 
 /*
