@@ -28,11 +28,7 @@
       createAuditLog
     } from "../utils/createAuditLog.js";
   import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
-    import {
-      syncQueue,
-      getSyncJobId,
-      SYNC_JOB_OPTIONS
-    } from "../queues/sync.queue.js";
+    import { safeEnqueueSync } from "../queues/sync.queue.js";
 
 
 
@@ -1576,11 +1572,7 @@ router.post("/manual", async (req, res) => {
 
     const jobLogId = result.rows[0].id;
 
-    await syncQueue.add(
-      "manual-sync",
-      { jobLogId, company: trimmedCompany, fromYear, toYear, userId },
-      { ...SYNC_JOB_OPTIONS, jobId: getSyncJobId(jobLogId) }
-    );
+    await safeEnqueueSync(jobLogId, { jobLogId, company: trimmedCompany, fromYear, toYear, userId });
 
     return res.status(200).json({
       status: "success",
@@ -1713,21 +1705,14 @@ router.post("/manual-auto", async (req, res) => {
     // -------------------------------------------------
     // ADD SYNC JOB TO BULLMQ
     // -------------------------------------------------
-    await syncQueue.add(
-      "manual-sync",
-      {
-        jobLogId,
-        company: company_name,
-        companyId: syncCompanyId,
-        fromYear: from_year,
-        toYear: to_year,
-        userId
-      },
-      {
-        ...SYNC_JOB_OPTIONS,
-        jobId: getSyncJobId(jobLogId)
-      }
-    );
+    await safeEnqueueSync(jobLogId, {
+      jobLogId,
+      company: company_name,
+      companyId: syncCompanyId,
+      fromYear: from_year,
+      toYear: to_year,
+      userId
+    });
 
     // -------------------------------------------------
     // RESPONSE
