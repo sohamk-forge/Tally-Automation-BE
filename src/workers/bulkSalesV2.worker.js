@@ -103,6 +103,27 @@ function isMaharashtraState(value) {
   );
 }
 
+function getCustomerState(row) {
+  const state = String(
+    getValue(row, ["customer state"])
+  ).trim();
+
+  if (state) {
+    return state;
+  }
+
+  const gstin = String(
+    getValue(row, ["customer gst no"])
+  ).trim();
+
+  // If state is missing, use first 2 digits of GSTIN
+  if (/^\d{2}/.test(gstin)) {
+    return gstin.substring(0, 2);
+  }
+
+  return "";
+}
+
 function formatDate(value) {
   if (!value) return "";
 
@@ -303,7 +324,7 @@ function processSpareSalesRow(row, invoices) {
     customer_name: String(getValue(row, ["customer name"])).trim(),
     customer_gstin: String(getValue(row, ["customer gst no"])).trim(),
     invoice_date: formatDate(getValue(row, ["invoice date"])),
-    customer_state: String(getValue(row, ["customer state"])).trim()
+    customer_state: getCustomerState(row)
   });
 
   const taxableValue = safeNumber(getValue(row, ["net taxable amount"]));
