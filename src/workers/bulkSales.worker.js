@@ -38,6 +38,22 @@ const VALID_GST_STATE_CODES = new Set([
   "31", "32", "33", "34", "35", "36", "37", "38", "97"
 ]);
 
+// Recognizes Maharashtra by name/abbreviation/code, for the case a customer
+// has no GSTIN at all — the "Customer State" column is then the only signal
+// for interstate vs intrastate, and must not be ignored just because there's
+// no GSTIN to derive it from (see isMaharashtraState in bulkSalesV2.worker.js
+// for the same check used there).
+function isMaharashtraState(value) {
+  const state = String(value || "").trim().toLowerCase();
+  return (
+    state === "maharashtra" ||
+    state === "mh" ||
+    state === "27" ||
+    state === "Maharashtra" ||
+    state.includes("maharashtra")
+  );
+}
+
 function safeNumber(value) {
   const num = Number(value);
   return isNaN(num) ? 0 : num;
@@ -179,6 +195,11 @@ const worker = new Worker(
           ])).trim(),
 
           customer_gstin: gstin,
+          customer_state: String(getValue(row, [
+            "Customer State",
+            "Customer Bill To State Name",
+            "State"
+          ])).trim(),
           invoice_no: invoiceNo,
 
           invoice_date: formatDate(getValue(row, [
@@ -319,11 +340,19 @@ const worker = new Worker(
 
       // Only trust the prefix as a real state code if it's actually one
       // of the 38 valid Indian GST codes — anything else (blank, "NA",
-      // a malformed GSTIN) is treated as unregistered/local, same as
-      // Maharashtra, i.e. CGST+SGST.
+      // a malformed GSTIN) means the GSTIN can't tell us the customer's
+      // state at all.
       const stateCode = VALID_GST_STATE_CODES.has(rawStateCode) ? rawStateCode : "";
 
-      if (stateCode === MY_COMPANY_STATE_CODE || !stateCode) {
+      // No usable GSTIN — fall back to the "Customer State" column rather
+      // than assuming intrastate. An unregistered customer outside
+      // Maharashtra is still interstate (IGST); only default to
+      // CGST+SGST when neither GSTIN nor state name says otherwise.
+      const isIntrastate = stateCode
+        ? stateCode === MY_COMPANY_STATE_CODE
+        : isMaharashtraState(invoice.customer_state) || !invoice.customer_state;
+
+      if (isIntrastate) {
 
         // Intrastate (or unregistered/local customer) — split in half
         const cgst = roundTo2(taxAmount / 2);
@@ -382,8 +411,9 @@ invoice.igst_amount = 0;
         invoice: invoice.invoice_no,
         customer_gstin: invoice.customer_gstin || "—",
         customer_state_code: stateCode || "unregistered/local",
+        customer_state_name: invoice.customer_state || "—",
         my_company_state_code: MY_COMPANY_STATE_CODE,
-        is_intrastate: stateCode === MY_COMPANY_STATE_CODE || !stateCode,
+        is_intrastate: isIntrastate,
         taxable: invoice.taxable_amount,
         tax_amount: taxAmount,
         cgst: invoice.cgst_amount,

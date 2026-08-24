@@ -10,6 +10,21 @@ function safeNumber(value) {
   const num = Number(value);
   return isNaN(num) ? 0 : num;
 }
+
+// Recognizes Maharashtra by name/abbreviation/code — used as a fallback
+// when there's no GSTIN to derive the customer's state from (see the same
+// check in bulkSales.worker.js / bulkSalesV2.worker.js).
+function isMaharashtraState(value) {
+  const state = String(value || "").trim().toLowerCase();
+  return (
+    state === "maharashtra" ||
+    state === "mh" ||
+    state === "27" ||
+    state === "Maharashtra" ||
+    state.includes("maharashtra")
+  );
+}
+
 const GST_STATE_CODES = {
   "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
   "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana",
@@ -145,8 +160,22 @@ router.post("/sales-invoices", async (req, res) => {
 
     const stateCode = gstin.substring(0, 2);
 
-    if (stateCode === "27") {
-      // Maharashtra -> CGST + SGST
+    // No GSTIN — fall back to the customer's bill-to state name rather than
+    // assuming intrastate. An unregistered customer outside Maharashtra is
+    // still interstate (IGST); only default to CGST+SGST when neither the
+    // GSTIN nor a state name says otherwise.
+    const customerState = String(
+      cleanInvoiceData.customer_state ||
+      cleanInvoiceData.bill_to_state ||
+      ""
+    ).trim();
+
+    const isIntrastate = stateCode
+      ? stateCode === "27"
+      : isMaharashtraState(customerState) || !customerState;
+
+    if (isIntrastate) {
+      // Maharashtra (or unknown) -> CGST + SGST
       const halfRate = gstPercent / 2;
       cleanInvoiceData.cgst_amount = Number(
         ((taxableAmount * halfRate) / 100).toFixed(2)
@@ -156,22 +185,11 @@ router.post("/sales-invoices", async (req, res) => {
       );
       cleanInvoiceData.igst_amount = 0;
 
-    } else if (stateCode) {
+    } else {
       // Other state -> IGST
       cleanInvoiceData.cgst_amount = 0;
       cleanInvoiceData.sgst_amount = 0;
       cleanInvoiceData.igst_amount = gstAmount;
-
-    } else {
-      // No GSTIN -> default CGST + SGST (same as bulk)
-      const halfRate = gstPercent / 2;
-      cleanInvoiceData.cgst_amount = Number(
-        ((taxableAmount * halfRate) / 100).toFixed(2)
-      );
-      cleanInvoiceData.sgst_amount = Number(
-        ((taxableAmount * halfRate) / 100).toFixed(2)
-      );
-      cleanInvoiceData.igst_amount = 0;
     }
 
     // Step 5: TDS - abs() same as bulk
@@ -200,6 +218,8 @@ router.post("/sales-invoices", async (req, res) => {
       taxable: taxableAmount,
       gst_percent: gstPercent,
       gst: gstAmount,
+      customer_state: customerState || "—",
+      is_intrastate: isIntrastate,
       cgst: cleanInvoiceData.cgst_amount,
       sgst: cleanInvoiceData.sgst_amount,
       igst: cleanInvoiceData.igst_amount,

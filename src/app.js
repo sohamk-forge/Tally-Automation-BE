@@ -4,6 +4,7 @@ import supertokens from "supertokens-node";
 import { middleware as supertokensMiddleware, errorHandler as supertokensErrorHandler } from "supertokens-node/framework/express/index.js";
 import { initSupertokens } from "./config/supertokens.js";
 import { requireSessionOrApiKey } from "./middleware/sessionOrApiKey.middleware.js";
+import { isQuietRoute } from "./utils/quietRoutes.js";
 
 initSupertokens();
 
@@ -226,7 +227,9 @@ const allowedOrigins = [
 // /auth/* routes, which supertokensMiddleware() handles internally and
 // never passes through to loggerMiddleware() further down the chain.
 app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.originalUrl} from origin=${req.headers.origin || "none"}`);
+  if (!isQuietRoute(req)) {
+    console.log(`➡️  ${req.method} ${req.originalUrl} from origin=${req.headers.origin || "none"}`);
+  }
   next();
 });
 
