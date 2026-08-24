@@ -160,15 +160,37 @@ router.post("/sales-invoices", async (req, res) => {
 
     const stateCode = gstin.substring(0, 2);
 
-    // No GSTIN — fall back to the customer's bill-to state name rather than
+    // No GSTIN — fall back to the customer's bill-to state rather than
     // assuming intrastate. An unregistered customer outside Maharashtra is
-    // still interstate (IGST); only default to CGST+SGST when neither the
-    // GSTIN nor a state name says otherwise.
-    const customerState = String(
-      cleanInvoiceData.customer_state ||
-      cleanInvoiceData.bill_to_state ||
-      ""
-    ).trim();
+    // still interstate (IGST); only default to CGST+SGST when nothing else
+    // says otherwise. Primary source is the customer's own synced ledger
+    // (all_ledger_details.state, from Tally) looked up by name — the
+    // frontend doesn't send a state field on this form, so a body-supplied
+    // customer_state/bill_to_state is kept only as a secondary fallback for
+    // a customer with no synced ledger yet.
+    let customerState = "";
+
+    if (!stateCode && cleanInvoiceData.customer_name) {
+      const ledgerResult = await pool.query(
+        `
+        SELECT state
+        FROM app_test.all_ledger_details
+        WHERE company_id = $1
+          AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+        LIMIT 1
+        `,
+        [companyId, cleanInvoiceData.customer_name]
+      );
+      customerState = String(ledgerResult.rows[0]?.state || "").trim();
+    }
+
+    if (!customerState) {
+      customerState = String(
+        cleanInvoiceData.customer_state ||
+        cleanInvoiceData.bill_to_state ||
+        ""
+      ).trim();
+    }
 
     const isIntrastate = stateCode
       ? stateCode === "27"
