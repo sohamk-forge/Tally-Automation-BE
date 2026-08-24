@@ -107,11 +107,16 @@ const result = await client.query(
       (a, b) => new Date(a.created_at) - new Date(b.created_at)
     );
 
-    console.log("✅ CONNECTOR JOBS CLAIMED:", {
-      userId,
-      jobCount: sortedJobs.length,
-      jobIds: sortedJobs.map(j => j.id)
-    });
+    // Silent on the routine "nothing to do" poll result — this is called
+    // every few seconds by every connected connector; only log when a job
+    // actually got claimed, not on every empty poll.
+    if (sortedJobs.length > 0) {
+      console.log("[CONNECTOR-JOBS] ✅ Claimed:", {
+        userId,
+        jobCount: sortedJobs.length,
+        jobIds: sortedJobs.map(j => j.id)
+      });
+    }
 
     return sortedJobs;
 

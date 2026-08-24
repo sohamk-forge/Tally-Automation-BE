@@ -1,11 +1,21 @@
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { isQuietRoute } from "../utils/quietRoutes.js";
+
 export async function loggerMiddleware(
   req,
   res,
   next
 ) {
+
+  // Connector polling routes (/api/connector/jobs, /heartbeat) hit this on
+  // every request from every connected device, every few seconds — full
+  // audit_logs writes plus console output for each one is pure noise on
+  // the routine case and grows the table for no real signal.
+  if (isQuietRoute(req)) {
+    return next();
+  }
 
   /* =====================================
      START TIME
