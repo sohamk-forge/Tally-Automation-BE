@@ -4,6 +4,8 @@ import { deleteUser } from "supertokens-node";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { getHasPassword, setPasswordForUser } from "../services/account.service.js";
+import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 
 const router = express.Router();
 
@@ -71,6 +73,47 @@ router.post("/set-password", verifySession(), async (req, res) => {
     return res.json({ status: "success", message: "Password set. Please sign in again." });
   } catch (err) {
     console.log("SET PASSWORD ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   SAVE COMPANY INFO
+   Persists the onboarding "tell us about your company" form (post-signup,
+   pre-Tally-pairing) against the acting user. Upsert so re-submitting the
+   step (e.g. going back) doesn't fail on the unique constraint.
+========================================= */
+router.post("/company-info", verifySession(), async (req, res) => {
+  try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const { company_name, org_type, category, team_size, business_type } = req.body;
+    if (!company_name || !org_type || !category || !team_size) {
+      return res.status(400).json({ status: "error", message: "Missing required fields" });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO ${DB_SCHEMA}.user_company_profile
+        (user_id, company_name, org_type, category, team_size, business_type)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (user_id) DO UPDATE SET
+        company_name = EXCLUDED.company_name,
+        org_type = EXCLUDED.org_type,
+        category = EXCLUDED.category,
+        team_size = EXCLUDED.team_size,
+        business_type = EXCLUDED.business_type,
+        updated_at = NOW()
+      `,
+      [userId, company_name, org_type, category, team_size, business_type || null]
+    );
+
+    return res.json({ status: "success", message: "Company info saved" });
+  } catch (err) {
+    console.log("SAVE COMPANY INFO ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
