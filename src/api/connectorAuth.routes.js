@@ -280,6 +280,29 @@ router.post("/pair", async (req, res) => {
 
     await client.query("COMMIT");
 
+    // Best-effort claim of this machine's connector_machines row (outside
+    // the transaction, after commit — this table is display-only, per the
+    // scoping note in companies.routes.js, never used for access control,
+    // so it must never be allowed to fail the actual pairing). If the
+    // connector already sent a heartbeat before pairing, its user_id is a
+    // negative placeholder (see derivePlaceholderUserId in the connector's
+    // heartbeat.service.js); matched by machine_id, unique per physical
+    // machine. connector_machines.user_id also has its own unique
+    // constraint — a user re-pairing a second machine would violate it
+    // here, which is fine to just log and move on from.
+    try {
+      await pool.query(
+        `
+        UPDATE ${DB_SCHEMA}.connector_machines
+        SET user_id = $1, updated_at = NOW()
+        WHERE machine_id = $2 AND user_id < 0
+        `,
+        [user.id, machine_id]
+      );
+    } catch (claimErr) {
+      console.error("connector_machines claim failed (non-fatal):", claimErr.message);
+    }
+
     // Return the API key with full user details — the raw key is only ever
     // shown here, the connector app must store it locally.
     return res.status(200).json({

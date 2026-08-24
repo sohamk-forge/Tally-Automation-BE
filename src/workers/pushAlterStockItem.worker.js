@@ -64,7 +64,7 @@ const worker = new Worker(
       throw new Error(`Missing user_id for alter stock item ${stockItemId}`);
     }
 
-    console.log(`Processing alter stock item ID ${stockItemId} requested by user ${userId}`);
+    console.log(`[ALTER-STOCK-ITEM] Processing stock item ID ${stockItemId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.push_stock_item SET status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -157,11 +157,11 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Alter stock item job completed: ${job.id}`, job.returnvalue);
+  console.log(`[ALTER-STOCK-ITEM] ✅ Job completed: ${job.id}`, job.returnvalue);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`❌ Alter stock item job failed: ${job?.id}`, error.message);
+  console.error(`[ALTER-STOCK-ITEM] ❌ Job failed: ${job?.id}`, error.message);
 
   if (!job) return;
 
@@ -181,7 +181,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Alter stock item worker error:", error.message);
+  console.error("[ALTER-STOCK-ITEM] ❌ Worker error:", error.message);
 });
 
 console.log("✅ Push Alter Stock Item BullMQ worker started (using Connector)");

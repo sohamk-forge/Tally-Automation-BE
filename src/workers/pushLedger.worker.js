@@ -52,7 +52,7 @@ const worker = new Worker(
       throw new Error(`Missing userId for ledger job ${ledgerId}`);
     }
 
-    console.log(`Processing ledger ID ${ledgerId} requested by user ${userId}`);
+    console.log(`[LEDGER] Processing ledger ID ${ledgerId} requested by user ${userId}`);
 
     const result = await pool.query(
       `
@@ -209,14 +209,14 @@ const worker = new Worker(
 
 worker.on("completed", (job) => {
   console.log(
-    `✅ Ledger job completed: ${job.id}`,
+    `[LEDGER] ✅ Job completed: ${job.id}`,
     job.returnvalue
   );
 });
 
 worker.on("failed", async (job, error) => {
   console.error(
-    `❌ Ledger job failed: ${job?.id}`,
+    `[LEDGER] ❌ Job failed: ${job?.id}`,
     error.message
   );
 
@@ -258,7 +258,7 @@ worker.on("failed", async (job, error) => {
 
 worker.on("error", (error) => {
   console.error(
-    "❌ Ledger worker error:",
+    "[LEDGER] ❌ Worker error:",
     error.message
   );
 });

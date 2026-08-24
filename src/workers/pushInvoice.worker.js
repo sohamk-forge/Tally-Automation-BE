@@ -64,7 +64,7 @@ const worker = new Worker(
       throw new Error(`Missing user_id for purchase invoice ${invoiceId}`);
     }
 
-    console.log(`Processing purchase invoice ID ${invoiceId} requested by user ${userId}`);
+    console.log(`[PURCHASE-INVOICE] Processing invoice ID ${invoiceId} requested by user ${userId}`);
 
     await pool.query(
       `UPDATE app_test.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -204,11 +204,11 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Purchase invoice job completed: ${job.id}`, job.returnvalue);
+  console.log(`[PURCHASE-INVOICE] ✅ Job completed: ${job.id}`, job.returnvalue);
 });
 
 worker.on("failed", async (job, error) => {
-  console.error(`❌ Purchase invoice job failed: ${job?.id}`, error.message);
+  console.error(`[PURCHASE-INVOICE] ❌ Job failed: ${job?.id}`, error.message);
 
   if (!job) return;
 
@@ -228,7 +228,7 @@ worker.on("failed", async (job, error) => {
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Purchase invoice worker error:", error.message);
+  console.error("[PURCHASE-INVOICE] ❌ Worker error:", error.message);
 });
 
 /*

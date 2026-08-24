@@ -51,7 +51,7 @@ const worker = new Worker(
       throw new Error(`Missing userId for bulk stock item job ${job.id}`);
     }
 
-    console.log(`Reading Stock Item Excel : ${filePath}`, { userId });
+    console.log(`[BULK-STOCK-ITEM] Processing job ${job.id} — reading Excel: ${filePath}`, { userId });
 
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
@@ -296,15 +296,15 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`✅ Bulk Stock Item Job Completed : ${job.id}`);
+  console.log(`[BULK-STOCK-ITEM] ✅ Job completed: ${job.id}`);
 });
 
 worker.on("failed", (job, error) => {
-  console.error(`❌ Bulk Stock Item Job Failed : ${job?.id}`, error.message);
+  console.error(`[BULK-STOCK-ITEM] ❌ Job failed: ${job?.id}`, error.message);
 });
 
 worker.on("error", (error) => {
-  console.error("❌ Bulk Stock Item Worker Error:", error.message);
+  console.error("[BULK-STOCK-ITEM] ❌ Worker error:", error.message);
 });
 
 console.log("🚀 Bulk Stock Item Worker Started");
