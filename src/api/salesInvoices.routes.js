@@ -135,23 +135,19 @@ router.post("/sales-invoices", async (req, res) => {
     // GST CALCULATION - SAME AS BULK SALES WORKER
     // =========================================
 
+    const lineItems = cleanInvoiceData.line_items || [];
+
     // Step 1: Taxable Amount - from line_items (same as bulk sales)
     const taxableAmount = safeNumber(
       cleanInvoiceData.taxable_amount ||
-      (cleanInvoiceData.line_items || []).reduce(
-        (sum, item) => sum + safeNumber(item.amount), 0
-      )
+      lineItems.reduce((sum, item) => sum + safeNumber(item.amount), 0)
     );
 
-    // Step 2: GST Percent
+    // Step 2: GST Percent - fallback used only for line items that don't
+    // carry their own rate.
     const gstPercent = safeNumber(cleanInvoiceData.gst_percent || 18);
 
-    // Step 3: Calculate GST Amount
-    const gstAmount = Number(
-      ((taxableAmount * gstPercent) / 100).toFixed(2)
-    );
-
-    // Step 4: State check (same logic as bulk sales worker)
+    // Step 3: State check (same logic as bulk sales worker)
     const gstin = String(
       cleanInvoiceData.customer_gstin ||
       cleanInvoiceData.gstin ||
@@ -196,22 +192,40 @@ router.post("/sales-invoices", async (req, res) => {
       ? stateCode === "27"
       : isMaharashtraState(customerState) || !customerState;
 
+    // Step 4: GST amount - rounded PER LINE ITEM, then summed, rather than
+    // rounding once on the aggregate taxable amount. The two can differ by
+    // a paisa or two whenever the aggregate crosses a rounding boundary
+    // that no individual line does (e.g. two 18% lines of 283.90 and
+    // 381.36: per-line gives 51.10 + 68.64 = 119.74, aggregate gives
+    // round(665.26 * 18%) = 119.75) — per-line matches how the source
+    // invoice/OCR numbers are derived and is what must reconcile.
+    const halfRate = gstPercent / 2;
     if (isIntrastate) {
       // Maharashtra (or unknown) -> CGST + SGST
-      const halfRate = gstPercent / 2;
-      cleanInvoiceData.cgst_amount = Number(
-        ((taxableAmount * halfRate) / 100).toFixed(2)
-      );
-      cleanInvoiceData.sgst_amount = Number(
-        ((taxableAmount * halfRate) / 100).toFixed(2)
-      );
+      let cgstTotal = 0;
+      let sgstTotal = 0;
+      for (const item of lineItems) {
+        const amt = safeNumber(item.amount);
+        const cRate = item.cgst_rate != null ? safeNumber(item.cgst_rate) : halfRate;
+        const sRate = item.sgst_rate != null ? safeNumber(item.sgst_rate) : halfRate;
+        cgstTotal += Number(((amt * cRate) / 100).toFixed(2));
+        sgstTotal += Number(((amt * sRate) / 100).toFixed(2));
+      }
+      cleanInvoiceData.cgst_amount = Number(cgstTotal.toFixed(2));
+      cleanInvoiceData.sgst_amount = Number(sgstTotal.toFixed(2));
       cleanInvoiceData.igst_amount = 0;
 
     } else {
       // Other state -> IGST
+      let igstTotal = 0;
+      for (const item of lineItems) {
+        const amt = safeNumber(item.amount);
+        const iRate = item.igst_rate != null ? safeNumber(item.igst_rate) : gstPercent;
+        igstTotal += Number(((amt * iRate) / 100).toFixed(2));
+      }
       cleanInvoiceData.cgst_amount = 0;
       cleanInvoiceData.sgst_amount = 0;
-      cleanInvoiceData.igst_amount = gstAmount;
+      cleanInvoiceData.igst_amount = Number(igstTotal.toFixed(2));
     }
 
     // Step 5: TDS - abs() same as bulk
@@ -239,7 +253,6 @@ router.post("/sales-invoices", async (req, res) => {
     console.log("GST CALCULATION:", {
       taxable: taxableAmount,
       gst_percent: gstPercent,
-      gst: gstAmount,
       customer_state: customerState || "—",
       is_intrastate: isIntrastate,
       cgst: cleanInvoiceData.cgst_amount,
