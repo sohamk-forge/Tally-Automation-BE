@@ -25,6 +25,12 @@
  *
  * GST handling: gst_enabled is read once per create from
  * app_test.company_details and applied to every line item.
+ *
+ * Company profile for PDFs: getQuotationById / getQuotationByRootAndVersion
+ * pull a fresh company profile (name/address/email/gstin/state/gst_enabled)
+ * from app_test.company_details, the same way challan.service.js#getChallanById
+ * does, instead of relying only on the company_name snapshot stored on the
+ * quotations row at creation time.
  */
 
 import pool from "../db/index.js";
@@ -141,6 +147,19 @@ function computeTotals(computedItems) {
     total_tax:   totalTax,
     grand_total: grandTotal,
   };
+}
+
+// Pulls the live company profile (name/address/email/gstin/state/gst_enabled)
+// for a company, the same shape challan.service.js#getChallanById builds.
+// Falls back gracefully if company_details has no row yet.
+async function getCompanyDetails(companyId) {
+  const res = await pool.query(
+    `SELECT company_name, address, state, email, gstin, gst_enabled
+     FROM ${DB_SCHEMA}.company_details
+     WHERE company_id = $1`,
+    [companyId]
+  );
+  return res.rows[0] || {};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -559,13 +578,27 @@ export async function getQuotationById(quotationId, companyId) {
     [quotationId]
   );
 
-  const gstStatusRes = await pool.query(
-    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
-    [companyId]
-  );
-  const gstEnabled = gstStatusRes.rows[0]?.gst_enabled ?? false;
+  // Pull the live company profile (name/address/email/gstin/state/gst_enabled)
+  // for the PDF header, rather than relying only on the company_name
+  // snapshot stored on the quotations row at creation time — same pattern
+  // as challan.service.js#getChallanById.
+  const companyDetails = await getCompanyDetails(companyId);
+  const gstEnabled = companyDetails.gst_enabled ?? false;
 
-  return { ...quotationRes.rows[0], items: itemsRes.rows, gst_enabled: gstEnabled };
+  const quotation = quotationRes.rows[0];
+
+  return {
+    ...quotation,
+    items: itemsRes.rows,
+    gst_enabled: gstEnabled,
+    // Fresh company profile for the PDF — falls back to the stored
+    // quotations.company_name snapshot only if company_details has none.
+    company_name:    companyDetails.company_name || quotation.company_name,
+    company_address: companyDetails.address || null,
+    company_state:   companyDetails.state || null,
+    company_email:   companyDetails.email || null,
+    company_gstin:   companyDetails.gstin || null,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -591,13 +624,22 @@ export async function getQuotationByRootAndVersion(rootId, versionSeq, companyId
     [quotation.id]
   );
 
-  const gstStatusRes = await pool.query(
-    `SELECT gst_enabled FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
-    [companyId]
-  );
-  const gstEnabled = gstStatusRes.rows[0]?.gst_enabled ?? false;
+  // Same fresh company_details lookup as getQuotationById, so every PDF
+  // entry point (by id, or by root+version) renders the current company
+  // profile rather than a stale creation-time snapshot.
+  const companyDetails = await getCompanyDetails(companyId);
+  const gstEnabled = companyDetails.gst_enabled ?? false;
 
-  return { ...quotation, items: itemsRes.rows, gst_enabled: gstEnabled };
+  return {
+    ...quotation,
+    items: itemsRes.rows,
+    gst_enabled: gstEnabled,
+    company_name:    companyDetails.company_name || quotation.company_name,
+    company_address: companyDetails.address || null,
+    company_state:   companyDetails.state || null,
+    company_email:   companyDetails.email || null,
+    company_gstin:   companyDetails.gstin || null,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

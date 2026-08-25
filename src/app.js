@@ -197,6 +197,12 @@ import deliveryPersonRoutes from "./api/delivery-person.routes.js";
 import userRoutes from "./api/user.routes.js";
 
 import gstAuthRoutes from "./api/gstAuth.routes.js";
+
+import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
+
+import gstr1Routes from "./api/gstr1.routes.js";
+
+import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -549,6 +555,14 @@ app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRo
 app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
 
 app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
+
+app.use(
+  "/api/gst/gstr1",
+  requireSessionOrApiKey(),
+  gstr1Routes
+);
+
+app.use("/api/v1/ledger-pdf", ...requireSessionOrApiKey(), ledgerPdfRoutes);
 /* =================================
    INVITE APIs
 ================================= */
@@ -575,7 +589,7 @@ app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationRoutes);
 
 app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationPdfRoutes);
 
-
+app.use("/api/gst/return-status", ...requireSessionOrApiKey(), gstReturnStatusRoutes);
 app.use(
   "/api/companies",
   ...requireSessionOrApiKey(),

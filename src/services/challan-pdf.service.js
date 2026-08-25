@@ -6,7 +6,9 @@
  *
  * Header layout: company details on the left; Challan No / Date and
  * Delivery Person details stacked on the right (challan no/date on top,
- * delivery person below it).
+ * delivery person below it). Challan No / Date use a grid so the label
+ * and value columns line up cleanly — same pattern as the Quotation No /
+ * Date / Valid Until block in quotation-pdf.service.js.
  *
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true.
@@ -103,9 +105,18 @@ const STYLE = `
   .company-meta strong { color: #111; }
 
   .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
-  .doc-meta-row { font-size: 11.5px; margin-bottom: 8px; }
-  .doc-meta-row .label { font-weight: bold; color: #333; }
-  .doc-meta-row .value { color: #111; }
+
+  .doc-meta-row {
+    display: grid;
+    grid-template-columns: max-content max-content;
+    column-gap: 8px;
+    row-gap: 3px;
+    font-size: 11.5px;
+    margin-bottom: 8px;
+  }
+  .doc-meta-row:last-child { margin-bottom: 0; }
+  .doc-meta-row .label { font-weight: bold; color: #333; text-align: right; white-space: nowrap; }
+  .doc-meta-row .value { color: #111; text-align: left; white-space: nowrap; }
 
   .delivery-block { font-size: 11px; text-align: right; }
   .delivery-block .section-label {
@@ -273,8 +284,8 @@ function buildHtml(challan) {
         </div>
         <div class="header-right">
           <div class="doc-meta-row">
-            <div><span class="label">Challan No : </span><span class="value">${esc(challan_number || "-")}</span></div>
-            <div><span class="label">Date : </span><span class="value">${formatDate(challan_date)}</span></div>
+            <span class="label">Challan No :</span><span class="value">${esc(challan_number || "-")}</span>
+            <span class="label">Date :</span><span class="value">${formatDate(challan_date)}</span>
           </div>
           ${delivery_person ? `
 <div class="delivery-block">
