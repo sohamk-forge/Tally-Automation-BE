@@ -408,7 +408,11 @@ router.post("/sales-invoices", async (req, res) => {
           company.trim(),
           invoice_data.customer_name || "",
           invoice_data.gstin || "",
-          invoice_data.invoice_no || "",
+          // NULL, not "" — the unique constraint on (company_id, invoice_no)
+          // treats "" as a real, colliding value (unlike NULL, which SQL
+          // exempts from uniqueness), so a blank invoice_no here would let
+          // only the FIRST invoice for a company ever save successfully.
+          invoice_data.invoice_no?.trim() || null,
           invoice_data.invoice_date || "",
           invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData,
