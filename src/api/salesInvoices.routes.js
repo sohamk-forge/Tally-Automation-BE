@@ -192,40 +192,48 @@ router.post("/sales-invoices", async (req, res) => {
       ? stateCode === "27"
       : isMaharashtraState(customerState) || !customerState;
 
-    // Step 4: GST amount - rounded PER LINE ITEM, then summed, rather than
-    // rounding once on the aggregate taxable amount. The two can differ by
-    // a paisa or two whenever the aggregate crosses a rounding boundary
-    // that no individual line does (e.g. two 18% lines of 283.90 and
-    // 381.36: per-line gives 51.10 + 68.64 = 119.74, aggregate gives
-    // round(665.26 * 18%) = 119.75) — per-line matches how the source
-    // invoice/OCR numbers are derived and is what must reconcile.
+    // Step 4: GST amount - trust the value the frontend already computed
+    // and sent (cgst_amount/sgst_amount/igst_amount on invoice_data). The
+    // frontend prefers the Excel/OCR-sourced tax figure when one exists
+    // (taxOverride, from raw_json), falling back to its own per-line-item
+    // recompute otherwise — that's the number the user actually saw and
+    // approved on screen. Recomputing independently here, even per line
+    // item, can still land a paisa off the source invoice (rounding order/
+    // precision doesn't always agree between two independent code paths),
+    // so recompute is kept only as a fallback for callers that don't send
+    // an amount at all.
     const halfRate = gstPercent / 2;
-    if (isIntrastate) {
-      // Maharashtra (or unknown) -> CGST + SGST
-      let cgstTotal = 0;
-      let sgstTotal = 0;
+    const sentCgst = cleanInvoiceData.cgst_amount;
+    const sentSgst = cleanInvoiceData.sgst_amount;
+    const sentIgst = cleanInvoiceData.igst_amount;
+
+    const perLineTax = (rateField, fallbackRate) => {
+      let total = 0;
       for (const item of lineItems) {
         const amt = safeNumber(item.amount);
-        const cRate = item.cgst_rate != null ? safeNumber(item.cgst_rate) : halfRate;
-        const sRate = item.sgst_rate != null ? safeNumber(item.sgst_rate) : halfRate;
-        cgstTotal += Number(((amt * cRate) / 100).toFixed(2));
-        sgstTotal += Number(((amt * sRate) / 100).toFixed(2));
+        const rate = item[rateField] != null ? safeNumber(item[rateField]) : fallbackRate;
+        total += Number(((amt * rate) / 100).toFixed(2));
       }
-      cleanInvoiceData.cgst_amount = Number(cgstTotal.toFixed(2));
-      cleanInvoiceData.sgst_amount = Number(sgstTotal.toFixed(2));
+      return Number(total.toFixed(2));
+    };
+
+    if (isIntrastate) {
+      // Maharashtra (or unknown) -> CGST + SGST
+      cleanInvoiceData.cgst_amount = sentCgst !== undefined && sentCgst !== null && sentCgst !== ""
+        ? safeNumber(sentCgst)
+        : perLineTax("cgst_rate", halfRate);
+      cleanInvoiceData.sgst_amount = sentSgst !== undefined && sentSgst !== null && sentSgst !== ""
+        ? safeNumber(sentSgst)
+        : perLineTax("sgst_rate", halfRate);
       cleanInvoiceData.igst_amount = 0;
 
     } else {
       // Other state -> IGST
-      let igstTotal = 0;
-      for (const item of lineItems) {
-        const amt = safeNumber(item.amount);
-        const iRate = item.igst_rate != null ? safeNumber(item.igst_rate) : gstPercent;
-        igstTotal += Number(((amt * iRate) / 100).toFixed(2));
-      }
       cleanInvoiceData.cgst_amount = 0;
       cleanInvoiceData.sgst_amount = 0;
-      cleanInvoiceData.igst_amount = Number(igstTotal.toFixed(2));
+      cleanInvoiceData.igst_amount = sentIgst !== undefined && sentIgst !== null && sentIgst !== ""
+        ? safeNumber(sentIgst)
+        : perLineTax("igst_rate", gstPercent);
     }
 
     // Step 5: TDS - abs() same as bulk
