@@ -185,28 +185,38 @@ const STYLE = `
   .company-meta strong { color: #111; }
 
   .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
+.doc-meta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
 
-  .doc-meta-row {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    column-gap: 8px;
-    row-gap: 3px;
-    font-size: 11.5px;
-  }
+.doc-meta-line {
+  display: grid;
+  grid-template-columns: 72px 8px auto;
+  align-items: center;
+  line-height: 1.3;
+}
 
-  .doc-meta-row .label {
-    font-weight: bold;
-    color: #333;
-    text-align: right;
-    white-space: nowrap;
-  }
+.doc-meta-line .label-text {
+  font-weight: bold;
+  color: #333;
+  text-align: left;
+  white-space: nowrap;
+}
 
-  .doc-meta-row .value {
-    color: #111;
-    text-align: left;
-    white-space: nowrap;
-  }
+.doc-meta-line .colon {
+  font-weight: bold;
+  color: #333;
+  text-align: center;
+}
 
+.doc-meta-row .value {
+  color: #111;
+  text-align: left;
+  white-space: nowrap;
+}
   /* =========================================================
      BILL TO
      ========================================================= */
@@ -533,15 +543,33 @@ function buildHtml(quotation) {
 
     <!-- RIGHT SIDE -->
     <div class="header-right">
-      <div class="doc-meta-row">
-        <span class="label">Quotation No :</span><span class="value">${esc(quotation_number || "-")}</span>
-        <span class="label">Date :</span><span class="value">${formatDate(quotation_date)}</span>
-        ${
-          valid_until
-            ? `<span class="label">Valid Until :</span><span class="value">${formatDate(valid_until)}</span>`
-            : ""
-        }
-      </div>
+    <div class="doc-meta-row">
+
+  <div class="doc-meta-line">
+    <span class="label-text">Quotation No</span>
+    <span class="colon">:</span>
+    <span class="value">${esc(quotation_number || "-")}</span>
+  </div>
+
+  <div class="doc-meta-line">
+    <span class="label-text">Date</span>
+    <span class="colon">:</span>
+    <span class="value">${formatDate(quotation_date)}</span>
+  </div>
+
+  ${
+    valid_until
+      ? `
+        <div class="doc-meta-line">
+          <span class="label-text">Valid Until</span>
+          <span class="colon">:</span>
+          <span class="value">${formatDate(valid_until)}</span>
+        </div>
+      `
+      : ""
+  }
+
+</div>
     </div>
   </div>
 

@@ -95,11 +95,17 @@ function extractSubAmount(xmlString, labelPattern) {
 }
 
 function parseProfitLossReport(xmlString) {
-  // ===== Group totals — read directly from Tally, signs preserved =====
-  const totalSales      = extractMainAmount(xmlString, "Sales Accounts?") || 0;
-  const directIncome     = extractMainAmount(xmlString, "Direct Incomes?") || 0;
-  const indirectIncome   = extractMainAmount(xmlString, "Indirect Incomes?") || 0;
-  const indirectExpenses = extractMainAmount(xmlString, "Indirect Expenses?") || 0;
+  // ===== Group totals — read directly from Tally =====
+  const totalSales    = extractMainAmount(xmlString, "Sales Accounts?") || 0;
+  const directIncome   = extractMainAmount(xmlString, "Direct Incomes?") || 0;
+  const indirectIncome = extractMainAmount(xmlString, "Indirect Incomes?") || 0;
+
+  // FIX: Indirect Expenses is an expense and must always reduce profit.
+  // Some companies' raw XML exports this with an unexpected sign — force
+  // it to a positive magnitude so the subtraction below is always correct
+  // regardless of how a given company's export happens to format it.
+  const indirectExpensesRaw = extractMainAmount(xmlString, "Indirect Expenses?") || 0;
+  const indirectExpenses = Math.abs(indirectExpensesRaw);
 
   // ===== Cost of Sales components — magnitudes from PLSUBAMT =====
   const openingStock = Math.abs(extractSubAmount(xmlString, "Opening Stock") || 0);
@@ -108,49 +114,28 @@ function parseProfitLossReport(xmlString) {
     extractSubAmount(xmlString, "Purchase Accounts?") ??
     0
   );
-  const closingStock = Math.abs(
-    extractSubAmount(xmlString, "Less: Closing Stock") ??
-    extractSubAmount(xmlString, "Closing Stock") ??
+ const closingStock =
+  extractSubAmount(xmlString, "Less: Closing Stock") ??
+  extractSubAmount(xmlString, "Closing Stock") ??
+  0;
+
+  // FIX: Direct Expenses was never extracted before, silently dropped
+  // from Cost of Sales. It can appear either as its own BSMAINAMT group
+  // total or as a PLSUBAMT sub-line depending on the report layout, so
+  // both are checked.
+  const directExpenses = Math.abs(
+    extractSubAmount(xmlString, "Direct Expenses") ??
+    extractMainAmount(xmlString, "Direct Expenses") ??
     0
   );
 
   // Cost of Sales, correctly signed via arithmetic (not trusted from
   // Tally's own summary line's text, since that sign is unreliable).
- 
+  const costOfSales = Number((openingStock + totalPurchase + directExpenses + closingStock).toFixed(2));
 
-// Gross Profit
-// Formula:
-// (Sales - Opening Stock - Purchases + Closing Stock)
-// ==========================================
-// COST OF SALES
-// ==========================================
-
-const costOfSales = Number(
-  (openingStock + totalPurchase - closingStock).toFixed(2)
-);
-
-// ==========================================
-// GROSS PROFIT
-// Formula:
-// Sales - Opening Stock - Purchases + Closing Stock
-// ==========================================
-
-const grossProfit = Number(
-  (
-    totalSales -
-    openingStock -
-    totalPurchase +
-    closingStock
-  ).toFixed(2)
-);
-
-// ==========================================
-// NET RESULT
-// ==========================================
-
-const netResult = Number(
-  (grossProfit + indirectIncome - indirectExpenses).toFixed(2)
-);
+  // ===== Gross Profit / Net Result =====
+  const grossProfit = Number((totalSales + directIncome - costOfSales).toFixed(2));
+  const netResult    = Number((grossProfit + indirectIncome - indirectExpenses).toFixed(2));
 
   return {
     totalSales,
@@ -158,6 +143,7 @@ const netResult = Number(
     openingStock,
     closingStock,
     directIncome,
+    directExpenses,
     indirectIncome,
     indirectExpenses,
     grossProfit,
@@ -195,17 +181,18 @@ export async function syncProfitLossSummary(client, { company, companyId, fromDa
 
   const resultType = parsed.netResult >= 0 ? "profit" : "loss";
 
- const profitMarginPercent =
-  parsed.totalSales !== 0
-    ? Number(((parsed.netResult / parsed.totalSales) * 100).toFixed(2))
-    : 0;
+  const profitMarginPercent =
+    parsed.totalSales !== 0
+      ? Number(((parsed.netResult / parsed.totalSales) * 100).toFixed(2))
+      : 0;
 
   console.log("========== P&L DEBUG (Cost of Sales derived from sub-lines) ==========");
   console.log("totalSales:", parsed.totalSales);
   console.log("openingStock:", parsed.openingStock);
   console.log("totalPurchase:", parsed.totalPurchase);
+  console.log("directExpenses:", parsed.directExpenses);
   console.log("closingStock:", parsed.closingStock);
-  console.log("costOfSales (derived):", parsed.openingStock + parsed.totalPurchase - parsed.closingStock);
+  console.log("costOfSales (derived):", parsed.openingStock + parsed.totalPurchase + parsed.directExpenses - parsed.closingStock);
   console.log("grossProfit:", parsed.grossProfit);
   console.log("indirectIncome:", parsed.indirectIncome);
   console.log("indirectExpenses:", parsed.indirectExpenses);

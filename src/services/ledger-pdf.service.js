@@ -7,6 +7,15 @@
  *   simple
  *   detailed_inventory
  *   detailed_narration
+ *
+ * Table layout (7 columns):
+ *   Date | Particulars | Vch Type | Detail Amt | Vch No. | Debit | Credit
+ *
+ * The "Detail Amt" column holds the per-line breakdown amounts
+ * (inventory item amounts, CGST/SGST/Round Off etc.) that used to be
+ * squeezed into the Credit column. Keeping them in their own column
+ * between Vch Type and Vch No. keeps the voucher-level Debit/Credit
+ * totals clean and easy to scan.
  */
 
 import puppeteer from "puppeteer";
@@ -303,10 +312,10 @@ function findInventoryAllocations(object, depth = 0) {
  *   Sales - Spare Parts
  *
  * item
- *   EICHER MILE MAX DEF 1/20 L    20 nos      1,610.20 Cr
+ *   EICHER MILE MAX DEF 1/20 L (20 nos)         1,610.20 Cr
  *
  * ledger
- *   CGST                                      14.92 Cr
+ *   CGST                                           14.92 Cr
  */
 
 function normalizeEntry(entry) {
@@ -512,6 +521,9 @@ function buildHeaderHtml({
 
 /* ==========================================================================
    DETAIL ROW HTML
+   7 columns: Date | Particulars | Vch Type | Detail Amt | Vch No | Debit | Credit
+   Detail rows only ever populate the "Particulars" and "Detail Amt" cells;
+   every other cell stays blank so the voucher-level columns stay clean.
    ========================================================================== */
 
 function detailRowHtml(row) {
@@ -535,6 +547,7 @@ function detailRowHtml(row) {
         <td></td>
         <td></td>
         <td></td>
+        <td></td>
 
       </tr>
     `;
@@ -544,9 +557,7 @@ function detailRowHtml(row) {
   /*
    * Example:
    *
-   *          EICHER MILE MAX DEF 1/20 L
-   *                                      20 nos
-   *                                                     1,610.20 Cr
+   *          EICHER MILE MAX DEF 1/20 L (20 nos)     1,610.20 Cr
    */
   if (row.kind === "item") {
     const suffix =
@@ -561,23 +572,26 @@ function detailRowHtml(row) {
 
         <td class="stock-item-name">
           ${esc(row.name)}
-        </td>
-
-        <td class="stock-qty">
-          ${esc(row.qty)}
+          ${
+            row.qty
+              ? `<span class="stock-qty-inline">(${esc(row.qty)})</span>`
+              : ""
+          }
         </td>
 
         <td></td>
 
-        <td></td>
-
-        <td class="detail-amount">
+        <td class="detail-amount-cell">
           ${
             row.amount
               ? `${money(row.amount)} ${suffix}`
               : ""
           }
         </td>
+
+        <td></td>
+        <td></td>
+        <td></td>
 
       </tr>
     `;
@@ -587,9 +601,9 @@ function detailRowHtml(row) {
   /*
    * Example:
    *
-   *       CGST                           14.92 Cr
-   *       SGST                           14.92 Cr
-   *       Round Off                       0.10 Dr
+   *       CGST                14.92 Cr
+   *       SGST                14.92 Cr
+   *       Round Off            0.10 Dr
    */
 
   const suffix =
@@ -607,16 +621,18 @@ function detailRowHtml(row) {
       </td>
 
       <td></td>
-      <td></td>
-      <td></td>
 
-      <td class="detail-amount">
+      <td class="detail-amount-cell">
         ${
           row.amount
             ? `${money(row.amount)} ${suffix}`
             : ""
         }
       </td>
+
+      <td></td>
+      <td></td>
+      <td></td>
 
     </tr>
   `;
@@ -751,6 +767,8 @@ function buildTableRows(vouchers, mode) {
                 ${esc(voucher.vchType)}
               </td>
 
+              <td class="detail-amount-cell"></td>
+
               <td class="voucher-no-cell">
                 ${esc(voucher.vchNo)}
               </td>
@@ -799,7 +817,7 @@ function buildTableRows(vouchers, mode) {
                 <td></td>
 
                 <td
-                  colspan="5"
+                  colspan="6"
                   class="narration-cell"
                 >
                   ${esc(line)}
@@ -1014,6 +1032,9 @@ function buildHtml({
   /* ================================================================
      TABLE
      NO TABLE OUTER BORDER
+
+     7 columns:
+     Date | Particulars | Vch Type | Detail Amt | Vch No | Debit | Credit
      ================================================================ */
 
   table {
@@ -1028,30 +1049,28 @@ function buildHtml({
   }
 
 
-  /*
-   * Column proportions tuned for screenshot:
-   *
-   * Date | Particulars | Type | No | Debit | Credit
-   */
-
   .col-date {
-    width: 62px;
-  }
-
-  .col-type {
     width: 58px;
   }
 
-  .col-no {
+  .col-type {
     width: 50px;
   }
 
+  .col-detail-amount {
+    width: 68px;
+  }
+
+  .col-no {
+    width: 44px;
+  }
+
   .col-debit {
-    width: 82px;
+    width: 74px;
   }
 
   .col-credit {
-    width: 82px;
+    width: 74px;
   }
 
 
@@ -1085,6 +1104,11 @@ function buildHtml({
 
   .header-right {
     text-align: right;
+  }
+
+
+  .header-center {
+    text-align: center;
   }
 
 
@@ -1176,7 +1200,7 @@ function buildHtml({
 
   .detail-group-row td {
 
-    padding-top: 2px;
+    padding-top: 3px;
 
     padding-bottom: 1px;
   }
@@ -1197,9 +1221,7 @@ function buildHtml({
   /* ================================================================
      INVENTORY ITEM
      Example:
-     EICHER MILE MAX DEF 1/20 L
-                              20 nos
-                                             1,610.20 Cr
+     EICHER MILE MAX DEF 1/20 L (20 nos)      1,610.20 Cr
      ================================================================ */
 
   .detail-item-row td {
@@ -1222,15 +1244,17 @@ function buildHtml({
   }
 
 
-  .stock-qty {
+  .stock-qty-inline {
 
-    text-align: right;
+    display: inline-block;
+
+    margin-left: 4px;
+
+    font-size: 7.3px;
+
+    color: #666;
 
     white-space: nowrap;
-
-    font-size: 7.5px;
-
-    color: #333;
   }
 
 
@@ -1257,7 +1281,13 @@ function buildHtml({
   }
 
 
-  .detail-amount {
+  /* ================================================================
+     DETAIL AMOUNT COLUMN
+     Shared by voucher row (blank) and detail rows (populated).
+     Sits between Vch Type and Vch No.
+     ================================================================ */
+
+  .detail-amount-cell {
 
     text-align: right;
 
@@ -1266,6 +1296,8 @@ function buildHtml({
     color: #111;
 
     font-size: 7.8px;
+
+    padding-right: 6px !important;
   }
 
 
@@ -1380,6 +1412,8 @@ function buildHtml({
 
       <col class="col-type" />
 
+      <col class="col-detail-amount" />
+
       <col class="col-no" />
 
       <col class="col-debit" />
@@ -1404,6 +1438,8 @@ function buildHtml({
         <td>
           Vch Type
         </td>
+
+        <td></td>
 
         <td class="header-right">
           Vch No.
@@ -1439,6 +1475,8 @@ function buildHtml({
 
               <td></td>
 
+              <td class="detail-amount-cell"></td>
+
               <td></td>
 
               <td class="amount-cell">
@@ -1473,7 +1511,7 @@ function buildHtml({
           <tr>
 
             <td
-              colspan="6"
+              colspan="7"
               style="
                 text-align:center;
                 padding:15px;
@@ -1495,6 +1533,7 @@ function buildHtml({
 
       <tr>
 
+        <td></td>
         <td></td>
         <td></td>
         <td></td>
@@ -1539,6 +1578,7 @@ function buildHtml({
 
         <td></td>
         <td></td>
+        <td></td>
 
         <td class="total-amount">
           ${
@@ -1561,6 +1601,7 @@ function buildHtml({
 
       <tr class="grand-row">
 
+        <td></td>
         <td></td>
         <td></td>
         <td></td>

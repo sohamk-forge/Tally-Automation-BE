@@ -105,19 +105,38 @@ const STYLE = `
   .company-meta strong { color: #111; }
 
   .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
+.doc-meta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
 
-  .doc-meta-row {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    column-gap: 8px;
-    row-gap: 3px;
-    font-size: 11.5px;
-    margin-bottom: 8px;
-  }
-  .doc-meta-row:last-child { margin-bottom: 0; }
-  .doc-meta-row .label { font-weight: bold; color: #333; text-align: right; white-space: nowrap; }
-  .doc-meta-row .value { color: #111; text-align: left; white-space: nowrap; }
+.doc-meta-line {
+  display: grid;
+  grid-template-columns: 72px 8px auto;
+  align-items: center;
+  line-height: 1.3;
+}
 
+.doc-meta-line .label-text {
+  font-weight: bold;
+  color: #333;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.doc-meta-line .colon {
+  font-weight: bold;
+  color: #333;
+  text-align: center;
+}
+
+.doc-meta-row .value {
+  color: #111;
+  text-align: left;
+  white-space: nowrap;
+}
   .delivery-block { font-size: 11px; text-align: right; }
   .delivery-block .section-label {
     font-size: 10px; text-transform: uppercase; color: #111;
@@ -283,10 +302,21 @@ function buildHtml(challan) {
           </div>
         </div>
         <div class="header-right">
-          <div class="doc-meta-row">
-            <span class="label">Challan No :</span><span class="value">${esc(challan_number || "-")}</span>
-            <span class="label">Date :</span><span class="value">${formatDate(challan_date)}</span>
-          </div>
+        <div class="doc-meta-row">
+
+  <div class="doc-meta-line">
+    <span class="label-text">Challan No</span>
+    <span class="colon">:</span>
+    <span class="value">${esc(challan_number || "-")}</span>
+  </div>
+
+  <div class="doc-meta-line">
+    <span class="label-text">Date</span>
+    <span class="colon">:</span>
+    <span class="value">${formatDate(challan_date)}</span>
+  </div>
+
+</div>
           ${delivery_person ? `
 <div class="delivery-block">
   <div class="section-label">Delivery Person</div>
