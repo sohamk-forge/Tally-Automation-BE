@@ -287,7 +287,13 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
         responseXml || null,
         result || null,
         status === "failed"
-          ? (result?.line_error || null)
+          // line_error: Tally rejected an XML import (request reached
+          // Tally fine, Tally itself refused a line). error: the
+          // connector never got a usable response at all — Tally
+          // unreachable, network failure, timeout, etc. Prefer
+          // line_error when both are somehow present since it's the
+          // more specific, Tally-sourced reason.
+          ? (result?.line_error || result?.error || null)
           : null,
         jobId,
         userId
