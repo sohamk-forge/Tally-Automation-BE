@@ -7,6 +7,10 @@ const OTP_LENGTH = 6;
 const OTP_TTL_MINUTES = 10;
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_SECONDS = 60;
+// Caps total sends per email even if each individual resend respects the
+// 60s cooldown (60/hr would otherwise be reachable by hammering /resend).
+const MAX_SENDS_PER_WINDOW = 5;
+const SEND_WINDOW_MINUTES = 60;
 
 const hashOtp = (otp) => crypto.createHash("sha256").update(otp).digest("hex");
 
@@ -34,8 +38,29 @@ export const sendSignupOtp = async (email) => {
   if (recent.rows[0]) {
     const elapsedSeconds = (Date.now() - new Date(recent.rows[0].created_at).getTime()) / 1000;
     if (elapsedSeconds < RESEND_COOLDOWN_SECONDS) {
-      return { throttled: true, retryAfterSeconds: Math.ceil(RESEND_COOLDOWN_SECONDS - elapsedSeconds) };
+      return {
+        throttled: true,
+        reason: "cooldown",
+        retryAfterSeconds: Math.ceil(RESEND_COOLDOWN_SECONDS - elapsedSeconds),
+      };
     }
+  }
+
+  const countResult = await pool.query(
+    `
+    SELECT count(*)::int AS count, min(created_at) AS oldest
+    FROM ${DB_SCHEMA}.email_otps
+    WHERE email = $1
+      AND created_at > now() - interval '${SEND_WINDOW_MINUTES} minutes'
+    `,
+    [email]
+  );
+
+  const { count, oldest } = countResult.rows[0];
+  if (count >= MAX_SENDS_PER_WINDOW) {
+    const elapsedSeconds = (Date.now() - new Date(oldest).getTime()) / 1000;
+    const retryAfterSeconds = Math.ceil(SEND_WINDOW_MINUTES * 60 - elapsedSeconds);
+    return { throttled: true, reason: "hourly_limit", retryAfterSeconds };
   }
 
   const otp = generateOtp();
