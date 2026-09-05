@@ -3,6 +3,7 @@ import pool from "../db/index.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
+import { markChallansInvoiced } from "../services/challan.service.js";
 
 const router = express.Router();
 
@@ -447,6 +448,22 @@ router.post("/sales-invoices", async (req, res) => {
 
     const { jobId, action } = await safeEnqueueSales(invoiceId, userId);
     console.log(`Sales Invoice Queued: ${invoiceId} (job ${jobId}, ${action})`);
+
+    // Whatever delivery challans this invoice was billed against should drop
+    // out of "Bills to be Made" now that they've been invoiced.
+    const deliveryChallanNumbers = (invoice_data.delivery_challans || [])
+      .map((dc) => dc?.number)
+      .filter(Boolean);
+
+    if (deliveryChallanNumbers.length) {
+      try {
+        const marked = await markChallansInvoiced(companyId, deliveryChallanNumbers);
+        console.log(`Marked ${marked} challan(s) as invoiced:`, deliveryChallanNumbers);
+      } catch (markErr) {
+        // Non-fatal — the invoice itself already succeeded and is queued.
+        console.error("Failed to mark challans as invoiced:", markErr.message);
+      }
+    }
 
     return res.status(200).json({
       status: "success",

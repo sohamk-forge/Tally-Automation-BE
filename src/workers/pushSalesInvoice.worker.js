@@ -61,15 +61,19 @@ async function ledgerExists(companyId, ledgerName) {
 async function stockItemExists(companyId, stockItemName) {
   if (!stockItemName) return false;
 
+  // regexp_replace collapses any run of internal whitespace to a single
+  // space on both sides — TRIM alone only strips the ends, so a bulk-upload
+  // sheet's item name differing from the Tally-synced one by a double
+  // space or a missing space mid-name used to register as "doesn't exist".
   const found = await pool.query(
     `
     SELECT 1
     FROM ${DB_SCHEMA}.stock_group_summary
-    WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2))
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g')
     UNION
     SELECT 1
     FROM ${DB_SCHEMA}.push_stock_item
-    WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER(TRIM($2)) AND status = 'success'
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND status = 'success'
     LIMIT 1
     `,
     [companyId, stockItemName]

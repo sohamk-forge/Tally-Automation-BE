@@ -1020,6 +1020,31 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
+// Shared GST-rate-by-duty-head formulas, used by both the StockItem and
+// StockGroup GST exports below. Tally's GSTRATEDUTYHEAD field holds the
+// short duty-head codes actually seen in real exports ("IGST", "CGST",
+// "SGST/UTGST", "Cess") — NOT the long names ("Integrated Tax" etc.), which
+// never match anything and silently produce blank rates. Confirmed live
+// against a running Tally instance before writing this.
+const GST_DUTY_HEAD_FORMULAE = `
+<SYSTEM TYPE="Formulae" NAME="IsIGST">$GSTRatedutyhead = "IGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsCGST">$GSTRatedutyhead = "CGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsSGST">$GSTRatedutyhead = "SGST/UTGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsCess">$GSTRatedutyhead = "Cess"</SYSTEM>`;
+
+// Rate/HSN methods shared by both collections below. HSN lives under the
+// item/group's own HSNDetails list — a SEPARATE date-effective list from
+// GSTDetails, not nested inside it (confirmed live: reading HSN from
+// $GSTDetails[Last].HSNCode came back blank even for items with HSN set in
+// Tally; $HSNDetails[Last].HSNCode is the correct path).
+const gstRateMethods = (objectType) => `
+<METHOD>HSNCode:$HSNDetails[Last].HSNCode</METHOD>
+<METHOD>GSTRate:$GSTDetails[Last].StateWiseDetails[1].RateDetails[1].GSTRate</METHOD>
+<METHOD>IGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsIGST].GSTRate</METHOD>
+<METHOD>CGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCGST].GSTRate</METHOD>
+<METHOD>SGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsSGST].GSTRate</METHOD>
+<METHOD>CessRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCess].GSTRate</METHOD>`;
+
 export const getStockGroupSummaryXML = (company) => {
   return `
 <ENVELOPE>
@@ -1037,13 +1062,50 @@ export const getStockGroupSummaryXML = (company) => {
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
-          <COLLECTION NAME="StockItemSummary">
+          ${GST_DUTY_HEAD_FORMULAE}
+          <COLLECTION NAME="StockItemSummary" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">
             <TYPE>StockItem</TYPE>
-            <FETCH>
-              NAME, PARENT, BASEUNITS, HSNDETAILS.LIST,
-              GSTDETAILS.LIST, STANDARDPRICE,
-              CLOSINGBALANCE, CLOSINGVALUE
-            </FETCH>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
+            ${gstRateMethods("StockItem")}
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+};
+
+// Stock-GROUP-level GST — a business can set GST at the group level instead
+// of per item; items with no GST override of their own fall back to this.
+// Same validated formula pattern as getStockGroupSummaryXML above, just
+// targeting Tally's StockGroup object type instead of StockItem.
+export const getStockGroupGSTXML = (company) => {
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockGroupGST</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          ${GST_DUTY_HEAD_FORMULAE}
+          <COLLECTION NAME="StockGroupGST" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">
+            <TYPE>StockGroup</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            ${gstRateMethods("StockGroup")}
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>

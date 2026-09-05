@@ -15,6 +15,7 @@
       getAllParentGroupDetailsXML,
       getProfitLossXML,
         getStockGroupSummaryXML,
+        getStockGroupGSTXML,
           getAllLedgersXML,
             getPurchaseSalesLedgersXML,
             getCompanyDetailsXML,
@@ -1397,6 +1398,30 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
     const list = Array.isArray(stockItems) ? stockItems : [stockItems];
 
+    // Stock-GROUP-level GST, used as a fallback for items with no GST
+    // override of their own (populated by the stock-group-gst-sync step,
+    // which the sync worker runs immediately before this one). Keyed by
+    // lower(trim(group_name)) -> latest row for that group.
+    const groupGstResult = await client.query(
+      `
+      SELECT DISTINCT ON (lower(trim(group_name)))
+        group_name, hsn_code, igst_rate, cgst_rate, sgst_rate
+      FROM app_test.stock_group_gst_details
+      WHERE company_id = $1
+      ORDER BY lower(trim(group_name)), id DESC
+      `,
+      [companyId]
+    );
+    const groupGstMap = new Map(
+      groupGstResult.rows.map((row) => [String(row.group_name || "").trim().toLowerCase(), row])
+    );
+
+    // GST rate/HSN now come back as flat fields (IGSTRATE, CGSTRATE, SGSTRATE,
+    // HSNCODE) computed directly by Tally via TDL formulas in
+    // getStockGroupSummaryXML — validated live against a running Tally
+    // instance. The old code walked GSTDETAILS.LIST -> STATEWISEDETAILS.LIST
+    // manually and read a field path (RATEOFTAX) that never actually existed
+    // in Tally's real XML, which is why rates were always 0.
     function extractItemFields(item) {
       let itemName =
         item?.NAME || item?.["@_NAME"] || item?.["$"]?.NAME ||
@@ -1414,33 +1439,24 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       const rawStockValue = parseFloat(item?.CLOSINGVALUE || 0) || 0;
       const stockValue = rawStockValue * -1;
 
-      let hsnCode = null;
-      const hsnList = item?.["HSNDETAILS.LIST"] || [];
-      if (Array.isArray(hsnList)) {
-        const validHSN = hsnList.find((hsn) => hsn?.HSNCODE);
-        hsnCode = validHSN?.HSNCODE || null;
-      } else {
-        hsnCode = hsnList?.HSNCODE || null;
-      }
+      let hsnCode = clean(item?.HSNCODE || null) || null;
+      let igstRate = parseFloat(item?.IGSTRATE) || 0;
+      let cgstRate = parseFloat(item?.CGSTRATE) || 0;
+      let sgstRate = parseFloat(item?.SGSTRATE) || 0;
 
-      let gstRate = 0;
-      const gstList = item?.["GSTDETAILS.LIST"] || [];
-      const gstArr = Array.isArray(gstList) ? gstList : [gstList];
-      const validGST = gstArr.find((g) => g?.GSTRATE || g?.["STATEWISEDETAILS.LIST"]);
-
-      if (validGST) {
-        if (validGST.GSTRATE) {
-          gstRate = parseFloat(validGST.GSTRATE) || 0;
-        } else {
-          const stateDetails = validGST["STATEWISEDETAILS.LIST"];
-          const stateArr = Array.isArray(stateDetails) ? stateDetails : [stateDetails];
-          gstRate = parseFloat(stateArr?.[0]?.RATEOFTAX || stateArr?.[0]?.GSTRATE || 0) || 0;
+      // Item has no GST override of its own -> fall back to its stock
+      // group's rate (set once at the company/group level in Tally).
+      if (!igstRate && !cgstRate && !sgstRate) {
+        const groupGst = groupGstMap.get(groupName.toLowerCase());
+        if (groupGst) {
+          igstRate = parseFloat(groupGst.igst_rate) || 0;
+          cgstRate = parseFloat(groupGst.cgst_rate) || 0;
+          sgstRate = parseFloat(groupGst.sgst_rate) || 0;
+          if (!hsnCode) hsnCode = groupGst.hsn_code || null;
         }
       }
 
-      const cgstRate = gstRate / 2;
-      const sgstRate = gstRate / 2;
-      const igstRate = gstRate;
+      const gstRate = igstRate;
 
       return { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate };
     }
@@ -1496,6 +1512,106 @@ router.get("/stock-group-summary-sync", async (req, res) => {
   } catch (err) {
     await client.query("ROLLBACK");
     console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
+    return res.status(500).json({ status: "error", message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+/* ===================================================
+  STOCK GROUP GST SYNC
+  Group-level GST fallback data — must run BEFORE
+  /stock-group-summary-sync in the worker's sync sequence, since that
+  route reads this table to resolve items with no GST override of their own.
+=================================================== */
+router.get("/stock-group-gst-sync", async (req, res) => {
+  const company = req.query.company;
+  if (!company) return res.status(400).json({ status: "error", message: "company required" });
+
+  const client = await pool.connect();
+
+  try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    await client.query("BEGIN");
+
+    const companyId = await getCompanyId(userId, company, client);
+    if (!companyId) throw new Error("Company not found");
+
+    const owns = await userOwnsCompany(userId, companyId, client);
+    if (!owns) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
+    }
+
+    const xml = getStockGroupGSTXML(company);
+    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+    const parsed = await parseXML(responseXML);
+
+    const stockGroups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKGROUP || [];
+    const list = Array.isArray(stockGroups) ? stockGroups : [stockGroups];
+
+    let inserted = 0, updated = 0;
+
+    for (const group of list) {
+      let groupName =
+        group?.NAME || group?.["@_NAME"] ||
+        group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME || null;
+      if (Array.isArray(groupName)) groupName = groupName[0];
+      if (typeof groupName === "object" && groupName !== null) {
+        groupName = groupName._ || groupName.NAME || JSON.stringify(groupName);
+      }
+      groupName = clean(groupName);
+      if (!groupName) continue;
+
+      const hsnCode = clean(group?.HSNCODE || null) || null;
+      const igstRate = parseFloat(group?.IGSTRATE) || 0;
+      const cgstRate = parseFloat(group?.CGSTRATE) || 0;
+      const sgstRate = parseFloat(group?.SGSTRATE) || 0;
+      const cessRate = parseFloat(group?.CESSRATE) || 0;
+
+      const existing = await client.query(
+        `SELECT id FROM app_test.stock_group_gst_details WHERE company_id = $1 AND lower(trim(group_name)) = lower(trim($2))`,
+        [companyId, groupName]
+      );
+
+      if (existing.rows.length > 0) {
+        await client.query(
+          `
+          UPDATE app_test.stock_group_gst_details
+          SET company_name=$1, hsn_code=$2, igst_rate=$3, cgst_rate=$4, sgst_rate=$5, cess_rate=$6, updated_at=NOW()
+          WHERE id = $7
+          `,
+          [company, hsnCode, igstRate, cgstRate, sgstRate, cessRate, existing.rows[0].id]
+        );
+        updated++;
+        continue;
+      }
+
+      await client.query(
+        `
+        INSERT INTO app_test.stock_group_gst_details
+        (company_id, company_name, group_name, hsn_code, igst_rate, cgst_rate, sgst_rate, cess_rate)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        `,
+        [companyId, company, groupName, hsnCode, igstRate, cgstRate, sgstRate, cessRate]
+      );
+      inserted++;
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Stock group GST details synced successfully",
+      company,
+      summary: { inserted, updated, total: list.length }
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.log("❌ STOCK GROUP GST SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
     client.release();

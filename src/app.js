@@ -91,6 +91,9 @@ from "./api/stockGroupSummary.js";
 import salesItemsRoutes
 from "./api/salesItems.routes.js";
 
+import invoiceCalculationRoutes
+from "./api/invoiceCalculation.routes.js";
+
 import pushLedgerRoutes
 from "./api/pushLedger.routes.js";
 
@@ -406,6 +409,16 @@ app.use(
   "/api",
   ...requireSessionOrApiKey(),
   stockGroupSummaryRoute
+);
+
+/* =================================
+   INVOICE / STOCK ITEM CALCULATION API
+================================= */
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  invoiceCalculationRoutes
 );
 
 /* =================================

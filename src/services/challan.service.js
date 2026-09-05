@@ -95,6 +95,7 @@ function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
       item_name:        String(item.item_name || "").trim(),
       godown_name:      String(item.godown_name || "").trim() || null,
       hsn_code:         String(item.hsn_code   || "").trim() || null,
+      narration:        String(item.narration || "").trim() || null,
       qty,
       rate,
       gst_rate:         "0%",
@@ -124,6 +125,7 @@ function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
     item_name:        String(item.item_name || "").trim(),
     godown_name:      String(item.godown_name || "").trim() || null,
     hsn_code:         String(item.hsn_code   || "").trim() || null,
+    narration:        String(item.narration || "").trim() || null,
     qty,
     rate,
     gst_rate:         `${gstRate}%`,
@@ -343,18 +345,18 @@ export async function createChallan(data) {
     for (const [idx, it] of computedItems.entries()) {
       const itemRes = await client.query(
         `INSERT INTO ${DB_SCHEMA}.challan_items (
-          challan_id, item_name, godown_name, hsn_code,
+          challan_id, item_name, godown_name, hsn_code, narration,
           qty, rate, gst_rate, discount_percent,
           taxable_amount, cgst_amount, sgst_amount, igst_amount,
           line_total, sort_order
         ) VALUES (
-          $1,$2,$3,$4,
-          $5,$6,$7,$8,
-          $9,$10,$11,$12,
-          $13,$14
+          $1,$2,$3,$4,$5,
+          $6,$7,$8,$9,
+          $10,$11,$12,$13,
+          $14,$15
         ) RETURNING *`,
         [
-          challanId, it.item_name, it.godown_name, it.hsn_code,
+          challanId, it.item_name, it.godown_name, it.hsn_code, it.narration,
           it.qty, it.rate, it.gst_rate, it.discount_percent,
           it.taxable_amount, it.cgst_amount, it.sgst_amount, it.igst_amount,
           it.line_total, idx,
@@ -466,18 +468,18 @@ export async function updateChallan(challanId, companyId, data) {
     for (const [idx, it] of computedItems.entries()) {
       const itemRes = await client.query(
         `INSERT INTO ${DB_SCHEMA}.challan_items (
-          challan_id, item_name, godown_name, hsn_code,
+          challan_id, item_name, godown_name, hsn_code, narration,
           qty, rate, gst_rate, discount_percent,
           taxable_amount, cgst_amount, sgst_amount, igst_amount,
           line_total, sort_order
         ) VALUES (
-          $1,$2,$3,$4,
-          $5,$6,$7,$8,
-          $9,$10,$11,$12,
-          $13,$14
+          $1,$2,$3,$4,$5,
+          $6,$7,$8,$9,
+          $10,$11,$12,$13,
+          $14,$15
         ) RETURNING *`,
         [
-          challanId, it.item_name, it.godown_name, it.hsn_code,
+          challanId, it.item_name, it.godown_name, it.hsn_code, it.narration,
           it.qty, it.rate, it.gst_rate, it.discount_percent,
           it.taxable_amount, it.cgst_amount, it.sgst_amount, it.igst_amount,
           it.line_total, idx,
@@ -554,6 +556,7 @@ export async function getAllChallans(companyId, filters = {}) {
        ci.item_name,
        ci.godown_name,
        ci.hsn_code,
+       ci.narration,
        ci.qty,
        ci.rate,
        ci.gst_rate,
@@ -756,7 +759,7 @@ export async function getChallanById(challanId, companyId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function updateChallanStatus(challanId, companyId, status) {
-  const allowed = ["DRAFT", "CONFIRMED", "CANCELLED"];
+  const allowed = ["DRAFT", "CONFIRMED", "CANCELLED", "INVOICED"];
   if (!allowed.includes(status)) {
     throw new Error(`Invalid status. Allowed: ${allowed.join(", ")}`);
   }
@@ -770,4 +773,27 @@ export async function updateChallanStatus(challanId, companyId, status) {
   );
 
   return result.rows[0] || null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: markChallansInvoiced
+// Called once a Sales Invoice is successfully created/queued against one or
+// more delivery challans, so they stop showing up in "Bills to be Made".
+// Matches by challan_number (that's all the invoice payload carries), scoped
+// to the company so numbers can't collide across tenants.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function markChallansInvoiced(companyId, challanNumbers) {
+  const numbers = [...new Set((challanNumbers || []).map((n) => String(n || "").trim()).filter(Boolean))];
+  if (!numbers.length) return 0;
+
+  const result = await pool.query(
+    `UPDATE ${DB_SCHEMA}.challans
+     SET status = 'INVOICED', updated_at = NOW()
+     WHERE company_id = $1 AND challan_number = ANY($2)
+     RETURNING id`,
+    [companyId, numbers]
+  );
+
+  return result.rowCount;
 }

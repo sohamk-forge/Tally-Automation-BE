@@ -25,7 +25,7 @@ const connection = new IORedis({
 =================================================== */
 
 const api = axios.create({
-  baseURL: process.env.BASE_URL || "http://localhost:5000",
+  baseURL: process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`,
   timeout: 300000,
   headers: {
     "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
@@ -220,6 +220,14 @@ const worker = new Worker(
     await runSyncStep({
       label: "BANK ACCOUNTS",
       path: "/api/sync/group-summary-bank",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "STOCK GROUP GST DETAILS",
+      path: "/api/sync/stock-group-gst-sync",
       params: { company },
       userId,
       results

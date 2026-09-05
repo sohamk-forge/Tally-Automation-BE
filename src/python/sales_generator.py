@@ -244,8 +244,17 @@ for item in line_items:
     amount = abs(float(item.get("amount") or (qty * rate)))
     ledger = item.get("ledger") or sales_ledger
     godown = item.get("godown_name") or invoice.get("godown_name")
+    description = (item.get("description") or item.get("narration") or "").strip()
 
     ail = sub(vch, "ALLINVENTORYENTRIES.LIST")
+
+    if description:
+        # Must come before STOCKITEMNAME — matches the element order Tally
+        # itself uses when exporting a voucher with an item description.
+        desc_list = sub(ail, "BASICUSERDESCRIPTION.LIST")
+        desc_list.set("TYPE", "String")
+        sub(desc_list, "BASICUSERDESCRIPTION", description)
+
     sub(ail, "STOCKITEMNAME",    name)
     sub(ail, "ISDEEMEDPOSITIVE", "No")
     sub(ail, "RATE",             f"{rate:.2f}")
@@ -304,8 +313,31 @@ if cess_amount > 0 and cess_ledger:
 if abs(round_off) >= 0.01:
     lel = sub(vch, "LEDGERENTRIES.LIST")
     sub(lel, "LEDGERNAME",       rounded_off_ledger)
-    sub(lel, "ISDEEMEDPOSITIVE", "Yes" if round_off > 0 else "No")
+    # Confirmed against real Tally imports (vouchers 124-126): ISDEEMEDPOSITIVE
+    # "Yes" makes Tally display a POSITIVE round_off as a subtraction
+    # ("(-)0.38" instead of "0.38") regardless of the actual AMOUNT sign —
+    # it was flipping the display for no reason. "No" lets the signed
+    # AMOUNT value itself (already correct) carry the +/- meaning, for
+    # both a positive add and a negative subtract.
+    sub(lel, "ISDEEMEDPOSITIVE", "No")
     sub(lel, "AMOUNT",           f"{round_off:.2f}")
+
+# Delivery Challan references — one INVOICEDELNOTES.LIST per challan the
+# invoice is billed against. No cap on count; Tally accepts as many as the
+# voucher was created against (confirmed against a real Tally XML export —
+# these are the "Delivery Note" / "Delivery Note Date" print fields, not
+# the Despatch Doc No. fields, and not related to REFERENCE/REFERENCEDATE).
+delivery_challans = invoice.get("delivery_challans") or []
+for dc in delivery_challans:
+    dc_no   = str(dc.get("number") or dc.get("challan_no") or dc.get("dc_no") or "").strip()
+    dc_date = parse_date(dc.get("date") or dc.get("challan_date") or dc.get("dc_date"))
+    if not dc_no and not dc_date:
+        continue
+    dn = sub(vch, "INVOICEDELNOTES.LIST")
+    if dc_date:
+        sub(dn, "BASICSHIPPINGDATE",     dc_date)
+    if dc_no:
+        sub(dn, "BASICSHIPDELIVERYNOTE", dc_no)
 
 with open("sales_debug.xml", "w", encoding="utf-8") as f:
      f.write(tostring(envelope, encoding="unicode"))
