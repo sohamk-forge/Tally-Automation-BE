@@ -1405,7 +1405,7 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const groupGstResult = await client.query(
       `
       SELECT DISTINCT ON (lower(trim(group_name)))
-        group_name, hsn_code, igst_rate, cgst_rate, sgst_rate
+        group_name, hsn_code, igst_rate, cgst_rate, sgst_rate, gst_applicable
       FROM app_test.stock_group_gst_details
       WHERE company_id = $1
       ORDER BY lower(trim(group_name)), id DESC
@@ -1444,11 +1444,23 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       let cgstRate = parseFloat(item?.CGSTRATE) || 0;
       let sgstRate = parseFloat(item?.SGSTRATE) || 0;
 
+      // Tally's own "GST Applicable: Applicable / Not Applicable" flag on
+      // the item itself. Absent/blank is treated as applicable (keeps
+      // existing behavior for items synced before this flag was fetched);
+      // only an explicit "Not Applicable" flips this false.
+      const itemGstApplicable =
+        String(item?.GSTAPPLICABLE || "").trim().toLowerCase() !== "not applicable";
+
       // Item has no GST override of its own -> fall back to its stock
-      // group's rate (set once at the company/group level in Tally).
-      if (!igstRate && !cgstRate && !sgstRate) {
+      // group's rate (set once at the company/group level in Tally) —
+      // but ONLY if the item hasn't explicitly opted out of GST itself.
+      // Previously this only checked "rates are zero", which can't tell
+      // an item with no override apart from one deliberately marked
+      // Not Applicable — the latter would silently inherit a taxed
+      // group's rate and get charged GST it was explicitly exempted from.
+      if (!igstRate && !cgstRate && !sgstRate && itemGstApplicable) {
         const groupGst = groupGstMap.get(groupName.toLowerCase());
-        if (groupGst) {
+        if (groupGst && groupGst.gst_applicable !== false) {
           igstRate = parseFloat(groupGst.igst_rate) || 0;
           cgstRate = parseFloat(groupGst.cgst_rate) || 0;
           sgstRate = parseFloat(groupGst.sgst_rate) || 0;
@@ -1456,15 +1468,22 @@ router.get("/stock-group-summary-sync", async (req, res) => {
         }
       }
 
-      const gstRate = igstRate;
+      // Belt-and-braces: an item explicitly Not Applicable is never taxed,
+      // even if it somehow still carries a stale nonzero rate of its own.
+      if (!itemGstApplicable) {
+        igstRate = 0; cgstRate = 0; sgstRate = 0;
+      }
 
-      return { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate };
+      const gstRate = igstRate;
+      const gstApplicable = itemGstApplicable;
+
+      return { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable };
     }
 
     let inserted = 0, updated = 0;
 
     for (const item of list) {
-      const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate } = extractItemFields(item);
+      const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
 
       const existing = await client.query(
         `SELECT id FROM app_test.stock_group_summary WHERE company_name = $1 AND item_name = $2`,
@@ -1476,10 +1495,10 @@ router.get("/stock-group-summary-sync", async (req, res) => {
           `
           UPDATE app_test.stock_group_summary
           SET company_id=$1, group_name=$2, hsn_code=$3, quantity=$4, stock_value=$5,
-              unit=$6, gst_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10, updated_at=NOW()
-          WHERE company_name=$11 AND item_name=$12
+              unit=$6, gst_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10, gst_applicable=$11, updated_at=NOW()
+          WHERE company_name=$12 AND item_name=$13
           `,
-          [companyId, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, company, itemName]
+          [companyId, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable, company, itemName]
         );
         updated++;
         continue;
@@ -1488,10 +1507,10 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       await client.query(
         `
         INSERT INTO app_test.stock_group_summary
-        (company_id, company_name, group_name, item_name, hsn_code, quantity, stock_value, unit, gst_rate, cgst_rate, sgst_rate, igst_rate)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        (company_id, company_name, group_name, item_name, hsn_code, quantity, stock_value, unit, gst_rate, cgst_rate, sgst_rate, igst_rate, gst_applicable)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         `,
-        [companyId, company, groupName, itemName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate]
+        [companyId, company, groupName, itemName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable]
       );
       inserted++;
     }
@@ -1505,8 +1524,8 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       company,
       summary: { inserted, updated, total: list.length },
       data: list.map((item) => {
-        const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate } = extractItemFields(item);
-        return { group_name: groupName, item_name: itemName, hsn_code: hsnCode, quantity, stock_value: stockValue, unit, gst_rate: gstRate, cgst_rate: cgstRate, sgst_rate: sgstRate, igst_rate: igstRate };
+        const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
+        return { group_name: groupName, item_name: itemName, hsn_code: hsnCode, quantity, stock_value: stockValue, unit, gst_rate: gstRate, cgst_rate: cgstRate, sgst_rate: sgstRate, igst_rate: igstRate, gst_applicable: gstApplicable };
       })
     });
   } catch (err) {
@@ -1566,10 +1585,24 @@ router.get("/stock-group-gst-sync", async (req, res) => {
       if (!groupName) continue;
 
       const hsnCode = clean(group?.HSNCODE || null) || null;
-      const igstRate = parseFloat(group?.IGSTRATE) || 0;
-      const cgstRate = parseFloat(group?.CGSTRATE) || 0;
-      const sgstRate = parseFloat(group?.SGSTRATE) || 0;
-      const cessRate = parseFloat(group?.CESSRATE) || 0;
+      let igstRate = parseFloat(group?.IGSTRATE) || 0;
+      let cgstRate = parseFloat(group?.CGSTRATE) || 0;
+      let sgstRate = parseFloat(group?.SGSTRATE) || 0;
+      let cessRate = parseFloat(group?.CESSRATE) || 0;
+
+      // Tally's own "GST Applicable: Applicable / Not Applicable" flag —
+      // absent/blank means the field wasn't set either way, which we treat
+      // as applicable (preserves pre-existing behavior for groups synced
+      // before this flag was fetched). Only an explicit "Not Applicable"
+      // flips this false.
+      const gstApplicable =
+        String(group?.GSTAPPLICABLE || "").trim().toLowerCase() !== "not applicable";
+
+      // A group explicitly marked GST-not-applicable should never hand a
+      // nonzero rate down to items that fall back to it.
+      if (!gstApplicable) {
+        igstRate = 0; cgstRate = 0; sgstRate = 0; cessRate = 0;
+      }
 
       const existing = await client.query(
         `SELECT id FROM app_test.stock_group_gst_details WHERE company_id = $1 AND lower(trim(group_name)) = lower(trim($2))`,
@@ -1580,10 +1613,10 @@ router.get("/stock-group-gst-sync", async (req, res) => {
         await client.query(
           `
           UPDATE app_test.stock_group_gst_details
-          SET company_name=$1, hsn_code=$2, igst_rate=$3, cgst_rate=$4, sgst_rate=$5, cess_rate=$6, updated_at=NOW()
-          WHERE id = $7
+          SET company_name=$1, hsn_code=$2, igst_rate=$3, cgst_rate=$4, sgst_rate=$5, cess_rate=$6, gst_applicable=$7, updated_at=NOW()
+          WHERE id = $8
           `,
-          [company, hsnCode, igstRate, cgstRate, sgstRate, cessRate, existing.rows[0].id]
+          [company, hsnCode, igstRate, cgstRate, sgstRate, cessRate, gstApplicable, existing.rows[0].id]
         );
         updated++;
         continue;
@@ -1592,10 +1625,10 @@ router.get("/stock-group-gst-sync", async (req, res) => {
       await client.query(
         `
         INSERT INTO app_test.stock_group_gst_details
-        (company_id, company_name, group_name, hsn_code, igst_rate, cgst_rate, sgst_rate, cess_rate)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        (company_id, company_name, group_name, hsn_code, igst_rate, cgst_rate, sgst_rate, cess_rate, gst_applicable)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         `,
-        [companyId, company, groupName, hsnCode, igstRate, cgstRate, sgstRate, cessRate]
+        [companyId, company, groupName, hsnCode, igstRate, cgstRate, sgstRate, cessRate, gstApplicable]
       );
       inserted++;
     }

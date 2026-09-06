@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 
 const router = express.Router();
 
@@ -173,6 +174,12 @@ router.post("/invoice/calculate", async (req, res) => {
           return res.status(400).json({ status: "error", message: `items[${i}].discount must be between 0 and 100` });
         }
       }
+      if (item.gst_rate_override !== undefined && item.gst_rate_override !== null && item.gst_rate_override !== "") {
+        const override = Number(item.gst_rate_override);
+        if (!Number.isFinite(override) || override < 0 || override > 100) {
+          return res.status(400).json({ status: "error", message: `items[${i}].gst_rate_override must be between 0 and 100` });
+        }
+      }
     }
 
     /* ---------------------------------------
@@ -258,7 +265,7 @@ router.post("/invoice/calculate", async (req, res) => {
     const stockRowsResult = await pool.query(
       `
       SELECT DISTINCT ON (lower(trim(item_name)))
-        item_name, hsn_code, unit, gst_rate, cgst_rate, sgst_rate, igst_rate
+        item_name, hsn_code, unit, gst_rate, cgst_rate, sgst_rate, igst_rate, gst_applicable
       FROM ${DB_SCHEMA}.stock_group_summary
       WHERE company_id = $1
       ORDER BY lower(trim(item_name)), id DESC
@@ -287,21 +294,60 @@ router.post("/invoice/calculate", async (req, res) => {
       const discount = Number(item.discount) || 0;
       const taxableAmount = round2(quantity * rate * (1 - discount / 100));
 
-      const dbRow = stockByName.get(normalizeItemName(itemName));
+      let dbRow = stockByName.get(normalizeItemName(itemName));
+
+      // Exact (whitespace-normalized) match failed — fall back to a fuzzy
+      // match against the same stock rows for trivial typo/punctuation
+      // drift, rather than immediately defaulting to 0% GST. Only
+      // auto-accepted above a high similarity threshold.
+      if (!dbRow) {
+        const bestMatchName = findBestItemMatch(
+          stockRowsResult.rows.map((r) => r.item_name),
+          itemName
+        );
+        if (bestMatchName) {
+          dbRow = stockByName.get(normalizeItemName(bestMatchName));
+        }
+      }
+
       const found = Boolean(dbRow);
 
       if (!found) {
         warnings.push(`items[${index}] "${itemName}": not found in stock_group_summary for this company — GST rate defaulted to 0%`);
       }
 
+      // A manual override from the frontend (the user explicitly picking a
+      // rate in the invoice line's GST dropdown) wins over everything else
+      // — including a stock item marked GST-not-applicable, since the user
+      // is deliberately correcting/overriding what the master data says.
+      const hasOverride =
+        item.gst_rate_override !== undefined && item.gst_rate_override !== null && item.gst_rate_override !== "";
+      const overrideRate = hasOverride ? safeNumber(item.gst_rate_override) : null;
+
+      // Explicit "GST Applicable: Not Applicable" on the item itself wins
+      // over everything else except a manual override, including a stale
+      // nonzero rate that predates this flag being synced — an item marked
+      // exempt is never taxed unless the user says otherwise above.
+      const gstNotApplicable = !hasOverride && dbRow?.gst_applicable === false;
+
       const storedCgstRate = safeNumber(dbRow?.cgst_rate);
       const storedSgstRate = safeNumber(dbRow?.sgst_rate);
       const storedIgstRate = safeNumber(dbRow?.igst_rate);
-      const hasStoredRates = storedCgstRate > 0 || storedSgstRate > 0 || storedIgstRate > 0;
+      const hasStoredRates = !hasOverride && !gstNotApplicable && (storedCgstRate > 0 || storedSgstRate > 0 || storedIgstRate > 0);
 
       let cgstRate = 0, sgstRate = 0, igstRate = 0, rateSource;
 
-      if (hasStoredRates) {
+      if (hasOverride) {
+        if (isIntrastate) {
+          cgstRate = overrideRate / 2;
+          sgstRate = overrideRate / 2;
+        } else {
+          igstRate = overrideRate;
+        }
+        rateSource = "manual_override";
+      } else if (gstNotApplicable) {
+        rateSource = "gst_not_applicable";
+      } else if (hasStoredRates) {
         cgstRate = storedCgstRate;
         sgstRate = storedSgstRate;
         igstRate = storedIgstRate;
@@ -331,7 +377,11 @@ router.post("/invoice/calculate", async (req, res) => {
         rate,
         discount,
         taxable_amount: taxableAmount,
-        gst_rate: safeNumber(dbRow?.gst_rate),
+        // The rate actually used for this line — reflects a manual
+        // override when one was sent, otherwise the synced master rate.
+        // (Separate from cgst_rate/sgst_rate/igst_rate below, which are
+        // this same total already split by tax type.)
+        gst_rate: hasOverride ? overrideRate : safeNumber(dbRow?.gst_rate),
         cgst_rate: cgstRate,
         sgst_rate: sgstRate,
         igst_rate: igstRate,

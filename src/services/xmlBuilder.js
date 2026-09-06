@@ -1043,7 +1043,8 @@ const gstRateMethods = (objectType) => `
 <METHOD>IGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsIGST].GSTRate</METHOD>
 <METHOD>CGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCGST].GSTRate</METHOD>
 <METHOD>SGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsSGST].GSTRate</METHOD>
-<METHOD>CessRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCess].GSTRate</METHOD>`;
+<METHOD>CessRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCess].GSTRate</METHOD>
+<METHOD>GSTApplicable:$GSTDetails[Last].Applicability</METHOD>`;
 
 export const getStockGroupSummaryXML = (company) => {
   return `
@@ -1635,4 +1636,45 @@ export const getProfitLossReportXML = (company) => {
   </BODY>
 </ENVELOPE>
 `;
+};
+
+// Checks whether a Sales voucher with the given reference number already
+// exists in Tally — used before re-pushing a previously-failed/retried
+// invoice, so a voucher that actually succeeded on an earlier attempt
+// (but wasn't recorded as such on our side) isn't sent to Tally a second
+// time, where it would be silently rejected as a duplicate
+// (CREATED=0/ALTERED=0/EXCEPTIONS=1, no LINEERROR).
+export const getSalesVoucherExistsXML = (company, referenceNo) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>SalesRefCheck</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="RefMatch">
+      $VoucherTypeName = "Sales" AND $Reference = "${referenceNo}"
+     </SYSTEM>
+     <COLLECTION NAME="SalesRefCheck">
+      <TYPE>Voucher</TYPE>
+      <FILTERS>RefMatch</FILTERS>
+      <FETCH>VOUCHERNUMBER</FETCH>
+      <FETCH>REFERENCE</FETCH>
+      <FETCH>DATE</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
 };

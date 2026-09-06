@@ -4,6 +4,7 @@ import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
 import { markChallansInvoiced } from "../services/challan.service.js";
+import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 
 const router = express.Router();
 
@@ -12,18 +13,17 @@ function safeNumber(value) {
   return isNaN(num) ? 0 : num;
 }
 
-// Recognizes Maharashtra by name/abbreviation/code — used as a fallback
-// when there's no GSTIN to derive the customer's state from (see the same
-// check in bulkSales.worker.js / bulkSalesV2.worker.js).
-function isMaharashtraState(value) {
-  const state = String(value || "").trim().toLowerCase();
-  return (
-    state === "maharashtra" ||
-    state === "mh" ||
-    state === "27" ||
-    state === "Maharashtra" ||
-    state.includes("maharashtra")
-  );
+// Free-text state name match against the COMPANY's own state (fetched
+// dynamically from company_details — see companyStateCode/companyStateName
+// below), used as a fallback only when there's no GSTIN to derive the
+// customer's state code from. Previously this hardcoded "Maharashtra" as
+// if every company using this app were based there; it's now compared
+// against whichever company is actually making the call.
+function isSameStateAsCompany(customerState, companyStateName) {
+  const c = String(customerState || "").trim().toLowerCase();
+  const co = String(companyStateName || "").trim().toLowerCase();
+  if (!c || !co) return false;
+  return c === co || c.includes(co) || co.includes(c);
 }
 
 const GST_STATE_CODES = {
@@ -148,7 +148,7 @@ router.post("/sales-invoices", async (req, res) => {
     // carry their own rate.
     const gstPercent = safeNumber(cleanInvoiceData.gst_percent || 18);
 
-    // Step 3: State check (same logic as bulk sales worker)
+    // Step 3: State check
     const gstin = String(
       cleanInvoiceData.customer_gstin ||
       cleanInvoiceData.gstin ||
@@ -156,6 +156,29 @@ router.post("/sales-invoices", async (req, res) => {
     ).trim();
 
     const stateCode = gstin.substring(0, 2);
+
+    // Company's own state — dynamically from company_details (synced from
+    // Tally's Company GST Details), same pattern already used in
+    // invoiceCalculation.routes.js / stockGroupSummary.js. Only falls back
+    // to "27" (Maharashtra) as a last resort if no company_details row
+    // exists yet — this used to be hardcoded unconditionally, which was
+    // wrong for any company not based in Maharashtra.
+    const companyDetailsResult = await pool.query(
+      `SELECT gstin, state FROM app_test.company_details WHERE trim(company_name) = trim($1) LIMIT 1`,
+      [company]
+    );
+    let companyStateCode = null;
+    let companyStateName = "";
+    if (companyDetailsResult.rows.length) {
+      const companyGSTIN = companyDetailsResult.rows[0].gstin || null;
+      if (companyGSTIN && /^[0-9]{2}/.test(companyGSTIN)) {
+        companyStateCode = companyGSTIN.substring(0, 2);
+      }
+      companyStateName = companyDetailsResult.rows[0].state || "";
+    }
+    if (!companyStateCode) {
+      companyStateCode = "27";
+    }
 
     // No GSTIN — fall back to the customer's bill-to state rather than
     // assuming intrastate. An unregistered customer outside Maharashtra is
@@ -190,8 +213,8 @@ router.post("/sales-invoices", async (req, res) => {
     }
 
     const isIntrastate = stateCode
-      ? stateCode === "27"
-      : isMaharashtraState(customerState) || !customerState;
+      ? stateCode === companyStateCode
+      : isSameStateAsCompany(customerState, companyStateName) || !customerState;
 
     // Step 4: GST amount - trust the value the frontend already computed
     // and sent (cgst_amount/sgst_amount/igst_amount on invoice_data). The
@@ -546,7 +569,12 @@ router.get("/sales-invoices", async (req, res) => {
       query += ` AND error_count > 0`;
     }
 
-    query += ` ORDER BY id DESC`;
+    // Most-recently-touched first, not just most-recently-created — an
+    // invoice that just succeeded via a Review-tab retry (same row, same
+    // id, but freshly re-validated and pushed) should surface at the top
+    // of All Invoices immediately, not stay buried wherever its original
+    // (much older) id happens to sort.
+    query += ` ORDER BY updated_at DESC, id DESC`;
 
     const result = await pool.query(query, params);
 
@@ -663,6 +691,403 @@ router.delete("/sales-invoice-delete", async (req, res) => {
       status: "error",
       message: err.message
     });
+  }
+});
+
+/* =========================================
+   GET /sales-invoices/missing-summary
+   Aggregates distinct missing ledgers/stock items across every failed
+   invoice for a company, so the Review tab can list "this ledger is
+   blocking 3 invoices" instead of the user finding that out one invoice
+   at a time. Reads the structured JSON pushSalesInvoice.worker.js already
+   writes into error_message on a validation failure — rows whose
+   error_message isn't that shape (a different kind of failure, or a
+   historical row from before this format existed) are safely skipped
+   rather than guessed at.
+========================================= */
+router.get("/sales-invoices/missing-summary", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const companyId = validateCompanyId(req.query.company_id);
+    if (!companyId) {
+      return res.status(400).json({ status: "error", message: "company_id query parameter required" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT id, error_message
+      FROM app_test.sales_invoice_extractions
+      WHERE company_id = $1
+        AND sync_status IN ('ledger_missing', 'stock_missing', 'ledger_and_stock_missing', 'failed')
+        AND error_message IS NOT NULL
+      `,
+      [companyId]
+    );
+
+    const ledgerMap = new Map();
+    const itemMap = new Map();
+
+    const addTo = (map, rawName, invoiceId) => {
+      const name = String(rawName || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, { name, count: 0, invoice_ids: [] });
+      }
+      const entry = map.get(key);
+      entry.count += 1;
+      entry.invoice_ids.push(invoiceId);
+    };
+
+    for (const row of result.rows) {
+      let parsed;
+      try {
+        parsed = JSON.parse(row.error_message);
+      } catch {
+        continue; // not JSON — a different kind of failure, skip
+      }
+
+      for (const l of parsed.missing_ledgers || []) {
+        addTo(ledgerMap, l.ledger || l.name || l, row.id);
+      }
+      for (const itemName of parsed.missing_stock_items || []) {
+        addTo(itemMap, itemName, row.id);
+      }
+    }
+
+    // Fuzzy-match suggestions for each missing item name, against every
+    // real stock item name this company actually has (synced from Tally,
+    // or already successfully pushed) — so the user can resolve a typo'd
+    // or slightly-off name from the upload sheet by mapping it onto a real
+    // item that already exists, instead of creating a duplicate. This is
+    // suggest-only (much lower threshold than the auto-apply match used
+    // during push validation) — nothing here changes any data on its own.
+    const missingItemNames = [...itemMap.values()];
+    if (missingItemNames.length) {
+      const knownNamesResult = await pool.query(
+        `
+        SELECT item_name FROM app_test.stock_group_summary WHERE company_id = $1
+        UNION
+        SELECT item_name FROM app_test.push_stock_item WHERE company_id = $1 AND status = 'success'
+        `,
+        [companyId]
+      );
+      const knownNames = knownNamesResult.rows.map((r) => r.item_name).filter(Boolean);
+
+      for (const entry of missingItemNames) {
+        // Only surface a suggestion the user can trust at a glance — 90%+
+        // similarity, same floor as the auto-apply match used during push
+        // validation. Below that, a wrong guess is more distracting than
+        // helpful, so nothing is shown rather than a shaky suggestion.
+        entry.suggestions = findTopItemMatches(knownNames, entry.name, { minScore: 0.9 });
+      }
+    }
+
+    return res.status(200).json({
+      status: "success",
+      missing_ledgers: [...ledgerMap.values()].sort((a, b) => b.count - a.count),
+      missing_stock_items: missingItemNames.sort((a, b) => b.count - a.count)
+    });
+  } catch (err) {
+    console.error("GET missing-summary error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   POST /sales-invoices/resolve-missing-item
+   Renames a missing item name to a real, existing stock item name across
+   every affected invoice's own stored line items, then re-queues those
+   invoices — the "did you mean X?" fix from the Review tab's Items view.
+   Unlike retry-batch (which just re-pushes unchanged data), this actually
+   edits raw_json first, since retrying with the same wrong name would only
+   fail validation again the same way.
+========================================= */
+router.post("/sales-invoices/resolve-missing-item", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const { company, wrong_name, correct_name, invoice_ids } = req.body;
+
+    if (!company) {
+      return res.status(400).json({ status: "error", message: "company is required" });
+    }
+    if (!String(wrong_name || "").trim() || !String(correct_name || "").trim()) {
+      return res.status(400).json({ status: "error", message: "wrong_name and correct_name are required" });
+    }
+    if (!Array.isArray(invoice_ids) || invoice_ids.length === 0) {
+      return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
+    }
+
+    const companyResult = await pool.query(
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND lower(trim(c.name)) = lower(trim($2))
+      LIMIT 1
+      `,
+      [userId, company]
+    );
+
+    const companyId = companyResult.rows[0]?.id;
+    if (!companyId) {
+      return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
+    }
+
+    const existing = await pool.query(
+      `
+      SELECT id, raw_json
+      FROM app_test.sales_invoice_extractions
+      WHERE id = ANY($1) AND company_id = $2
+      `,
+      [invoice_ids, companyId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ status: "error", message: "No matching invoices found for this company" });
+    }
+
+    const wrongNameLower = String(wrong_name).trim().toLowerCase();
+    const results = [];
+
+    for (const row of existing.rows) {
+      try {
+        const rawJson = typeof row.raw_json === "string" ? JSON.parse(row.raw_json) : row.raw_json;
+        const lineItems = Array.isArray(rawJson?.line_items) ? rawJson.line_items : [];
+
+        let renamed = 0;
+        for (const item of lineItems) {
+          if (String(item.item_name || "").trim().toLowerCase() === wrongNameLower) {
+            item.item_name = correct_name;
+            renamed++;
+          }
+        }
+
+        if (renamed === 0) {
+          results.push({ id: row.id, status: "skipped", message: "item name not found on this invoice" });
+          continue;
+        }
+
+        await pool.query(
+          `
+          UPDATE app_test.sales_invoice_extractions
+          SET raw_json = $1, sync_status = 'pending', error_count = 0, error_message = NULL, updated_at = NOW()
+          WHERE id = $2
+          `,
+          [rawJson, row.id]
+        );
+        await safeEnqueueSales(row.id, userId);
+        results.push({ id: row.id, status: "queued" });
+      } catch (err) {
+        console.error(`resolve-missing-item: failed for invoice ${row.id}:`, err.message);
+        results.push({ id: row.id, status: "error", message: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      status: "success",
+      message: `${results.filter((r) => r.status === "queued").length} of ${invoice_ids.length} invoice(s) updated and re-queued`,
+      results
+    });
+  } catch (err) {
+    console.error("POST resolve-missing-item error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   POST /sales-invoices/retry-batch
+   Re-queues a set of previously-failed invoices for another push attempt,
+   straight from each row's own already-stored raw_json — used after the
+   user creates a missing ledger/stock item from the Review tab and wants
+   to clear every invoice that was blocked on it in one action, rather
+   than reopening and re-pushing each one individually (the existing
+   single-invoice retry on POST /sales-invoices expects a freshly-edited
+   invoice_data payload, which is the wrong shape here — nothing about
+   these invoices changed except the missing entity now exists).
+========================================= */
+router.post("/sales-invoices/retry-batch", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const { company, invoice_ids } = req.body;
+
+    if (!company) {
+      return res.status(400).json({ status: "error", message: "company is required" });
+    }
+    if (!Array.isArray(invoice_ids) || invoice_ids.length === 0) {
+      return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
+    }
+    const invalidIds = invoice_ids.filter((id) => isNaN(Number(id)));
+    if (invalidIds.length > 0) {
+      return res.status(400).json({ status: "error", message: "All invoice ids must be valid numbers" });
+    }
+
+    // Scoped to this acting user's own pairing, same ownership pattern as
+    // the single-invoice push route above — a company this user has no
+    // access to simply won't match, and the ANY($2) below then can't
+    // touch any row belonging to it.
+    const companyResult = await pool.query(
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND lower(trim(c.name)) = lower(trim($2))
+      LIMIT 1
+      `,
+      [userId, company]
+    );
+
+    const companyId = companyResult.rows[0]?.id;
+    if (!companyId) {
+      return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
+    }
+
+    const existing = await pool.query(
+      `
+      SELECT id
+      FROM app_test.sales_invoice_extractions
+      WHERE id = ANY($1) AND company_id = $2
+      `,
+      [invoice_ids, companyId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ status: "error", message: "No matching invoices found for this company" });
+    }
+
+    const results = [];
+    for (const row of existing.rows) {
+      try {
+        await pool.query(
+          `
+          UPDATE app_test.sales_invoice_extractions
+          SET sync_status = 'pending', error_count = 0, error_message = NULL, updated_at = NOW()
+          WHERE id = $1
+          `,
+          [row.id]
+        );
+        await safeEnqueueSales(row.id, userId);
+        results.push({ id: row.id, status: "queued" });
+      } catch (err) {
+        console.error(`retry-batch: failed to re-queue invoice ${row.id}:`, err.message);
+        results.push({ id: row.id, status: "error", message: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      status: "success",
+      message: `${results.filter((r) => r.status === "queued").length} of ${invoice_ids.length} invoice(s) re-queued`,
+      results
+    });
+  } catch (err) {
+    console.error("POST retry-batch error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// Resolves a "state_mismatch" invoice (customer's actual Tally ledger state
+// disagrees with the state on the invoice/bulk-upload sheet — see
+// pushSalesInvoice.worker.js's state-consistency check). The user picks
+// which one to trust; that choice only affects THIS invoice's own data
+// (its raw_json.customer_state), never the customer's ledger master itself.
+router.post("/sales-invoices/:id/resolve-state-mismatch", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const { id } = req.params;
+    const { chosen } = req.body;
+
+    if (!["ledger", "excel"].includes(chosen)) {
+      return res.status(400).json({ status: "error", message: "chosen must be 'ledger' or 'excel'" });
+    }
+
+    const invoiceResult = await pool.query(
+      `SELECT id, raw_json, error_message, sync_status FROM app_test.sales_invoice_extractions WHERE id = $1`,
+      [id]
+    );
+
+    const row = invoiceResult.rows[0];
+    if (!row) {
+      return res.status(404).json({ status: "error", message: "Invoice not found" });
+    }
+    if (row.sync_status !== "state_mismatch") {
+      return res.status(400).json({ status: "error", message: "This invoice has no state mismatch to resolve" });
+    }
+
+    let detail;
+    try {
+      detail = typeof row.error_message === "string" ? JSON.parse(row.error_message) : row.error_message;
+    } catch {
+      detail = null;
+    }
+
+    const chosenState = chosen === "ledger" ? detail?.ledger_state : detail?.invoice_state;
+    if (!chosenState) {
+      return res.status(400).json({ status: "error", message: "Could not resolve a state from the stored mismatch details" });
+    }
+
+    const rawJson = typeof row.raw_json === "string" ? JSON.parse(row.raw_json) : row.raw_json;
+    rawJson.customer_state = chosenState;
+
+    // Keeping the invoice's own state means it still disagrees with the
+    // ledger (that's the whole point of this choice) — mark it as a
+    // deliberate, already-confirmed decision so the worker's state-check
+    // doesn't just re-flag the identical mismatch again on this retry.
+    // Not needed for "ledger": that overwrites customer_state to equal the
+    // ledger's own state, so the comparison naturally passes on its own.
+    if (chosen === "excel") {
+      rawJson._state_mismatch_acknowledged = true;
+    }
+
+    await pool.query(
+      `
+      UPDATE app_test.sales_invoice_extractions
+      SET raw_json = $1, sync_status = 'pending', error_count = 0, error_message = NULL, updated_at = NOW()
+      WHERE id = $2
+      `,
+      [JSON.stringify(rawJson), id]
+    );
+
+    await safeEnqueueSales(Number(id), userId);
+
+    return res.status(200).json({
+      status: "success",
+      message: `Invoice re-queued using the ${chosen === "ledger" ? "ledger's" : "invoice's"} state ("${chosenState}").`
+    });
+  } catch (err) {
+    console.error("POST resolve-state-mismatch error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
   }
 });
 

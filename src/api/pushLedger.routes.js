@@ -101,7 +101,7 @@ router.post(
 
       const duplicateResult = await pool.query(
         `
-        SELECT id
+        SELECT *
         FROM ${DB_SCHEMA}.push_ledger
         WHERE company_id = $1
           AND LOWER(TRIM(ledger_name))
@@ -120,6 +120,23 @@ router.post(
       );
 
       if (duplicateResult.rows.length > 0) {
+        const existing = duplicateResult.rows[0];
+
+        // Already successfully pushed — this isn't a real duplicate
+        // attempt, it's the app catching up (all_ledger_details won't
+        // reflect it until the next full sync). Return it as a success so
+        // the caller (NewLedgerModal) can select it and move on, instead
+        // of a hard error that leaves the user stuck.
+        if (existing.status === "success") {
+          return res.status(200).json({
+            status: "success",
+            message: "Ledger already exists",
+            already_existed: true,
+            data: existing
+          });
+        }
+
+        // Still pending/processing — a genuine in-flight duplicate.
         return res.status(400).json({
           status: "error",
           message: "Ledger already queued or synced"
@@ -256,6 +273,72 @@ router.post(
         status: "error",
         message: err.message
       });
+    }
+  }
+);
+
+/* =========================================
+   GET /push/ledger/status/:companyId
+   Mirrors GET /push/stock-item/status/:companyId — lets the frontend
+   check "has this ledger already been successfully pushed" as an
+   immediately-consistent alternative to all_ledger_details, which only
+   catches up on the next full Tally sync.
+========================================= */
+router.get(
+  "/push/ledger/status/:companyId",
+  verifySession(),
+  async (req, res) => {
+    try {
+      const { companyId } = req.params;
+      const { status, ledger_name } = req.query;
+
+      let query = `
+        SELECT
+          id, company_id, company_name, ledger_name, parent_name,
+          opening_balance, bill_wise, address, pincode, state, country,
+          contact_person, phone, mobile, email, website, pan, gstin,
+          gst_registration_type, status, tally_response, error_message,
+          sync_at, created_at, updated_at
+        FROM ${DB_SCHEMA}.push_ledger
+        WHERE company_id = $1
+      `;
+      const params = [companyId];
+
+      if (status) {
+        query += ` AND status = $${params.length + 1}`;
+        params.push(status);
+      }
+
+      if (ledger_name) {
+        query += ` AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($${params.length + 1}))`;
+        params.push(ledger_name);
+      }
+
+      query += ` ORDER BY id DESC`;
+
+      const result = await pool.query(query, params);
+
+      const successItems = result.rows.filter((r) => r.status === "success");
+      const pendingItems = result.rows.filter((r) => r.status === "pending" || r.status === "processing");
+      const failedItems = result.rows.filter((r) => r.status === "failed");
+
+      return res.status(200).json({
+        status: "success",
+        count: result.rowCount,
+        summary: {
+          total: result.rowCount,
+          success: successItems.length,
+          pending: pendingItems.length,
+          failed: failedItems.length
+        },
+        data: result.rows,
+        successItems,
+        pendingItems,
+        failedItems
+      });
+    } catch (err) {
+      console.error("❌ LEDGER STATUS ERROR:", err);
+      return res.status(500).json({ status: "error", message: err.message });
     }
   }
 );

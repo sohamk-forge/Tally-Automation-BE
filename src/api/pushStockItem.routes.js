@@ -170,7 +170,7 @@ router.post(
       const existingItem =
         await pool.query(
           `
-          SELECT id
+          SELECT *
           FROM ${DB_SCHEMA}.push_stock_item
           WHERE company_id = $1
             AND LOWER(TRIM(item_name))
@@ -183,6 +183,19 @@ router.post(
           ]
         );
 
+      // Already successfully pushed — this is the app catching up
+      // (stock_group_summary won't reflect it until the next full sync),
+      // not a real re-creation request. Return it as-is instead of
+      // silently resetting it back to 'pending' and re-queueing a push
+      // that's already done.
+      if (existingItem.rows.length > 0 && existingItem.rows[0].status === "success") {
+        return res.status(200).json({
+          status: "success",
+          message: "Stock item already exists",
+          already_existed: true,
+          data: existingItem.rows[0]
+        });
+      }
 
       let stockItemRecord;
 
@@ -384,7 +397,7 @@ router.post(
       // 11. ADD JOB
       // ========================================================
 
-      const { action } = await safeEnqueueStockItem(
+      const { action, jobId } = await safeEnqueueStockItem(
         stockItemRecord.id,
         userId
       );

@@ -8,6 +8,11 @@ import { SALES_QUEUE_NAME, safeEnqueueSales } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { generateSalesXml } from "../services/xmlGenerator.js";
+import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
+import { getSalesVoucherExistsXML } from "../services/xmlBuilder.js";
+import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
+import { parseXML } from "../services/parser.js";
+import { resolveStateName, normalizeStateName } from "../utils/gstState.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -58,8 +63,16 @@ async function ledgerExists(companyId, ledgerName) {
   return found.rows.length > 0;
 }
 
+// Returns { exists, matchedName } rather than a bare boolean — when the
+// only reason this passes is a fuzzy match (no exact name on file), the
+// caller needs the REAL name back so it can correct the invoice's own
+// line item before generating XML. Previously this returned true/false
+// only, so a fuzzy-matched item passed validation but the invoice still
+// carried its original (typo'd/differently-formatted) name straight
+// through to the push — validation said "fine" while the actual pushed
+// data was never fixed.
 async function stockItemExists(companyId, stockItemName) {
-  if (!stockItemName) return false;
+  if (!stockItemName) return { exists: false, matchedName: null };
 
   // regexp_replace collapses any run of internal whitespace to a single
   // space on both sides — TRIM alone only strips the ends, so a bulk-upload
@@ -79,7 +92,44 @@ async function stockItemExists(companyId, stockItemName) {
     [companyId, stockItemName]
   );
 
-  return found.rows.length > 0;
+  if (found.rows.length > 0) return { exists: true, matchedName: null }; // exact match — no rename needed
+
+  // Exact match (even whitespace-normalized) failed — fall back to a
+  // fuzzy match against real item names for trivial typo/punctuation
+  // drift, so a near-identical name doesn't force the user into creating
+  // a duplicate stock item. Only auto-accepted above a high threshold.
+  const allNames = await pool.query(
+    `
+    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1
+    UNION
+    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item WHERE company_id = $1 AND status = 'success'
+    `,
+    [companyId]
+  );
+
+  const matchedName = findBestItemMatch(allNames.rows.map((r) => r.item_name), stockItemName);
+  return { exists: Boolean(matchedName), matchedName: matchedName || null };
+}
+
+// Real, registered state on file for this customer's ledger — the same
+// UNION source ledgerExists() already trusts as "does this ledger exist"
+// (synced Tally data, or a push we've already recorded as successful).
+async function getPartyLedgerState(companyId, partyName) {
+  if (!partyName) return null;
+
+  const found = await pool.query(
+    `
+    SELECT state FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND state IS NOT NULL AND TRIM(state) != ''
+    UNION
+    SELECT state FROM ${DB_SCHEMA}.push_ledger
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND status = 'success' AND state IS NOT NULL AND TRIM(state) != ''
+    LIMIT 1
+    `,
+    [companyId, partyName]
+  );
+
+  return found.rows[0]?.state || null;
 }
 
 /**
@@ -151,20 +201,30 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
   // the previous version silently never matched anything, so validation
   // always passed even when stock items were genuinely missing.
   const lineItems = Array.isArray(invoice.line_items) ? invoice.line_items : [];
+  const renamedItems = [];
   for (const item of lineItems) {
     const stockName = (item.item_name || item.stock_name || item.name || "").trim();
     if (!stockName) continue;
 
-    const exists = await stockItemExists(companyId, stockName);
+    const { exists, matchedName } = await stockItemExists(companyId, stockName);
     if (!exists && !missingStockItems.includes(stockName)) {
       missingStockItems.push(stockName);
+    } else if (matchedName && matchedName !== stockName) {
+      // Fuzzy match found the real item under a slightly different name —
+      // correct it on the invoice itself (mutates `invoice` in place, so
+      // both the XML this same object later generates AND the caller's
+      // own reference reflect the fix) rather than letting validation
+      // pass while the wrong name still ships to Tally.
+      item.item_name = matchedName;
+      renamedItems.push({ from: stockName, to: matchedName });
     }
   }
 
   return {
     valid: missingLedgers.length === 0 && missingStockItems.length === 0,
     missingLedgers,
-    missingStockItems
+    missingStockItems,
+    renamedItems
   };
 }
 
@@ -350,6 +410,24 @@ const worker = new Worker(
 
       const validation = await validateSalesInvoice(invoice, mapping, row.company_id);
 
+      // Persist any fuzzy-match corrections regardless of whether the
+      // overall invoice passed — `invoice` was already mutated in place
+      // above, so this just saves it back. Otherwise the fix only lives
+      // in this run's memory: the stored raw_json (and therefore the Edit
+      // screen, and any future retry's starting point) keeps showing the
+      // original wrong name even though this exact push already resolved
+      // it, and the correction has to be silently rediscovered every time.
+      if (validation.renamedItems?.length) {
+        console.log("✏️ Auto-corrected stock item name(s) via fuzzy match", {
+          ...logCtx,
+          renamed: validation.renamedItems
+        });
+        await pool.query(
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET raw_json = $1, updated_at = NOW() WHERE id = $2`,
+          [invoice, salesId]
+        );
+      }
+
       if (!validation.valid) {
         const message = formatValidationError(validation);
 
@@ -363,21 +441,45 @@ const worker = new Worker(
         // text, rather than a separate validation_result column — that
         // column doesn't exist on this table, so writing to it directly
         // would fail. No schema change needed this way.
+        //
+        // sync_status distinguishes WHY it failed (ledger vs stock item vs
+        // both vs something else) rather than always writing 'failed' —
+        // this is what the Review tab's "Missing Ledgers"/"Missing Stock
+        // Items" views and their aggregation endpoint filter on. A
+        // dedicated 'ledger_and_stock_missing' status exists specifically
+        // so an invoice blocked on BOTH doesn't silently look like it's
+        // only missing a ledger on the By Invoice status pill — the
+        // aggregation endpoint itself already read both arrays out of
+        // error_message regardless of this status, but the single-invoice
+        // pill only ever showed one half of the problem.
+        const syncStatus =
+          validation.missingLedgers.length && validation.missingStockItems.length
+            ? "ledger_and_stock_missing"
+            : validation.missingLedgers.length
+            ? "ledger_missing"
+            : validation.missingStockItems.length
+            ? "stock_missing"
+            : "failed";
+
         await pool.query(
           `
           UPDATE ${DB_SCHEMA}.sales_invoice_extractions
           SET
-            sync_status = 'failed',
-            error_message = $1,
+            sync_status = $1,
+            error_message = $2,
             updated_at = NOW()
-          WHERE id = $2
+          WHERE id = $3
           `,
           [
+            syncStatus,
             JSON.stringify({
               message,
-              validation_stage: validation.missingLedgers.length
-                ? "ledger_validation"
-                : "stock_validation",
+              validation_stage:
+                validation.missingLedgers.length && validation.missingStockItems.length
+                  ? "ledger_and_stock_validation"
+                  : validation.missingLedgers.length
+                  ? "ledger_validation"
+                  : "stock_validation",
               missing_ledgers: validation.missingLedgers,
               missing_stock_items: validation.missingStockItems
             }),
@@ -386,6 +488,114 @@ const worker = new Worker(
         );
 
         return { salesId, status: "failed", error: message };
+      }
+
+      // Party ledger state consistency — the invoice's own state (from a
+      // bulk-upload sheet or manual entry) can genuinely disagree with
+      // what's actually registered on the customer's Tally ledger (e.g.
+      // sheet says "Madhya Pradesh", the ledger's real registered state is
+      // "Maharashtra"). Pushing straight through produces exactly the
+      // "Party GST Registration Details" mismatch popup Tally shows
+      // interactively — which a queued, unattended push has no way to
+      // answer. Flag it for a human decision instead of guessing which one
+      // is right.
+      // Skipped once a human has already resolved this exact mismatch via
+      // /resolve-state-mismatch and explicitly chose to keep the invoice's
+      // own state — the ledger's registered state never changes, so
+      // re-running this comparison after that choice would flag the exact
+      // same "mismatch" forever, permanently blocking the push. Choosing
+      // "ledger" instead needs no such flag: it overwrites customer_state
+      // to equal the ledger's state, so the comparison naturally passes.
+      const partyLedgerName = invoice.party_ledger || invoice.customer_name;
+      const ledgerState = await getPartyLedgerState(row.company_id, partyLedgerName);
+      const invoiceState = resolveStateName(invoice.customer_state || invoice.state);
+
+      if (
+        !invoice._state_mismatch_acknowledged &&
+        ledgerState &&
+        invoiceState &&
+        normalizeStateName(ledgerState) !== normalizeStateName(invoiceState)
+      ) {
+        console.error("❌ Sales invoice: customer state mismatch between ledger and invoice", {
+          ...logCtx,
+          ledgerState,
+          invoiceState
+        });
+
+        await pool.query(
+          `
+          UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+          SET
+            sync_status = 'state_mismatch',
+            error_message = $1,
+            updated_at = NOW()
+          WHERE id = $2
+          `,
+          [
+            JSON.stringify({
+              message: `Customer state mismatch: ledger says "${ledgerState}", invoice says "${invoiceState}"`,
+              ledger_state: ledgerState,
+              invoice_state: invoiceState
+            }),
+            salesId
+          ]
+        );
+
+        return { salesId, status: "failed", error: "state_mismatch" };
+      }
+
+      // Retries only — ask Tally directly whether a Sales voucher with this
+      // reference already exists. A prior attempt at this exact invoice may
+      // have already succeeded in Tally even though this row's own
+      // bookkeeping never recorded that (the classic symptom: Tally returns
+      // CREATED=0/ALTERED=0/EXCEPTIONS=1 with no LINEERROR on the repeat
+      // push, which reads as a generic failure). Skipped for first-time
+      // pushes to avoid an extra connector round-trip on the common path.
+      if (Number(row.error_count || 0) > 0) {
+        try {
+          const existsXml = getSalesVoucherExistsXML(row.company_name, row.invoice_no);
+          const existsResponseXml = await sendToTallyViaConnector(
+            row.company_id,
+            existsXml,
+            "sales_duplicate_check",
+            userId
+          );
+          const parsed = parseXML(existsResponseXml);
+          const existingVoucher = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER;
+
+          if (existingVoucher) {
+            console.log("↩️ Sales invoice already exists in Tally — skipping duplicate push", {
+              ...logCtx,
+              existingVoucher
+            });
+
+            await pool.query(
+              `
+              UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+              SET
+                sync_status = 'success',
+                error_message = NULL,
+                tally_response = $1,
+                updated_at = NOW()
+              WHERE id = $2
+              `,
+              [
+                "Matched existing Tally voucher during pre-push duplicate check — skipped re-push.",
+                salesId
+              ]
+            );
+
+            return { salesId, status: "success", note: "matched_existing_voucher" };
+          }
+        } catch (dupCheckError) {
+          // The duplicate check itself failing (connector offline, timeout,
+          // etc.) should never block a legitimate push — fall through to
+          // the normal push flow below.
+          console.error("⚠️ Duplicate check failed, proceeding with normal push", {
+            ...logCtx,
+            error: dupCheckError.message
+          });
+        }
       }
 
       const xml = await generateSalesXml({

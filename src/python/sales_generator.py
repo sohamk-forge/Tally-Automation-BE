@@ -81,12 +81,13 @@ GST_STATE_MAP = {
     "16": "Tripura", "17": "Meghalaya", "18": "Assam",
     "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
     "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "25": "Daman & Diu",
     "26": "Dadra & Nagar Haveli and Daman & Diu",
-    "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "27": "Maharashtra", "28": "Andhra Pradesh", "29": "Karnataka", "30": "Goa",
     "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
     "34": "Puducherry", "35": "Andaman & Nicobar Islands",
     "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
-    "97": "Other Territory",
+    "97": "Other Territory", "99": "Centre Jurisdiction",
 }
 
 party_state = invoice.get("customer_state") or invoice.get("state") or ""
@@ -96,11 +97,34 @@ party_country = invoice.get("customer_country") or invoice.get("country") or "In
 if not party_state and party_gstin:
     party_state = GST_STATE_MAP.get(party_gstin[:2], "")
 
+# Some bulk-upload sources (e.g. the Warranty report's ShipToState/
+# BillToState columns) send a raw 2-digit GST state CODE instead of a
+# state name — confirmed against the actual source file, every row reads
+# "23" not "Madhya Pradesh". Pushed as-is, Tally shows a literal "23" for
+# both State and Place of Supply on the voucher. Map it through the same
+# GST_STATE_MAP used for the GSTIN-prefix fallback above whenever the
+# value we have is purely numeric.
+if str(party_state).strip().isdigit():
+    party_state = GST_STATE_MAP.get(str(party_state).strip().zfill(2), party_state)
+
 place_of_supply = invoice.get("place_of_supply") or party_state or ""
 
+# Place of supply can independently arrive as a raw code too — same fix.
+if str(place_of_supply).strip().isdigit():
+    place_of_supply = GST_STATE_MAP.get(str(place_of_supply).strip().zfill(2), place_of_supply)
+
 line_items   = invoice.get("line_items", [])
+# Round EACH line item first, then sum — matching exactly what gets written
+# per-item into the XML below (f"{amount:.2f}" per ALLINVENTORYENTRIES.LIST
+# entry). Summing the raw, unrounded amounts and rounding once at the end
+# (the previous approach) can differ from this by a paisa whenever a line
+# item's own amount lands on a rounding boundary (e.g. 5258.925 rounds to
+# 5258.93 per-item, but summing 5258.925 raw with everything else and
+# rounding at the end can land on 5258.92-equivalent overall) — that gap
+# is exactly what caused real vouchers to reach Tally with debits not
+# equal to credits, since this value feeds the round_off balance check.
 sales_amount = round(
-    sum(abs(float(i.get("amount", 0))) for i in line_items),
+    sum(round(abs(float(i.get("amount", 0))), 2) for i in line_items),
     2
 )
 
@@ -130,23 +154,40 @@ else:
     )
 
 # ✅ Round-off: both sides positive, clean math
-# ✅ Round Off: taken from Excel (via worker), NOT recalculated
+# ✅ Round Off: taken from Excel (via worker), NOT recalculated — UNLESS the
+# incoming value doesn't actually make the voucher balance. A wrong/stale
+# round_off (e.g. "0" when the real remainder is a paisa) used to get
+# pushed to Tally verbatim, producing a voucher where total debits don't
+# equal total credits — Tally accepts the import but later flags it under
+# "Mismatch in total amount between Credit and Debit entries", and every
+# identical retry just creates another equally-broken duplicate voucher.
+# The true remainder needed to balance the voucher, given everything else
+# that's about to be posted:
+calculated = round(
+    sales_amount +
+    cgst_amount +
+    sgst_amount +
+    igst_amount -
+    tds_amount +
+    cess_amount,
+    2
+)
+true_round_off = round(grand_total - calculated, 2)
+
 round_off_raw = invoice.get("round_off")
 
-if round_off_raw is not None:
-    round_off = round(float(round_off_raw), 2)   # no flip — pass through as-is
+if round_off_raw is not None and abs(round(float(round_off_raw), 2) - true_round_off) < 0.01:
+    round_off = round(float(round_off_raw), 2)   # matches — pass through as-is
 else:
-    # fallback only, in case round_off wasn't sent
-    calculated = round(
-        sales_amount +
-        cgst_amount +
-        sgst_amount +
-        igst_amount -
-        tds_amount +
-        cess_amount,
-        2
-    )
-    round_off = round(grand_total - calculated, 2)
+    if round_off_raw is not None:
+        print(
+            f"WARNING: incoming round_off ({round_off_raw}) does not balance "
+            f"this voucher (needs {true_round_off} to make debits equal "
+            f"credits) — overriding to {true_round_off} instead of pushing "
+            f"an unbalanced voucher to Tally.",
+            file=sys.stderr
+        )
+    round_off = true_round_off
 print("sales_amount =", sales_amount, file=sys.stderr)
 print("cgst_amount =", cgst_amount, file=sys.stderr)
 print("sgst_amount =", sgst_amount, file=sys.stderr)
