@@ -206,6 +206,8 @@ import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
 import gstr1Routes from "./api/gstr1.routes.js";
 
 import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
+
+import emailVerificationRoutes from "./api/emailVerification.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -584,6 +586,17 @@ app.use(
   "/api/invites",
   ...requireSessionOrApiKey(),
   invitesRoutes
+);
+
+/* =================================
+   EMAIL VERIFICATION (signup OTP)
+   Each route uses verifySession() itself (see invites.routes.js for the
+   same pattern), so no requireSessionOrApiKey wrapper here.
+================================= */
+
+app.use(
+  "/api/email-verification",
+  emailVerificationRoutes
 );
 
 /* =================================

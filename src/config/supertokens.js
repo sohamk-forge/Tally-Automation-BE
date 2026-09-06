@@ -7,6 +7,7 @@ import UserRoles from "supertokens-node/recipe/userroles/index.js";
 import Dashboard from "supertokens-node/recipe/dashboard/index.js";
 import { ensureLocalUserProfile } from "../services/userProfile.service.js";
 import { markInviteAccepted } from "../services/invite.service.js";
+import { sendSignupOtp } from "../services/otp.service.js";
 
 export const initSupertokens = () => {
   supertokens.init({
@@ -77,11 +78,17 @@ export const initSupertokens = () => {
               if (response.status === "OK") {
                 const getField = (id) =>
                   input.formFields.find((f) => f.id === id)?.value ?? null;
-                await ensureLocalUserProfile(response.user.id, getField("email"), "owner", {
+                const email = getField("email");
+                // Credentials-based signup — unlike the Passwordless invite
+                // flow below, nothing here proves the user actually owns
+                // this inbox yet, so gate on an emailed OTP before treating
+                // the account as verified.
+                await ensureLocalUserProfile(response.user.id, email, "owner", {
                   firstName: getField("first_name"),
                   lastName: getField("last_name"),
                   phone: getField("phone"),
-                });
+                }, true, false);
+                await sendSignupOtp(email);
               }
               return response;
             },
