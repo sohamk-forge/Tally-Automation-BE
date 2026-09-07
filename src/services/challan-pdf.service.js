@@ -105,45 +105,22 @@ const STYLE = `
   .company-meta strong { color: #111; }
 
   .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
-.doc-meta-row {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11.5px;
-}
 
-.doc-meta-line {
-  display: grid;
-  grid-template-columns: 72px 8px auto;
-  align-items: center;
-  line-height: 1.3;
-}
-
-.doc-meta-line .label-text {
-  font-weight: bold;
-  color: #333;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.doc-meta-line .colon {
-  font-weight: bold;
-  color: #333;
-  text-align: center;
-}
-
-.doc-meta-row .value {
-  color: #111;
-  text-align: left;
-  white-space: nowrap;
-}
-  .delivery-block { font-size: 11px; text-align: right; }
-  .delivery-block .section-label {
-    font-size: 10px; text-transform: uppercase; color: #111;
-    letter-spacing: 0.04em; margin-bottom: 2px;
+  .doc-meta-row {
+    display: grid;
+    grid-template-columns: max-content max-content;
+    column-gap: 8px;
+    row-gap: 4px;
+    font-size: 11.5px;
   }
-  .delivery-block .name { font-weight: bold; }
-  .delivery-block .muted-line { color: #4b5563; margin-top: 1px; }
+  .doc-meta-row .label { font-weight: bold; color: #333; text-align: right; white-space: nowrap; }
+  .doc-meta-row .value { color: #111; text-align: left; white-space: nowrap; }
+  .doc-meta-row .value.strong { font-weight: bold; }
+  .doc-meta-row .divider-row {
+    grid-column: 1 / -1;
+    border-top: 1px solid #d1d5db;
+    margin: 3px 0 1px;
+  }
 
   /* ---- title bar ---- */
  .doc-title-bar {
@@ -302,27 +279,23 @@ function buildHtml(challan) {
           </div>
         </div>
         <div class="header-right">
-        <div class="doc-meta-row">
-
-  <div class="doc-meta-line">
-    <span class="label-text">Challan No</span>
-    <span class="colon">:</span>
-    <span class="value">${esc(challan_number || "-")}</span>
-  </div>
-
-  <div class="doc-meta-line">
-    <span class="label-text">Date</span>
-    <span class="colon">:</span>
-    <span class="value">${formatDate(challan_date)}</span>
-  </div>
-
-</div>
-          ${delivery_person ? `
-<div class="delivery-block">
-  <div class="section-label">Delivery Person</div>
-  <div class="name">${esc(delivery_person.name)}</div>
-  ${delivery_person.phone_number ? `<div class="muted-line">${esc(delivery_person.phone_number)}</div>` : ""}
-</div>` : ""}
+          <div class="doc-meta-row">
+            <span class="label">Challan No :</span><span class="value">${esc(challan_number || "-")}</span>
+            <span class="label">Date :</span><span class="value">${formatDate(challan_date)}</span>
+            ${
+              delivery_person
+                ? `
+                  <span class="divider-row"></span>
+                  <span class="label">Delivery Person :</span><span class="value strong">${esc(delivery_person.name)}</span>
+                  ${
+                    delivery_person.phone_number
+                      ? `<span class="label"></span><span class="value">${esc(delivery_person.phone_number)}</span>`
+                      : ""
+                  }
+                `
+                : ""
+            }
+          </div>
         </div>
       </div>
 
