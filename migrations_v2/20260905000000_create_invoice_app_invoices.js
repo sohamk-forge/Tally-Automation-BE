@@ -15,6 +15,12 @@
 export async function up(knex) {
   await knex.raw('CREATE SCHEMA IF NOT EXISTS invoice_app');
 
+  const hasInvoices = await knex.schema
+    .withSchema("invoice_app")
+    .hasTable("invoices");
+
+  if (hasInvoices) return;
+
   await knex.schema
     .withSchema("invoice_app")
     .createTable("invoices", (table) => {

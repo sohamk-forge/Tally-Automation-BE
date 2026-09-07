@@ -24,6 +24,7 @@ import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import { getDeliveryPersonById } from "./delivery-person.service.js";
+import { getSiteById } from "./site.service.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -79,6 +80,20 @@ async function resolveDeliveryPersonId(companyId, deliveryPersonId) {
     throw new Error(`Delivery person ${deliveryPersonId} not found for this company`);
   }
   return id;
+}
+
+// Validates site_id (if provided) belongs to this company. Site is optional
+// on a challan, so no id at all simply resolves to nulls.
+async function resolveSite(companyId, siteId) {
+  if (siteId === undefined || siteId === null || siteId === "") {
+    return { site_id: null, site_name: null };
+  }
+  const id = Number(siteId);
+  const site = await getSiteById(companyId, id);
+  if (!site) {
+    throw new Error(`Site ${siteId} not found for this company`);
+  }
+  return { site_id: id, site_name: site.site_name };
 }
 
 function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
@@ -278,6 +293,7 @@ export async function createChallan(data) {
     challan_type,
     movement_type,
     delivery_person_id,
+    site_id            = null,
     items              = [],
   } = data;
 
@@ -309,6 +325,9 @@ export async function createChallan(data) {
     // Validate delivery_person_id (if any) belongs to this company
     const resolvedDeliveryPersonId = await resolveDeliveryPersonId(company_id, delivery_person_id);
 
+    // Validate site_id (if any) belongs to this company (site is optional)
+    const resolvedSite = await resolveSite(company_id, site_id);
+
     // Determine GST status once, apply to every line item
     const gstEnabled = await getGstEnabled(client, company_id);
 
@@ -322,12 +341,14 @@ export async function createChallan(data) {
         company_id, company_name, challan_number, challan_seq,
         challan_date, customer_name, customer_gstin, customer_address,
         sub_total, total_cgst, total_sgst, total_igst, total_tax, grand_total,
-        narration, challan_type, movement_type, delivery_person_id, status
+        narration, challan_type, movement_type, delivery_person_id,
+        site_id, site_name, status
       ) VALUES (
         $1,$2,$3,$4,
         $5,$6,$7,$8,
         $9,$10,$11,$12,$13,$14,
-        $15,$16,$17,$18,'DRAFT'
+        $15,$16,$17,$18,
+        $19,$20,'DRAFT'
       ) RETURNING *`,
       [
         company_id, company_name, challanNo, seq,
@@ -335,6 +356,7 @@ export async function createChallan(data) {
         totals.sub_total, totals.total_cgst, totals.total_sgst,
         totals.total_igst, totals.total_tax, totals.grand_total,
         narration, normalizedChallanType, normalizedMovementType, resolvedDeliveryPersonId,
+        resolvedSite.site_id, resolvedSite.site_name,
       ]
     );
 
@@ -393,6 +415,7 @@ export async function updateChallan(challanId, companyId, data) {
     challan_type,
     movement_type,
     delivery_person_id,
+    site_id            = null,
     items              = [],
   } = data;
 
@@ -424,6 +447,8 @@ export async function updateChallan(challanId, companyId, data) {
 
     const resolvedDeliveryPersonId = await resolveDeliveryPersonId(companyId, delivery_person_id);
 
+    const resolvedSite = await resolveSite(companyId, site_id);
+
     const gstEnabled = await getGstEnabled(client, companyId);
 
     const computedItems = items.map((it) => computeItem(it, supply_type, gstEnabled));
@@ -445,14 +470,17 @@ export async function updateChallan(challanId, companyId, data) {
         challan_type        = $12,
         movement_type       = $13,
         delivery_person_id  = $14,
+        site_id             = $15,
+        site_name           = $16,
         updated_at          = NOW()
-      WHERE id = $15 AND company_id = $16
+      WHERE id = $17 AND company_id = $18
       RETURNING *`,
       [
         challan_date, customer_name, customer_gstin, customer_address,
         totals.sub_total, totals.total_cgst, totals.total_sgst,
         totals.total_igst, totals.total_tax, totals.grand_total,
         narration, normalizedChallanType, normalizedMovementType, resolvedDeliveryPersonId,
+        resolvedSite.site_id, resolvedSite.site_name,
         challanId, companyId,
       ]
     );
@@ -537,6 +565,8 @@ export async function getAllChallans(companyId, filters = {}) {
        c.challan_type,
        c.movement_type,
        c.delivery_person_id,
+       c.site_id,
+       c.site_name,
        dp.name  AS delivery_person_name,
        dp.phone_number AS delivery_person_phone
      FROM ${DB_SCHEMA}.challans c
@@ -587,6 +617,8 @@ export async function getAllChallans(companyId, filters = {}) {
     grand_total:           c.grand_total,
     challan_type:          c.challan_type,
     movement_type:         c.movement_type,
+    site_id:               c.site_id,
+    site_name:             c.site_name,
     delivery_person:       c.delivery_person_id
       ? { id: c.delivery_person_id, name: c.delivery_person_name, phone_number: c.delivery_person_phone }
       : null,

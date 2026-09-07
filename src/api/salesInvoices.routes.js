@@ -734,16 +734,23 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
     const ledgerMap = new Map();
     const itemMap = new Map();
 
-    const addTo = (map, rawName, invoiceId) => {
+    const addTo = (map, rawName, invoiceId, details) => {
       const name = String(rawName || "").trim();
       if (!name) return;
       const key = name.toLowerCase();
       if (!map.has(key)) {
-        map.set(key, { name, count: 0, invoice_ids: [] });
+        map.set(key, { name, count: 0, invoice_ids: [], unit_of_measure: "", type_of_supply: "" });
       }
       const entry = map.get(key);
       entry.count += 1;
       entry.invoice_ids.push(invoiceId);
+      // First invoice to carry a value wins — later ones with the same
+      // item name are assumed to agree (or simply weren't uploaded through
+      // a format that captures these fields at all).
+      if (details) {
+        if (!entry.unit_of_measure && details.unit_of_measure) entry.unit_of_measure = details.unit_of_measure;
+        if (!entry.type_of_supply && details.type_of_supply) entry.type_of_supply = details.type_of_supply;
+      }
     };
 
     for (const row of result.rows) {
@@ -758,7 +765,7 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
         addTo(ledgerMap, l.ledger || l.name || l, row.id);
       }
       for (const itemName of parsed.missing_stock_items || []) {
-        addTo(itemMap, itemName, row.id);
+        addTo(itemMap, itemName, row.id, parsed.missing_stock_item_details?.[itemName]);
       }
     }
 
@@ -786,7 +793,14 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
         // similarity, same floor as the auto-apply match used during push
         // validation. Below that, a wrong guess is more distracting than
         // helpful, so nothing is shown rather than a shaky suggestion.
-        entry.suggestions = findTopItemMatches(knownNames, entry.name, { minScore: 0.9 });
+        // Exclude the entry's own name from the candidate pool first — once
+        // an item has been created (and so shows up in knownNames via
+        // push_stock_item/stock_group_summary), it would otherwise "match"
+        // itself at 100% and show a pointless "Did you mean: X" for X.
+        const candidates = knownNames.filter(
+          (n) => n.trim().toLowerCase() !== entry.name.trim().toLowerCase()
+        );
+        entry.suggestions = findTopItemMatches(candidates, entry.name, { minScore: 0.9 });
       }
     }
 

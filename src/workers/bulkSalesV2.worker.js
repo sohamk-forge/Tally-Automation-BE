@@ -128,6 +128,50 @@ function getCustomerState(row) {
   return "";
 }
 
+// Unit of Measure — straight passthrough from the sheet's own
+// "UnitOfMeasurement" column, no interpretation needed.
+function extractUnitOfMeasure(row) {
+  return String(getValue(row, ["unitofmeasurement"])).trim();
+}
+
+// Type of Supply — Goods vs Service. Tries "Material Number" first: if the
+// code's own text starts with "service", that line is a Service. Falls
+// back to "CategoryOfProduct" (the sheet carries exactly two categories —
+// treat it as Service only when that column itself says so). Anything
+// that matches neither defaults to Goods.
+function deriveTypeOfSupply(row) {
+  const materialNumber = String(getValue(row, ["material number"])).trim();
+  if (/^service/i.test(materialNumber)) {
+    return "Service";
+  }
+
+  const category = String(getValue(row, ["categoryofproduct"])).trim();
+  if (/service/i.test(category)) {
+    return "Service";
+  }
+
+  return "Goods";
+}
+
+// Raw product category text — separate from the Goods/Service verdict
+// above, this is meant to be matched against the company's own real Tally
+// stock groups (e.g. "Lubricants", "Spare Parts") in the FE's Create Item
+// modal, so the group dropdown can be pre-selected too, not just Type of
+// Supply. Prefers "CategoryOfProduct" (Warranty); falls back to "Item
+// Type" (Spare Sales carries the same kind of label under that name); a
+// "Material Number" starting with "service" (Spare+Labour, which has
+// neither of the above) is reported as "Service" so it can still match a
+// "Labour"/"Service" group even without a proper category column.
+function extractProductCategory(row) {
+  const category = String(getValue(row, ["categoryofproduct", "item type"])).trim();
+  if (category) return category;
+
+  const materialNumber = String(getValue(row, ["material number"])).trim();
+  if (/^service/i.test(materialNumber)) return "Service";
+
+  return "";
+}
+
 function formatDate(value) {
   if (!value) return "";
 
@@ -181,9 +225,17 @@ function detectFormat(row) {
     return "SPARE_LABOUR";
   }
 
-  // Spare Sales — Net Taxable Amount + Customer GST No together are
-  // unique to this sheet (Warranty has neither; Spare+Labour has neither).
-  if (has("net taxable amount") && has("customer gst no")) {
+  // Spare Sales — Net Taxable Amount + Dealer Invoice Number together are
+  // unique to this sheet (Warranty has neither; Spare+Labour has the
+  // latter but not the former). Previously required "Customer GST No" as
+  // well, but that column isn't present on every month's export of this
+  // same report (confirmed against a real file that has Net Taxable
+  // Amount, Dealer Invoice Number, Item Description etc. but no GST-no
+  // column at all) — requiring it made an otherwise-valid Spare Sales
+  // sheet fail format detection entirely. Dealer Invoice Number is safe to
+  // require instead since processSpareSalesRow() already treats it as the
+  // mandatory invoice key for this format.
+  if (has("net taxable amount") && has("dealer invoice number")) {
     return "SPARE_SALES";
   }
 
@@ -266,7 +318,10 @@ function processWarrantyRow(row, invoices) {
       // rounding needed) alongside the amount columns above.
       cgst_rate: safeNumber(getValue(row, ["centraltaxrate"])),
       sgst_rate: safeNumber(getValue(row, ["stateuttaxrate"])),
-      igst_rate: safeNumber(getValue(row, ["integratedtaxrate"]))
+      igst_rate: safeNumber(getValue(row, ["integratedtaxrate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }
@@ -325,7 +380,10 @@ function processSpareLabourRow(row, invoices) {
       // 2-decimal, no rounding needed) alongside the base/amount columns.
       cgst_rate: safeNumber(getValue(row, ["cgst rate"])),
       sgst_rate: safeNumber(getValue(row, ["sgst rate"])),
-      igst_rate: safeNumber(getValue(row, ["igst rate"]))
+      igst_rate: safeNumber(getValue(row, ["igst rate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }
@@ -375,7 +433,10 @@ function processSpareSalesRow(row, invoices) {
       // 2-decimal, no rounding needed) rather than a separate CGST/SGST/IGST
       // rate per line — the CGST/SGST vs IGST split only happens at the
       // invoice level during finalization, based on customer_state.
-      gst_rate: safeNumber(getValue(row, ["tax rate(%)", "tax rate (%)", "tax rate"]))
+      gst_rate: safeNumber(getValue(row, ["tax rate(%)", "tax rate (%)", "tax rate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }

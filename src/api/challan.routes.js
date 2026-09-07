@@ -114,6 +114,8 @@ router.get("/next-number", async (req, res) => {
 //   "movement_type":     "outward",             ← optional, "inward" | "outward"
 //   "delivery_person_id": 3,                    ← optional, id from
 //                                                  GET /api/v1/delivery-person
+//   "site_id":           7,                      ← optional, id from
+//                                                  GET /api/v1/site
 //   "items": [
 //     {
 //       "item_name":         "Item A",
@@ -137,6 +139,7 @@ async function handleCreate(req, res) {
     company_id, company_name,
     challan_date, customer_name, customer_gstin, customer_address,
     narration, supply_type, challan_type, movement_type, delivery_person_id,
+    site_id,
     items,
   } = req.body;
 
@@ -159,6 +162,7 @@ async function handleCreate(req, res) {
       challan_type,
       movement_type,
       delivery_person_id,
+      site_id,
       items,
     });
 
@@ -186,6 +190,7 @@ async function handleCreate(req, res) {
 //   "challan_type":      "Return Replacement",
 //   "movement_type":     "outward",
 //   "delivery_person_id": 3,
+//   "site_id":     7,
 //   "items": [ ... ]
 // }
 //
@@ -197,6 +202,7 @@ async function handleUpdate(req, res) {
     company_id, challan_id,
     challan_date, customer_name, customer_gstin, customer_address,
     narration, supply_type, challan_type, movement_type, delivery_person_id,
+    site_id,
     items,
   } = req.body;
 
@@ -218,6 +224,7 @@ async function handleUpdate(req, res) {
       challan_type,
       movement_type,
       delivery_person_id,
+      site_id,
       items,
     });
 

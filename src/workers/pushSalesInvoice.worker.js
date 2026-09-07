@@ -141,6 +141,14 @@ async function getPartyLedgerState(companyId, partyName) {
 async function validateSalesInvoice(invoice, mapping, companyId) {
   const missingLedgers = [];
   const missingStockItems = [];
+  // Unit of Measure / Type of Supply captured for each missing item, keyed
+  // by name — sourced from the line item itself (e.g. the SAP-format bulk
+  // upload's UnitOfMeasurement/Material Number/CategoryOfProduct columns,
+  // see bulkSalesV2.worker.js) when present, so the "+ Create Item" modal
+  // in the Review tab can prefill them instead of the user typing them in
+  // again. Absent for invoices created any other way — those fields just
+  // come back blank, same as before this existed.
+  const missingStockItemDetails = {};
 
   // STAGE 1: mapped ledgers (sales, CGST, SGST, IGST, conditional TDS/cess/round-off)
   // sales_ledger, cgst_ledger, sgst_ledger, igst_ledger are always required.
@@ -207,8 +215,17 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
     if (!stockName) continue;
 
     const { exists, matchedName } = await stockItemExists(companyId, stockName);
-    if (!exists && !missingStockItems.includes(stockName)) {
-      missingStockItems.push(stockName);
+    if (!exists) {
+      if (!missingStockItems.includes(stockName)) {
+        missingStockItems.push(stockName);
+      }
+      if (!missingStockItemDetails[stockName]) {
+        const uom = String(item.unit_of_measure || "").trim();
+        const typeOfSupply = String(item.type_of_supply || "").trim();
+        if (uom || typeOfSupply) {
+          missingStockItemDetails[stockName] = { unit_of_measure: uom, type_of_supply: typeOfSupply };
+        }
+      }
     } else if (matchedName && matchedName !== stockName) {
       // Fuzzy match found the real item under a slightly different name —
       // correct it on the invoice itself (mutates `invoice` in place, so
@@ -224,6 +241,7 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
     valid: missingLedgers.length === 0 && missingStockItems.length === 0,
     missingLedgers,
     missingStockItems,
+    missingStockItemDetails,
     renamedItems
   };
 }
@@ -481,7 +499,8 @@ const worker = new Worker(
                   ? "ledger_validation"
                   : "stock_validation",
               missing_ledgers: validation.missingLedgers,
-              missing_stock_items: validation.missingStockItems
+              missing_stock_items: validation.missingStockItems,
+              missing_stock_item_details: validation.missingStockItemDetails
             }),
             salesId
           ]
