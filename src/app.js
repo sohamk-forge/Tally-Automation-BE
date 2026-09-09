@@ -91,6 +91,9 @@ from "./api/stockGroupSummary.js";
 import salesItemsRoutes
 from "./api/salesItems.routes.js";
 
+import invoiceCalculationRoutes
+from "./api/invoiceCalculation.routes.js";
+
 import pushLedgerRoutes
 from "./api/pushLedger.routes.js";
 
@@ -193,6 +196,7 @@ import bulkSalesV2Routes from "./api/bulkSalesV2.routes.js";
 import proformaRoutes from "./api/proforma.routes.js";
 
 import deliveryPersonRoutes from "./api/delivery-person.routes.js";
+import siteRoutes from "./api/site.routes.js";
 
 import userRoutes from "./api/user.routes.js";
 
@@ -203,6 +207,8 @@ import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
 import gstr1Routes from "./api/gstr1.routes.js";
 
 import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
+
+import emailVerificationRoutes from "./api/emailVerification.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -409,6 +415,16 @@ app.use(
 );
 
 /* =================================
+   INVOICE / STOCK ITEM CALCULATION API
+================================= */
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  invoiceCalculationRoutes
+);
+
+/* =================================
    UNITS APIs
 ================================= */
 
@@ -551,6 +567,7 @@ app.use(
 app.use("/api/v1/proforma", ...requireSessionOrApiKey(), proformaRoutes);
 
 app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRoutes);
+app.use("/api/v1/site", ...requireSessionOrApiKey(), siteRoutes);
 
 app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
 
@@ -571,6 +588,17 @@ app.use(
   "/api/invites",
   ...requireSessionOrApiKey(),
   invitesRoutes
+);
+
+/* =================================
+   EMAIL VERIFICATION (signup OTP)
+   Each route uses verifySession() itself (see invites.routes.js for the
+   same pattern), so no requireSessionOrApiKey wrapper here.
+================================= */
+
+app.use(
+  "/api/email-verification",
+  emailVerificationRoutes
 );
 
 /* =================================

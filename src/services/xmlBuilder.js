@@ -1020,6 +1020,32 @@ export const getProfitLossXML = (
 </ENVELOPE>
 
 `;
+// Shared GST-rate-by-duty-head formulas, used by both the StockItem and
+// StockGroup GST exports below. Tally's GSTRATEDUTYHEAD field holds the
+// short duty-head codes actually seen in real exports ("IGST", "CGST",
+// "SGST/UTGST", "Cess") — NOT the long names ("Integrated Tax" etc.), which
+// never match anything and silently produce blank rates. Confirmed live
+// against a running Tally instance before writing this.
+const GST_DUTY_HEAD_FORMULAE = `
+<SYSTEM TYPE="Formulae" NAME="IsIGST">$GSTRatedutyhead = "IGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsCGST">$GSTRatedutyhead = "CGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsSGST">$GSTRatedutyhead = "SGST/UTGST"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="IsCess">$GSTRatedutyhead = "Cess"</SYSTEM>`;
+
+// Rate/HSN methods shared by both collections below. HSN lives under the
+// item/group's own HSNDetails list — a SEPARATE date-effective list from
+// GSTDetails, not nested inside it (confirmed live: reading HSN from
+// $GSTDetails[Last].HSNCode came back blank even for items with HSN set in
+// Tally; $HSNDetails[Last].HSNCode is the correct path).
+const gstRateMethods = (objectType) => `
+<METHOD>HSNCode:$HSNDetails[Last].HSNCode</METHOD>
+<METHOD>GSTRate:$GSTDetails[Last].StateWiseDetails[1].RateDetails[1].GSTRate</METHOD>
+<METHOD>IGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsIGST].GSTRate</METHOD>
+<METHOD>CGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCGST].GSTRate</METHOD>
+<METHOD>SGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsSGST].GSTRate</METHOD>
+<METHOD>CessRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCess].GSTRate</METHOD>
+<METHOD>GSTApplicable:$GSTDetails[Last].Applicability</METHOD>`;
+
 export const getStockGroupSummaryXML = (company) => {
   return `
 <ENVELOPE>
@@ -1037,13 +1063,50 @@ export const getStockGroupSummaryXML = (company) => {
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
-          <COLLECTION NAME="StockItemSummary">
+          ${GST_DUTY_HEAD_FORMULAE}
+          <COLLECTION NAME="StockItemSummary" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">
             <TYPE>StockItem</TYPE>
-            <FETCH>
-              NAME, PARENT, BASEUNITS, HSNDETAILS.LIST,
-              GSTDETAILS.LIST, STANDARDPRICE,
-              CLOSINGBALANCE, CLOSINGVALUE
-            </FETCH>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
+            ${gstRateMethods("StockItem")}
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+};
+
+// Stock-GROUP-level GST — a business can set GST at the group level instead
+// of per item; items with no GST override of their own fall back to this.
+// Same validated formula pattern as getStockGroupSummaryXML above, just
+// targeting Tally's StockGroup object type instead of StockItem.
+export const getStockGroupGSTXML = (company) => {
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>StockGroupGST</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          ${GST_DUTY_HEAD_FORMULAE}
+          <COLLECTION NAME="StockGroupGST" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">
+            <TYPE>StockGroup</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            ${gstRateMethods("StockGroup")}
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -1573,4 +1636,45 @@ export const getProfitLossReportXML = (company) => {
   </BODY>
 </ENVELOPE>
 `;
+};
+
+// Checks whether a Sales voucher with the given reference number already
+// exists in Tally — used before re-pushing a previously-failed/retried
+// invoice, so a voucher that actually succeeded on an earlier attempt
+// (but wasn't recorded as such on our side) isn't sent to Tally a second
+// time, where it would be silently rejected as a duplicate
+// (CREATED=0/ALTERED=0/EXCEPTIONS=1, no LINEERROR).
+export const getSalesVoucherExistsXML = (company, referenceNo) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>SalesRefCheck</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="RefMatch">
+      $VoucherTypeName = "Sales" AND $Reference = "${referenceNo}"
+     </SYSTEM>
+     <COLLECTION NAME="SalesRefCheck">
+      <TYPE>Voucher</TYPE>
+      <FILTERS>RefMatch</FILTERS>
+      <FETCH>VOUCHERNUMBER</FETCH>
+      <FETCH>REFERENCE</FETCH>
+      <FETCH>DATE</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
 };

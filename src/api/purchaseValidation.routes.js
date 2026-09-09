@@ -6,6 +6,7 @@ import FormData from "form-data";
 import fs from "fs";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 const router = express.Router();
 
 const upload = multer({
@@ -97,9 +98,22 @@ async function validateItemsAgainstStock(company, extracted_items) {
 
     const normalizedPdfItem = normalizeItemName(extractedItem.item_name);
 
-    const dbItem = stockItems.find(
+    let dbItem = stockItems.find(
       item => normalizeItemName(item.item_name) === normalizedPdfItem
     );
+
+    // Exact match failed — fall back to a fuzzy match against real item
+    // names for trivial typo/punctuation drift (mirrors the same fallback
+    // used on the sales side), only auto-accepted above a high threshold.
+    if (!dbItem) {
+      const bestMatchName = findBestItemMatch(
+        stockItems.map(item => item.item_name),
+        extractedItem.item_name
+      );
+      if (bestMatchName) {
+        dbItem = stockItems.find(item => item.item_name === bestMatchName);
+      }
+    }
 
     if (!dbItem) {
       missing_items.push({

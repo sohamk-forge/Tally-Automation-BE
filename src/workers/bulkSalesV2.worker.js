@@ -19,9 +19,9 @@ const connection = new IORedis({
   maxRetriesPerRequest: null
 });
 
-// (State recognition now lives in isMaharashtraState() below, which
-// handles multiple representations — name, abbreviation, GST code —
-// rather than a single hardcoded string comparison.)
+// (State recognition now lives in isSameStateAsCompany() below, which
+// compares against the company's own dynamically-looked-up state rather
+// than a single hardcoded "Maharashtra" comparison.)
 
 function safeNumber(value) {
   const num = Number(value);
@@ -84,23 +84,27 @@ function findGstAmountColumn(row) {
   return matchedKey ? row[matchedKey] : "";
 }
 
-// Normalizes and recognizes Maharashtra across the different ways a
-// source file might represent it — full name (any casing), abbreviation
-// ("MH"), the 2-digit GST state code ("27"), or partial text containing
-// "maharashtra". A blank/missing state is NOT treated as Maharashtra —
-// it falls through to the IGST branch instead, since silently assuming
-// an unknown customer is local is the wrong default for tax purposes.
-function isMaharashtraState(value) {
-  const state = String(value || "")
-    .trim()
-    .toLowerCase();
+// Compares a customer's state — which by this point in the pipeline is
+// either a free-text name or a raw 2-digit GST state code, per
+// getCustomerState()'s own fallback below — against the COMPANY's own
+// state, fetched dynamically from company_details for the company running
+// this job. Previously this hardcoded "Maharashtra" as the recognized
+// value regardless of which company uploaded the sheet; it's now compared
+// against whichever company that actually is. A blank/missing customer
+// state is NOT treated as a match — it falls through to the IGST branch
+// instead, since silently assuming an unknown customer is local is the
+// wrong default for tax purposes.
+function isSameStateAsCompany(customerState, companyStateName, companyStateCode) {
+  const c = String(customerState || "").trim().toLowerCase();
+  if (!c) return false;
 
-  return (
-    state === "maharashtra" ||
-    state === "mh" ||
-    state === "27" ||
-    state.includes("maharashtra")
-  );
+  if (/^\d{2}$/.test(c)) {
+    return companyStateCode ? c === companyStateCode : false;
+  }
+
+  const co = String(companyStateName || "").trim().toLowerCase();
+  if (!co) return false;
+  return c === co || c.includes(co) || co.includes(c);
 }
 
 function getCustomerState(row) {
@@ -120,6 +124,50 @@ function getCustomerState(row) {
   if (/^\d{2}/.test(gstin)) {
     return gstin.substring(0, 2);
   }
+
+  return "";
+}
+
+// Unit of Measure — straight passthrough from the sheet's own
+// "UnitOfMeasurement" column, no interpretation needed.
+function extractUnitOfMeasure(row) {
+  return String(getValue(row, ["unitofmeasurement"])).trim();
+}
+
+// Type of Supply — Goods vs Service. Tries "Material Number" first: if the
+// code's own text starts with "service", that line is a Service. Falls
+// back to "CategoryOfProduct" (the sheet carries exactly two categories —
+// treat it as Service only when that column itself says so). Anything
+// that matches neither defaults to Goods.
+function deriveTypeOfSupply(row) {
+  const materialNumber = String(getValue(row, ["material number"])).trim();
+  if (/^service/i.test(materialNumber)) {
+    return "Service";
+  }
+
+  const category = String(getValue(row, ["categoryofproduct"])).trim();
+  if (/service/i.test(category)) {
+    return "Service";
+  }
+
+  return "Goods";
+}
+
+// Raw product category text — separate from the Goods/Service verdict
+// above, this is meant to be matched against the company's own real Tally
+// stock groups (e.g. "Lubricants", "Spare Parts") in the FE's Create Item
+// modal, so the group dropdown can be pre-selected too, not just Type of
+// Supply. Prefers "CategoryOfProduct" (Warranty); falls back to "Item
+// Type" (Spare Sales carries the same kind of label under that name); a
+// "Material Number" starting with "service" (Spare+Labour, which has
+// neither of the above) is reported as "Service" so it can still match a
+// "Labour"/"Service" group even without a proper category column.
+function extractProductCategory(row) {
+  const category = String(getValue(row, ["categoryofproduct", "item type"])).trim();
+  if (category) return category;
+
+  const materialNumber = String(getValue(row, ["material number"])).trim();
+  if (/^service/i.test(materialNumber)) return "Service";
 
   return "";
 }
@@ -177,9 +225,17 @@ function detectFormat(row) {
     return "SPARE_LABOUR";
   }
 
-  // Spare Sales — Net Taxable Amount + Customer GST No together are
-  // unique to this sheet (Warranty has neither; Spare+Labour has neither).
-  if (has("net taxable amount") && has("customer gst no")) {
+  // Spare Sales — Net Taxable Amount + Dealer Invoice Number together are
+  // unique to this sheet (Warranty has neither; Spare+Labour has the
+  // latter but not the former). Previously required "Customer GST No" as
+  // well, but that column isn't present on every month's export of this
+  // same report (confirmed against a real file that has Net Taxable
+  // Amount, Dealer Invoice Number, Item Description etc. but no GST-no
+  // column at all) — requiring it made an otherwise-valid Spare Sales
+  // sheet fail format detection entirely. Dealer Invoice Number is safe to
+  // require instead since processSpareSalesRow() already treats it as the
+  // mandatory invoice key for this format.
+  if (has("net taxable amount") && has("dealer invoice number")) {
     return "SPARE_SALES";
   }
 
@@ -257,7 +313,15 @@ function processWarrantyRow(row, invoices) {
       item_name: itemName,
       hsn_code: String(getValue(row, ["hsnorsac"])).trim(),
       quantity: safeNumber(getValue(row, ["quantity"])),
-      amount: taxableValue
+      amount: taxableValue,
+      // This format carries its own rate columns (already 2-decimal, no
+      // rounding needed) alongside the amount columns above.
+      cgst_rate: safeNumber(getValue(row, ["centraltaxrate"])),
+      sgst_rate: safeNumber(getValue(row, ["stateuttaxrate"])),
+      igst_rate: safeNumber(getValue(row, ["integratedtaxrate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }
@@ -311,7 +375,15 @@ function processSpareLabourRow(row, invoices) {
         "hsn for goods/ service accounting code f"
       ])).trim(),
       quantity: safeNumber(getValue(row, ["quantity (as supplied)"])),
-      amount: taxableValue
+      amount: taxableValue,
+      // This format carries its own CGST/SGST/IGST Rate columns (already
+      // 2-decimal, no rounding needed) alongside the base/amount columns.
+      cgst_rate: safeNumber(getValue(row, ["cgst rate"])),
+      sgst_rate: safeNumber(getValue(row, ["sgst rate"])),
+      igst_rate: safeNumber(getValue(row, ["igst rate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }
@@ -356,7 +428,15 @@ function processSpareSalesRow(row, invoices) {
       item_name: itemName,
       hsn_code: String(getValue(row, ["hsn code"])).trim(),
       quantity: safeNumber(getValue(row, ["quantity billed"])),
-      amount: taxableValue
+      amount: taxableValue,
+      // This format carries a single combined "Tax Rate(%)" column (already
+      // 2-decimal, no rounding needed) rather than a separate CGST/SGST/IGST
+      // rate per line — the CGST/SGST vs IGST split only happens at the
+      // invoice level during finalization, based on customer_state.
+      gst_rate: safeNumber(getValue(row, ["tax rate(%)", "tax rate (%)", "tax rate"])),
+      unit_of_measure: extractUnitOfMeasure(row),
+      type_of_supply: deriveTypeOfSupply(row),
+      product_category: extractProductCategory(row)
     });
   }
 }
@@ -396,6 +476,27 @@ const worker = new Worker(
 
     if (!companyId) {
       throw new Error(`Company not found: ${company}`);
+    }
+
+    // Company's own state — dynamically from company_details (synced from
+    // Tally's Company GST Details), same pattern used in
+    // invoiceCalculation.routes.js / stockGroupSummary.js / salesInvoices.routes.js.
+    // Falls back to "27" (Maharashtra) only if no company_details row exists yet.
+    const companyDetailsResult = await pool.query(
+      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE TRIM(company_name) = TRIM($1) LIMIT 1`,
+      [company]
+    );
+    let companyStateCode = null;
+    let companyStateName = "";
+    if (companyDetailsResult.rows.length) {
+      const companyGSTIN = companyDetailsResult.rows[0].gstin || null;
+      if (companyGSTIN && /^[0-9]{2}/.test(companyGSTIN)) {
+        companyStateCode = companyGSTIN.substring(0, 2);
+      }
+      companyStateName = companyDetailsResult.rows[0].state || "";
+    }
+    if (!companyStateCode) {
+      companyStateCode = "27";
     }
 
     const workbook = XLSX.readFile(filePath);
@@ -453,7 +554,7 @@ const worker = new Worker(
       if (format === "SPARE_SALES") {
         const taxAmount = roundTo2(invoice.pending_tax_amount);
 
-        if (isMaharashtraState(invoice.customer_state)) {
+        if (isSameStateAsCompany(invoice.customer_state, companyStateName, companyStateCode)) {
           // Compute SGST as the remainder (taxAmount - cgst) rather than
           // halving twice — guarantees cgst + sgst always equals the
           // original taxAmount exactly, even when taxAmount is an odd

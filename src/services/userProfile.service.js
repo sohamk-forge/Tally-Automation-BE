@@ -9,7 +9,7 @@ import { DB_SCHEMA } from "../config/db.js";
  * Called right after a SuperTokens sign up so every new session has a
  * corresponding local numeric user id available (see getLocalUserId.js).
  */
-export const ensureLocalUserProfile = async (supertokensUserId, email, role = "user", profile = {}, hasPassword = true) => {
+export const ensureLocalUserProfile = async (supertokensUserId, email, role = "user", profile = {}, hasPassword = true, emailVerified = true) => {
   await UserRoles.createNewRoleOrAddPermissions(role, []);
   await UserRoles.addRoleToUser("public", supertokensUserId, role);
 
@@ -25,7 +25,8 @@ export const ensureLocalUserProfile = async (supertokensUserId, email, role = "u
       first_name,
       last_name,
       phone,
-      has_password
+      has_password,
+      email_verified
     )
     VALUES
     (
@@ -35,12 +36,13 @@ export const ensureLocalUserProfile = async (supertokensUserId, email, role = "u
       $4,
       $5,
       $6,
-      $7
+      $7,
+      $8
     )
     ON CONFLICT (email) DO NOTHING
     RETURNING id
     `,
-    [email, supertokensUserId, role, firstName, lastName, phone, hasPassword]
+    [email, supertokensUserId, role, firstName, lastName, phone, hasPassword, emailVerified]
   );
 
   if (result.rows[0]) return result.rows[0].id;

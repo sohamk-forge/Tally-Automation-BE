@@ -24,8 +24,16 @@ const connection = new IORedis({
   job's own job.data.userId.
 =================================================== */
 
+// Derived from PORT rather than a separately hardcoded fallback — a stale
+// literal here (previously "http://localhost:5000", not this server's
+// actual port) silently misdirected every internal sync-step call. On
+// macOS, port 5000 in particular is claimed by the OS's own AirPlay
+// Receiver, which replies 403 to everything — that's what made all 12
+// sync steps fail identically with "status code 403", with connector_jobs
+// never even getting created since these calls never reached this
+// server's own routes at all.
 const api = axios.create({
-  baseURL: process.env.BASE_URL || "http://localhost:5000",
+  baseURL: process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`,
   timeout: 300000,
   headers: {
     "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
@@ -220,6 +228,14 @@ const worker = new Worker(
     await runSyncStep({
       label: "BANK ACCOUNTS",
       path: "/api/sync/group-summary-bank",
+      params: { company },
+      userId,
+      results
+    });
+
+    await runSyncStep({
+      label: "STOCK GROUP GST DETAILS",
+      path: "/api/sync/stock-group-gst-sync",
       params: { company },
       userId,
       results

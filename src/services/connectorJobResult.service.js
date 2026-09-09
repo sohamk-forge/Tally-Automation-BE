@@ -39,6 +39,25 @@ function resolveTallyOutcome(responseXml) {
   return { finalStatus, errorMessage };
 }
 
+// Tally's signature for "this voucher already exists, skipped" — no
+// created/altered, no genuine errors, but exceptions > 0 and no LINEERROR
+// text explaining why. resolveTallyOutcome() above classifies this as a
+// generic "failed", which sends the user into a pointless retry loop.
+// Kept as a separate check (rather than folded into resolveTallyOutcome)
+// so only the sales_invoice case below opts into this distinct status —
+// every other job type (ledger, stock_item, bank, etc.) keeps its exact
+// current success/failed behavior.
+function isPossibleDuplicateVoucher(responseXml) {
+  const xml = responseXml || "";
+  const created = parseInt(xml.match(/<CREATED>(\d+)<\/CREATED>/)?.[1] || "0");
+  const altered = parseInt(xml.match(/<ALTERED>(\d+)<\/ALTERED>/)?.[1] || "0");
+  const exceptions = parseInt(xml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/)?.[1] || "0");
+  const errors = parseInt(xml.match(/<ERRORS>(\d+)<\/ERRORS>/)?.[1] || "0");
+  const lineError = xml.match(/<LINEERROR>(.*?)<\/LINEERROR>/)?.[1] || null;
+
+  return created === 0 && altered === 0 && errors === 0 && exceptions > 0 && !lineError;
+}
+
 export async function processConnectorJobResult(client, job) {
   try {
     const { id, job_type, status, response_xml, result, payload } = job;
@@ -69,7 +88,13 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "sales_invoice": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        let { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+
+        if (finalStatus === "failed" && isPossibleDuplicateVoucher(response_xml)) {
+          finalStatus = "possible_duplicate";
+          errorMessage =
+            "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
+        }
 
         await client.query(
           `
