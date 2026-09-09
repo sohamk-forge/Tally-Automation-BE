@@ -6,9 +6,7 @@
  *
  * Header layout: company details on the left; Challan No / Date and
  * Delivery Person details stacked on the right (challan no/date on top,
- * delivery person below it). Challan No / Date use a grid so the label
- * and value columns line up cleanly — same pattern as the Quotation No /
- * Date / Valid Until block in quotation-pdf.service.js.
+ * delivery person below it).
  *
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true.
@@ -105,22 +103,38 @@ const STYLE = `
   .company-meta strong { color: #111; }
 
   .header-right { flex: 0 0 auto; text-align: right; white-space: nowrap; }
+.doc-meta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
 
-  .doc-meta-row {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    column-gap: 8px;
-    row-gap: 4px;
-    font-size: 11.5px;
-  }
-  .doc-meta-row .label { font-weight: bold; color: #333; text-align: right; white-space: nowrap; }
-  .doc-meta-row .value { color: #111; text-align: left; white-space: nowrap; }
-  .doc-meta-row .value.strong { font-weight: bold; }
-  .doc-meta-row .divider-row {
-    grid-column: 1 / -1;
-    border-top: 1px solid #d1d5db;
-    margin: 3px 0 1px;
-  }
+.doc-meta-line {
+  display: grid;
+  grid-template-columns: 96px 8px auto;
+  align-items: center;
+  line-height: 1.3;
+}
+
+.doc-meta-line .label-text {
+  font-weight: bold;
+  color: #333;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.doc-meta-line .colon {
+  font-weight: bold;
+  color: #333;
+  text-align: center;
+}
+
+.doc-meta-row .value {
+  color: #111;
+  text-align: left;
+  white-space: nowrap;
+}
 
   /* ---- title bar ---- */
  .doc-title-bar {
@@ -279,23 +293,44 @@ function buildHtml(challan) {
           </div>
         </div>
         <div class="header-right">
-          <div class="doc-meta-row">
-            <span class="label">Challan No :</span><span class="value">${esc(challan_number || "-")}</span>
-            <span class="label">Date :</span><span class="value">${formatDate(challan_date)}</span>
-            ${
-              delivery_person
-                ? `
-                  <span class="divider-row"></span>
-                  <span class="label">Delivery Person :</span><span class="value strong">${esc(delivery_person.name)}</span>
-                  ${
-                    delivery_person.phone_number
-                      ? `<span class="label"></span><span class="value">${esc(delivery_person.phone_number)}</span>`
-                      : ""
-                  }
-                `
-                : ""
-            }
-          </div>
+        <div class="doc-meta-row">
+
+  <div class="doc-meta-line">
+    <span class="label-text">Challan No</span>
+    <span class="colon">:</span>
+    <span class="value">${esc(challan_number || "-")}</span>
+  </div>
+
+  <div class="doc-meta-line">
+    <span class="label-text">Date</span>
+    <span class="colon">:</span>
+    <span class="value">${formatDate(challan_date)}</span>
+  </div>
+
+  ${
+    delivery_person
+      ? `
+        <div class="doc-meta-line">
+          <span class="label-text">Delivery Person</span>
+          <span class="colon">:</span>
+          <span class="value">${esc(delivery_person.name)}</span>
+        </div>
+        ${
+          delivery_person.phone_number
+            ? `
+              <div class="doc-meta-line">
+                <span class="label-text">Phone</span>
+                <span class="colon">:</span>
+                <span class="value">${esc(delivery_person.phone_number)}</span>
+              </div>
+            `
+            : ""
+        }
+      `
+      : ""
+  }
+
+</div>
         </div>
       </div>
 
