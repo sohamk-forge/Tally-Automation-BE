@@ -6,9 +6,7 @@
  *
  * Header layout: company details on the left; Challan No / Date and
  * Delivery Person details stacked on the right (challan no/date on top,
- * delivery person below it). Challan No / Date use a grid so the label
- * and value columns line up cleanly — same pattern as the Quotation No /
- * Date / Valid Until block in quotation-pdf.service.js.
+ * delivery person below it).
  *
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true.
@@ -114,7 +112,7 @@ const STYLE = `
 
 .doc-meta-line {
   display: grid;
-  grid-template-columns: 72px 8px auto;
+  grid-template-columns: 96px 8px auto;
   align-items: center;
   line-height: 1.3;
 }
@@ -137,13 +135,6 @@ const STYLE = `
   text-align: left;
   white-space: nowrap;
 }
-  .delivery-block { font-size: 11px; text-align: right; }
-  .delivery-block .section-label {
-    font-size: 10px; text-transform: uppercase; color: #111;
-    letter-spacing: 0.04em; margin-bottom: 2px;
-  }
-  .delivery-block .name { font-weight: bold; }
-  .delivery-block .muted-line { color: #4b5563; margin-top: 1px; }
 
   /* ---- title bar ---- */
  .doc-title-bar {
@@ -316,13 +307,30 @@ function buildHtml(challan) {
     <span class="value">${formatDate(challan_date)}</span>
   </div>
 
+  ${
+    delivery_person
+      ? `
+        <div class="doc-meta-line">
+          <span class="label-text">Delivery Person</span>
+          <span class="colon">:</span>
+          <span class="value">${esc(delivery_person.name)}</span>
+        </div>
+        ${
+          delivery_person.phone_number
+            ? `
+              <div class="doc-meta-line">
+                <span class="label-text">Phone</span>
+                <span class="colon">:</span>
+                <span class="value">${esc(delivery_person.phone_number)}</span>
+              </div>
+            `
+            : ""
+        }
+      `
+      : ""
+  }
+
 </div>
-          ${delivery_person ? `
-<div class="delivery-block">
-  <div class="section-label">Delivery Person</div>
-  <div class="name">${esc(delivery_person.name)}</div>
-  ${delivery_person.phone_number ? `<div class="muted-line">${esc(delivery_person.phone_number)}</div>` : ""}
-</div>` : ""}
         </div>
       </div>
 

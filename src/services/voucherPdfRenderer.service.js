@@ -46,13 +46,13 @@ const SHARED_STYLE = `
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #111; margin: 0; padding: 16px; }
   .sheet { border: 1px solid #000; }
 
+  .voucher-title { text-align: center; font-weight: bold; font-size: 14px; padding: 6px 0; border-bottom: 2px solid #1a5fb4; background: #ffffff; color: #1a5fb4; }
+
   .company-header { display: flex; align-items: flex-start; gap: 14px; padding: 10px 12px; border-bottom: 1px solid #000; }
   .company-logo-img { width: 110px; max-height: 70px; height: auto; object-fit: contain; flex-shrink: 0; }
   .company-name { font-size: 17px; font-weight: bold; color: #1a5fb4; margin: 0 0 3px 0; line-height: 1.25; }
   .company-meta { font-size: 10.5px; line-height: 1.5; color: #333; }
   .company-meta strong { color: #111; }
-
-  .voucher-title { text-align: center; font-weight: bold; font-size: 14px; padding: 6px 0; border-bottom: 2px solid #1a5fb4; background: #ffffff; color: #1a5fb4; }
 
   /* ---- Info row (voucher no / date / order no) ---- */
   table.info-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
@@ -68,7 +68,7 @@ const SHARED_STYLE = `
   /* ---- Consignee / Buyer block ---- */
   .party-block { display: flex; border-bottom: 1px solid #000; }
   .party-block .half { flex: 1; padding: 6px 8px; }
-  .party-block .half:first-child { border-right: 1px solid #000; }
+  .party-block .half:not(:last-child) { border-right: 1px solid #000; }
   .party-block .name { font-weight: bold; }
 
   /* ---- Item / party table: full grid, plain black headers ---- */
@@ -78,6 +78,7 @@ const SHARED_STYLE = `
     padding: 5px 8px;
     word-break: break-word;
     overflow-wrap: break-word;
+    vertical-align: top;
   }
   table.data-table th { background: #f4f6f9; text-align: left; font-weight: bold; color: #111; }
   table.data-table td.num, table.data-table th.num { text-align: right; }
@@ -86,8 +87,8 @@ const SHARED_STYLE = `
   .amount-words { border-top: 1px solid #000; padding: 6px 8px; font-weight: bold; }
 
   /* ---- Tax breakdown table: full grid, plain black headers ---- */
-  table.tax-table { width: 100%; border-collapse: collapse; }
-  table.tax-table th, table.tax-table td { border: 1px solid #000; padding: 3px 6px; text-align: right; }
+  table.tax-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.tax-table th, table.tax-table td { border: 1px solid #000; padding: 3px 6px; text-align: right; vertical-align: top; }
   table.tax-table th { background: #f4f6f9; color: #111; }
   table.tax-table td.left, table.tax-table th.left { text-align: left; }
 
@@ -117,20 +118,25 @@ const SHARED_STYLE = `
 .narration-block strong { color: #333; }
 </style>`;
 
+/**
+ * The voucher-type name (Contra Voucher, Payment Voucher, Tax Invoice, etc.)
+ * is rendered first, above the company letterhead, so it's the very first
+ * thing visible at the top of the PDF.
+ */
 function headerHtml(company, title) {
   return `
+<div class="voucher-title">${esc(title)}</div>
 <div class="company-header">
   ${logoHtml(company)}
   <div>
     <p class="company-name">${esc(company.name)}</p>
     <div class="company-meta">
       ${esc(company.address)}<br/>
-      Email: ${esc(company.email)}<br/>
-      GSTIN: <strong>${esc(company.gstin)}</strong> | State: ${esc(company.state)}
+      Email : ${esc(company.email)}<br/>
+      GSTIN : <strong>${esc(company.gstin)}</strong> | State : ${esc(company.state)}
     </div>
   </div>
-</div>
-<div class="voucher-title">${esc(title)}</div>`;
+</div>`;
 }
 
 function signatureHtml(company) {
@@ -218,6 +224,10 @@ function buildTaxTableHtml(v) {
   if (isInterstate) {
     return `
     <table class="tax-table">
+      <colgroup>
+        <col style="width:34%"><col style="width:22%">
+        <col style="width:14%"><col style="width:15%"><col style="width:15%">
+      </colgroup>
       <tr><th class="left">HSN/SAC</th><th>Taxable Value</th><th>IGST Rate</th><th>Amount</th><th>Total Tax Amt</th></tr>
       ${taxRows.map((r) => `
         <tr>
@@ -237,6 +247,11 @@ function buildTaxTableHtml(v) {
 
   return `
     <table class="tax-table">
+      <colgroup>
+        <col style="width:24%"><col style="width:15%">
+        <col style="width:11%"><col style="width:12%">
+        <col style="width:14%"><col style="width:12%"><col style="width:12%">
+      </colgroup>
       <tr><th class="left">HSN/SAC</th><th>Taxable Value</th><th>CGST Rate</th><th>Amount</th><th>SGST/UTGST Rate</th><th>Amount</th><th>Total Tax Amt</th></tr>
       ${taxRows.map((r) => `
         <tr>
@@ -281,13 +296,13 @@ function buildContraHtml(v) {
         <col style="width:9%"><col style="width:55%">
       </colgroup>
       <tr>
-        <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
-        <td class="label">Bank A/C</td>
+        <td class="label">Bank A/C :</td>
         ${v.narration
-          ? `<td>${esc(v.bankAccount || v.partyName)}</td><td class="label">Narration</td><td>${esc(v.narration)}</td>`
+          ? `<td>${esc(v.bankAccount || v.partyName)}</td><td class="label">Narration :</td><td>${esc(v.narration)}</td>`
           : `<td colspan="3">${esc(v.bankAccount || v.partyName)}</td>`}
       </tr>
     </table>
@@ -327,13 +342,13 @@ function buildJournalHtml(v) {
         <col style="width:9%"><col style="width:55%">
       </colgroup>
       <tr>
-        <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
-        <td class="label">Party</td>
+        <td class="label">Party :</td>
         ${v.narration
-          ? `<td>${esc(v.partyName)}</td><td class="label">Narration</td><td>${esc(v.narration)}</td>`
+          ? `<td>${esc(v.partyName)}</td><td class="label">Narration :</td><td>${esc(v.narration)}</td>`
           : `<td colspan="3">${esc(v.partyName)}</td>`}
       </tr>
     </table>
@@ -359,13 +374,14 @@ function buildPaymentHtml(v) {
   const openLabel = v.openingBalance >= 0 ? "(Dr)" : "(Cr)";
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
- const partyRows = v.parties.map(
-  (p) => `
-    <tr>
-      <td>${esc(p.partyName)}</td>
-      <td class="num">${money(p.amount)}</td>
-    </tr>`
-).join("");
+  const partyRows = v.parties.map(
+    (p) => `
+      <tr>
+        <td>${esc(p.partyName)}</td>
+        <td class="num">${money(p.amount)}</td>
+      </tr>`
+  ).join("");
+
   return wrap(`
     ${headerHtml(v.company, "Payment Voucher")}
     <table class="info-table">
@@ -374,11 +390,11 @@ function buildPaymentHtml(v) {
         <col style="width:12%"><col style="width:38%">
       </colgroup>
       <tr>
-        <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
-        <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
+        <td class="label">Bank Account :</td><td colspan="3">${esc(v.bankAccount)}</td>
       </tr>
     </table>
     <table class="data-table">
@@ -392,13 +408,13 @@ function buildPaymentHtml(v) {
       </tr>
     </table>
     <div class="ledger-transaction">
-      <div class="title">Ledger Transaction:</div>
+      <div class="title">Ledger Transaction :</div>
       Opening Balance : ${openLabel} ${money(Math.abs(v.openingBalance))}<br/>
       This Payment Amount : ${money(v.amount)}<br/>
       <strong>Closing Balance : ${closeLabel} ${money(Math.abs(v.closingBalance))}</strong>
     </div>
     <div class="words-row">
-      <div>Amount Chargeable (in Words)</div>
+      <div>Amount Chargeable (in Words) :</div>
       <div>Total : ${money(v.amount)}</div>
     </div>
     <div class="amount-words">${esc(amountToWords(v.amount))}</div>
@@ -411,12 +427,12 @@ function buildReceiptHtml(v) {
   const closeLabel = v.closingBalance >= 0 ? "(Dr)" : "(Cr)";
 
   const partyRows = v.parties.map(
-  (p) => `
-    <tr>
-      <td>${esc(p.partyName)}</td>
-      <td class="num">${money(p.amount)}</td>
-    </tr>`
-).join("");
+    (p) => `
+      <tr>
+        <td>${esc(p.partyName)}</td>
+        <td class="num">${money(p.amount)}</td>
+      </tr>`
+  ).join("");
 
   return wrap(`
     ${headerHtml(v.company, "Receipt Voucher")}
@@ -426,11 +442,11 @@ function buildReceiptHtml(v) {
         <col style="width:12%"><col style="width:38%">
       </colgroup>
       <tr>
-        <td class="label">Voucher No.</td><td>${esc(v.voucherNumber)}</td>
+        <td class="label">Voucher No :</td><td>${esc(v.voucherNumber)}</td>
         <td class="label">Date :</td><td>${esc(v.date)}</td>
       </tr>
       <tr>
-        <td class="label">Bank Account</td><td colspan="3">${esc(v.bankAccount)}</td>
+        <td class="label">Bank Account :</td><td colspan="3">${esc(v.bankAccount)}</td>
       </tr>
     </table>
     <table class="data-table">
@@ -444,21 +460,33 @@ function buildReceiptHtml(v) {
       </tr>
     </table>
     <div class="ledger-transaction">
-      <div class="title">Ledger Transaction:</div>
+      <div class="title">Ledger Transaction :</div>
       Opening Balance : ${openLabel} ${money(Math.abs(v.openingBalance))}<br/>
       This Receipt Amount : ${money(v.amount)}<br/>
       <strong>Closing Balance : ${closeLabel} ${money(Math.abs(v.closingBalance))}</strong>
     </div>
     <div class="words-row">
-      <div>Amount Chargeable (in Words)</div>
+      <div>Amount Chargeable (in Words) :</div>
       <div>Total : ${money(v.amount)}</div>
     </div>
     <div class="amount-words">${esc(amountToWords(v.amount))}</div>
-${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
-
+    ${v.narration ? `<div class="narration-block"><strong>Narration :</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
   `);
 }
+
+// Shared colgroup for the Purchase/Sales items table so Sl/HSN/Qty/Rate/Amount
+// line up cleanly instead of being auto-sized column by column.
+const ITEMS_TABLE_COLGROUP = `
+  <colgroup>
+    <col style="width:5%">
+    <col style="width:31%">
+    <col style="width:12%">
+    <col style="width:12%">
+    <col style="width:12%">
+    <col style="width:8%">
+    <col style="width:20%">
+  </colgroup>`;
 
 function buildPurchaseHtml(v) {
   const itemRows = v.items.map(
@@ -486,7 +514,7 @@ function buildPurchaseHtml(v) {
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
   const roundOffRow = buildRoundOffRowHtml(v.roundOff);
-const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
+  const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Purchase Invoice")}
@@ -507,12 +535,13 @@ const grandTotal = v.total; // DB value, not recalculated from items/tax/round-o
         <div><strong>Supplier</strong></div>
         <div class="name">${esc(v.supplierOrBuyerName)}</div>
         <div>${esc(v.supplierOrBuyerAddress)}</div>
-        <div>GSTIN/UIN: ${esc(v.gstin)}</div>
-        <div>State: ${esc(v.company.state)}, Code: 27</div>
-        <div>Place of Supply: ${esc(v.placeOfSupply)}</div>
+        <div>GSTIN/UIN : ${esc(v.gstin)}</div>
+        <div>State : ${esc(v.company.state)}, Code : 27</div>
+        <div>Place of Supply : ${esc(v.placeOfSupply)}</div>
       </div>
     </div>
     <table class="data-table">
+      ${ITEMS_TABLE_COLGROUP}
       <tr>
         <th>Sl</th><th>Description of Goods</th><th>HSN/SAC</th>
         <th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th>
@@ -526,13 +555,13 @@ const grandTotal = v.total; // DB value, not recalculated from items/tax/round-o
       </tr>
     </table>
     <div class="words-row">
-      <div>Amount Chargeable (in words)</div>
+      <div>Amount Chargeable (in words) :</div>
       <div>E. &amp; O.E</div>
     </div>
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
-    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
+    ${v.narration ? `<div class="narration-block"><strong>Narration :</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);
@@ -564,7 +593,7 @@ function buildSalesHtml(v) {
       <tr><td colspan="6"><em>Sgst</em></td><td class="num">${money(v.sgst)}</td></tr>`;
 
   const roundOffRow = buildRoundOffRowHtml(v.roundOff);
-const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
+  const grandTotal = v.total; // DB value, not recalculated from items/tax/round-off
 
   return wrap(`
     ${headerHtml(v.company, "Tax Invoice")}
@@ -585,18 +614,19 @@ const grandTotal = v.total; // DB value, not recalculated from items/tax/round-o
         <div><strong>Consignee (Ship to)</strong></div>
         <div class="name">${esc(v.supplierOrBuyerName)}</div>
         <div>${esc(v.supplierOrBuyerAddress)}</div>
-        <div>State: ${esc(v.company.state)}, Code: 27</div>
-        <div>Place of Supply: ${esc(v.placeOfSupply)}</div>
+        <div>State : ${esc(v.company.state)}, Code : 27</div>
+        <div>Place of Supply : ${esc(v.placeOfSupply)}</div>
       </div>
       <div class="half">
         <div><strong>Buyer (Bill to)</strong></div>
         <div class="name">${esc(v.supplierOrBuyerName)}</div>
         <div>${esc(v.supplierOrBuyerAddress)}</div>
-        <div>State: ${esc(v.company.state)}, Code: 27</div>
-        <div>Place of Supply: ${esc(v.placeOfSupply)}</div>
+        <div>State : ${esc(v.company.state)}, Code : 27</div>
+        <div>Place of Supply : ${esc(v.placeOfSupply)}</div>
       </div>
     </div>
     <table class="data-table">
+      ${ITEMS_TABLE_COLGROUP}
       <tr>
         <th>Sl</th><th>Description of Goods</th><th>HSN/SAC</th>
         <th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th>
@@ -610,13 +640,13 @@ const grandTotal = v.total; // DB value, not recalculated from items/tax/round-o
       </tr>
     </table>
     <div class="words-row">
-      <div>Amount Chargeable (in words)</div>
+      <div>Amount Chargeable (in words) :</div>
       <div>E. &amp; O.E</div>
     </div>
     <div class="amount-words">${esc(amountToWords(grandTotal))}</div>
     ${buildTaxTableHtml(v)}
     <div class="amount-words">Tax Amount (in words) : ${esc(taxAmountWordsFor(v))}</div>
-    ${v.narration ? `<div class="narration-block"><strong>Narration:</strong> ${esc(v.narration)}</div>` : ""}
+    ${v.narration ? `<div class="narration-block"><strong>Narration :</strong> ${esc(v.narration)}</div>` : ""}
     ${signatureHtml(v.company)}
     ${invoiceFooterHtml(v.company)}
   `);
