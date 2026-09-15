@@ -11,26 +11,18 @@ if len(sys.argv) >= 2 and sys.argv[1].endswith(".json"):
     with open(sys.argv[1], encoding="utf-8") as f:
         invoice = json.load(f)
 else:
+    # Node (xmlGenerator.js) writes JSON to stdin as UTF-8, but Python's
+    # sys.stdin defaults to the OS locale encoding (cp1252 on Windows), not
+    # UTF-8 — silently mangling any non-ASCII character (e.g. an en-dash in
+    # a stock item name) into mojibake by the time it reaches Tally.
+    sys.stdin.reconfigure(encoding="utf-8")
     invoice = json.loads(sys.stdin.read())
 
-# =========================================
-# AUTO INCREMENT VOUCHER NUMBER
-# =========================================
-COUNTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voucher_counter.txt")
-
-def get_next_voucher_number():
-    if os.path.exists(COUNTER_FILE):
-        with open(COUNTER_FILE, "r") as f:
-            num = int(f.read().strip())
-    else:
-        num = 28
-    num += 1
-    with open(COUNTER_FILE, "w") as f:
-        f.write(str(num))
-    return str(num)
-
-if "voucher_number" not in invoice:
-    invoice["voucher_number"] = get_next_voucher_number()
+# Debug prints below go to stderr as plain text — without this they hit the
+# same default-encoding problem stdin had, garbling any non-ASCII character
+# in the console log even though (after the fix above/below) the actual
+# data and the real XML output are both correct.
+sys.stderr.reconfigure(encoding="utf-8")
 
 # =========================================
 # COMPANY
@@ -90,7 +82,6 @@ ref_date = parse_date(invoice.get("reference_date", invoice.get("invoice_date", 
 # =========================================
 # VOUCHER FIELDS
 # =========================================
-voucher_number = str(invoice.get("voucher_number", ""))
 invoice_no     = invoice.get("invoice_no", "")
 reference      = invoice.get("reference", invoice_no)
 party_name     = invoice.get("vendor_name", "")
@@ -329,4 +320,14 @@ if len(sys.argv) >= 3:
         f.write(pretty)
     print(f"✅ XML saved to: {sys.argv[2]}", file=sys.stderr)
 else:
-    sys.stdout.write(pretty)
+    # xmlGenerator.js's default invocation (no file args) lands here — a
+    # plain text-mode sys.stdout.write() picks up whatever encoding Python
+    # defaulted stdout to for this pipe (not UTF-8, unlike the file-write
+    # branch above, which explicitly says encoding="utf-8"). Any non-ASCII
+    # character (e.g. "Ø395 CLUTCH COVER DIA 395") silently became a
+    # replacement character here, well after stdin was already correctly
+    # decoded — the loss was on the way OUT, not in. Writing explicit UTF-8
+    # bytes through the raw buffer sidesteps stdout's text-mode encoding
+    # entirely, matching the file-write branch and sales_generator.py's
+    # already-correct pattern.
+    sys.stdout.buffer.write(pretty.encode("utf-8"))

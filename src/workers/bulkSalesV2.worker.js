@@ -249,7 +249,7 @@ function ensureInvoice(invoices, invoiceNo, seed) {
       customer_gstin: seed.customer_gstin || "",
       invoice_no: invoiceNo,
       invoice_date: seed.invoice_date || "",
-      narration: "",
+      narration: seed.narration || "",
       godown_name: "Main Location",
 
       taxable_amount: 0,
@@ -282,11 +282,19 @@ function processWarrantyRow(row, invoices) {
   const invoiceNo = String(getValue(row, ["documentnumber"])).trim();
   if (!invoiceNo) return;
 
+  const claimNumber = String(getValue(row, [
+    "claim number", "claimnumber", "claim no", "claimno"
+  ])).trim();
+
   const invoice = ensureInvoice(invoices, invoiceNo, {
     customer_name: String(getValue(row, ["customername"])).trim(),
     customer_gstin: String(getValue(row, ["customergstin"])).trim(),
     invoice_date: formatDate(getValue(row, ["accountingvoucherdate"])),
-    customer_state: String(getValue(row, ["shiptostate"])).trim()
+    customer_state: String(getValue(row, ["shiptostate"])).trim(),
+    // Pushed into the Tally voucher's own NARRATION field (sales_generator.py
+    // reads invoice.narration verbatim) — Document Number and Claim Number
+    // aren't otherwise visible on the voucher once it's in Tally.
+    narration: `Document No: ${invoiceNo}${claimNumber ? ` | Claim No: ${claimNumber}` : ""}`
   });
 
   const taxableValue = safeNumber(getValue(row, ["taxablevalue"]));
@@ -340,7 +348,10 @@ function processSpareLabourRow(row, invoices) {
     // No dedicated "Customer State" mapping for this format (already
     // split CGST/SGST/IGST — state isn't needed for calculation), but
     // the state name is available if ever needed for reporting.
-    customer_state: String(getValue(row, ["customer bill to state name"])).trim()
+    customer_state: String(getValue(row, ["customer bill to state name"])).trim(),
+    // Pushed into the Tally voucher's own NARRATION field (sales_generator.py
+    // reads invoice.narration verbatim).
+    narration: `Dealer Invoice No: ${invoiceNo}`
   });
 
   const cgstBase = safeNumber(getValue(row, ["cgst base value"]));
@@ -396,7 +407,10 @@ function processSpareSalesRow(row, invoices) {
     customer_name: String(getValue(row, ["customer name"])).trim(),
     customer_gstin: String(getValue(row, ["customer gst no"])).trim(),
     invoice_date: formatDate(getValue(row, ["invoice date"])),
-    customer_state: getCustomerState(row)
+    customer_state: getCustomerState(row),
+    // Pushed into the Tally voucher's own NARRATION field (sales_generator.py
+    // reads invoice.narration verbatim).
+    narration: `Dealer Invoice No: ${invoiceNo}`
   });
 
   const taxableValue = safeNumber(getValue(row, ["net taxable amount"]));

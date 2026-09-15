@@ -3,16 +3,216 @@ console.log("🚀 pushInvoice.worker.js loaded");
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import pool from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
 import { PURCHASE_QUEUE_NAME, safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
-import { generateXml } from "../services/xmlGenerator.js";
+import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
+import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT || 6379),
   maxRetriesPerRequest: null
 });
+
+// Mirrors pushSalesInvoice.worker.js's ledgerExists/stockItemExists exactly
+// — same UNION-with-successfully-pushed-rows source, same whitespace
+// normalization, same fuzzy fallback. Purchase never had this validation
+// stage before; the sales side already proved the pattern out.
+async function ledgerExists(companyId, ledgerName) {
+  if (!ledgerName) return false;
+
+  const found = await pool.query(
+    `
+    SELECT 1
+    FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+    UNION
+    SELECT 1
+    FROM ${DB_SCHEMA}.push_ledger
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND status = 'success'
+    LIMIT 1
+    `,
+    [companyId, ledgerName]
+  );
+
+  return found.rows.length > 0;
+}
+
+// Returns { exists, matchedName } — a fuzzy-matched item needs its real
+// name handed back so the caller can correct the invoice before the XML
+// is generated, not just report "fine" while the wrong name ships.
+async function stockItemExists(companyId, stockItemName) {
+  if (!stockItemName) return { exists: false, matchedName: null };
+
+  const found = await pool.query(
+    `
+    SELECT 1
+    FROM ${DB_SCHEMA}.stock_group_summary
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g')
+    UNION
+    SELECT 1
+    FROM ${DB_SCHEMA}.push_stock_item
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND status = 'success'
+    LIMIT 1
+    `,
+    [companyId, stockItemName]
+  );
+
+  if (found.rows.length > 0) return { exists: true, matchedName: null };
+
+  const allNames = await pool.query(
+    `
+    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1
+    UNION
+    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item WHERE company_id = $1 AND status = 'success'
+    `,
+    [companyId]
+  );
+
+  const matchedName = findBestItemMatch(allNames.rows.map((r) => r.item_name), stockItemName);
+  return { exists: Boolean(matchedName), matchedName: matchedName || null };
+}
+
+// Vendor/party ledgers frequently don't match the Purchase Report's raw
+// vendor name at all — real-world Tally practice appends a disambiguating
+// suffix (e.g. "VE Commercial Vehicles Ltd." on the report vs. the actual
+// ledger "VE Commercial Vehicles Ltd. (Sundary cr.)") whenever the same
+// name is used on both the sales and purchase side. A generic Levenshitein
+// fuzzy match (findBestItemMatch's 0.9 threshold) doesn't clear that gap —
+// the suffix is real added text, not a typo — so this checks specifically
+// for "the ledger name STARTS WITH the vendor name", restricted to Sundry
+// Creditors so a same-named Sundry Debtors ledger (the sales-side entry
+// for the same vendor) is never matched onto a purchase voucher.
+async function partyLedgerExists(companyId, vendorName) {
+  if (!vendorName) return { exists: false, matchedName: null };
+
+  const normalized = vendorName.trim().toLowerCase();
+
+  const exact = await pool.query(
+    `
+    SELECT 1
+    FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = $2
+    UNION
+    SELECT 1
+    FROM ${DB_SCHEMA}.push_ledger
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = $2 AND status = 'success'
+    LIMIT 1
+    `,
+    [companyId, normalized]
+  );
+  if (exact.rows.length > 0) return { exists: true, matchedName: null };
+
+  const prefixMatch = await pool.query(
+    `
+    SELECT ledger_name
+    FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1
+      AND parent_group ILIKE '%creditor%'
+      AND LOWER(TRIM(ledger_name)) LIKE $2
+    ORDER BY LENGTH(ledger_name) ASC
+    LIMIT 1
+    `,
+    [companyId, `${normalized}%`]
+  );
+  if (prefixMatch.rows.length > 0) {
+    return { exists: true, matchedName: prefixMatch.rows[0].ledger_name };
+  }
+
+  return { exists: false, matchedName: null };
+}
+
+// Validates ledgers + stock items for a PURCHASE invoice before XML is ever
+// generated. Mutates `invoice.line_items[].item_name` in place on a fuzzy
+// match (same as validateSalesInvoice) — caller must persist `invoice`
+// back to raw_json when renamedItems is non-empty, or the fix only lives
+// in this run's memory.
+async function validatePurchaseInvoice(invoice, mapping, companyId) {
+  const missingLedgers = [];
+  const missingStockItems = [];
+  const missingStockItemDetails = {};
+
+  const ledgersToValidate = [
+    { field: "purchase_ledger", value: mapping.purchase_ledger },
+    { field: "cgst_ledger", value: mapping.cgst_ledger },
+    { field: "sgst_ledger", value: mapping.sgst_ledger },
+    { field: "igst_ledger", value: mapping.igst_ledger },
+
+    ...(Number(invoice.tds_amount || 0) !== 0 ? [{ field: "tds_ledger", value: mapping.tds_ledger }] : []),
+    ...(Number(invoice.cess_amount || 0) !== 0 ? [{ field: "cess_ledger", value: mapping.cess_ledger }] : []),
+    ...(Number(invoice.round_off || 0) !== 0 ? [{ field: "rounded_off_ledger", value: mapping.rounded_off_ledger }] : [])
+  ];
+
+  for (const { field, value } of ledgersToValidate) {
+    if (!value) {
+      missingLedgers.push({ field, ledger: `(mapping missing for ${field})` });
+      continue;
+    }
+
+    const exists = await ledgerExists(companyId, value);
+    if (!exists) missingLedgers.push({ field, ledger: value });
+  }
+
+  const renamedItems = [];
+
+  const partyLedgerName = invoice.vendor_name || invoice.customer_name;
+  if (partyLedgerName) {
+    const { exists, matchedName } = await partyLedgerExists(companyId, partyLedgerName);
+    if (!exists) {
+      missingLedgers.push({ field: "party_ledger", ledger: partyLedgerName });
+    } else if (matchedName && matchedName !== partyLedgerName) {
+      // The real ledger has a disambiguating suffix Tally added (e.g.
+      // "(Sundary cr.)") — the XML's PARTYLEDGERNAME must be this exact
+      // string or Tally won't resolve the ledger at all.
+      invoice.vendor_name = matchedName;
+      renamedItems.push({ from: partyLedgerName, to: matchedName, type: "ledger" });
+    }
+  }
+
+  const lineItems = Array.isArray(invoice.line_items) ? invoice.line_items : [];
+
+  for (const item of lineItems) {
+    const stockName = (item.item_name || item.name || "").trim();
+    if (!stockName) continue;
+
+    const { exists, matchedName } = await stockItemExists(companyId, stockName);
+    if (!exists) {
+      if (!missingStockItems.includes(stockName)) missingStockItems.push(stockName);
+      if (!missingStockItemDetails[stockName]) {
+        const uom = String(item.unit || "").trim();
+        if (uom) missingStockItemDetails[stockName] = { unit_of_measure: uom };
+      }
+    } else if (matchedName && matchedName !== stockName) {
+      item.item_name = matchedName;
+      renamedItems.push({ from: stockName, to: matchedName });
+    }
+  }
+
+  return {
+    valid: missingLedgers.length === 0 && missingStockItems.length === 0,
+    missingLedgers,
+    missingStockItems,
+    missingStockItemDetails,
+    renamedItems
+  };
+}
+
+function formatPurchaseValidationError(validation) {
+  const parts = [];
+
+  if (validation.missingLedgers.length > 0) {
+    const names = [...new Set(validation.missingLedgers.map((l) => l.ledger))];
+    parts.push(`Missing/unmapped ledger(s): ${names.join(", ")}`);
+  }
+
+  if (validation.missingStockItems.length > 0) {
+    parts.push(`Missing stock item(s): ${validation.missingStockItems.join(", ")}`);
+  }
+
+  return parts.join(" | ");
+}
 
 function isTemporaryInvoiceError(error) {
   const code = String(error?.code || "").toUpperCase();
@@ -32,7 +232,17 @@ function isTemporaryInvoiceError(error) {
     message.includes("server unavailable") ||
     message.includes("network") ||
     message.includes("fetch failed") ||
-    message.includes("socket hang up")
+    message.includes("socket hang up") ||
+    // "Python exited with code 3221225794" (0xC0000005, a Windows access
+    // violation) — an intermittent native crash under concurrent
+    // python.exe spawns, not a real rejection of this invoice's data.
+    // Confirmed transient: the exact same payload succeeds standalone,
+    // and a plain re-enqueue of a batch that hit this error resolves most
+    // of it. Previously this fell through to the permanent-failure branch
+    // below, marking the invoice 'failed' on the very first occurrence —
+    // BullMQ's own 3-attempt exponential backoff (already configured on
+    // this queue) never got a chance to smooth it out.
+    message.includes("python exited with code")
   );
 }
 
@@ -95,7 +305,67 @@ const worker = new Worker(
         ? JSON.parse(row.raw_json)
         : row.raw_json;
 
-      const xml = await generateXml({
+      const validation = await validatePurchaseInvoice(invoice, mapping, row.company_id);
+
+      // Persist any fuzzy-match corrections regardless of whether the
+      // overall invoice passed — `invoice` was already mutated in place
+      // above, so this just saves it back (same reasoning as
+      // pushSalesInvoice.worker.js: otherwise the fix only lives in this
+      // run's memory and the stored raw_json keeps showing the original
+      // wrong name on every retry).
+      if (validation.renamedItems?.length) {
+        console.log("✏️ Auto-corrected stock item name(s) via fuzzy match", {
+          invoiceId, invoiceNo: row.invoice_no, renamed: validation.renamedItems
+        });
+        await pool.query(
+          `UPDATE app_test.invoice_extractions SET raw_json = $1, updated_at = NOW() WHERE id = $2`,
+          [invoice, invoiceId]
+        );
+      }
+
+      if (!validation.valid) {
+        const message = formatPurchaseValidationError(validation);
+        console.warn(`⚠️ Purchase invoice failed validation: ${row.invoice_no}`, {
+          missingLedgers: validation.missingLedgers,
+          missingStockItems: validation.missingStockItems
+        });
+
+        // Structured JSON in error_message (no separate column for it),
+        // and sync_status branched by WHAT's missing rather than always
+        // 'failed' — mirrors pushSalesInvoice.worker.js exactly, since a
+        // purchase review endpoint needs to aggregate these same fields
+        // the same way the sales missing-summary endpoint already does.
+        const syncStatus =
+          validation.missingLedgers.length && validation.missingStockItems.length
+            ? "ledger_and_stock_missing"
+            : validation.missingLedgers.length
+            ? "ledger_missing"
+            : validation.missingStockItems.length
+            ? "stock_missing"
+            : "failed";
+
+        await pool.query(
+          `
+          UPDATE app_test.invoice_extractions
+          SET sync_status = $1, error_message = $2, updated_at = NOW()
+          WHERE id = $3
+          `,
+          [
+            syncStatus,
+            JSON.stringify({
+              message,
+              missing_ledgers: validation.missingLedgers,
+              missing_stock_items: validation.missingStockItems,
+              missing_stock_item_details: validation.missingStockItemDetails
+            }),
+            invoiceId
+          ]
+        );
+
+        return { invoiceId, status: "failed", error: message };
+      }
+
+      const xml = await generateXmlViaQueue("purchase", {
         ...invoice,
 
         company: row.company_name,
@@ -115,8 +385,18 @@ const worker = new Worker(
         igst_ledger: mapping.igst_ledger,
         rounded_off_ledger: mapping.rounded_off_ledger,
 
+        // The DB row is the source of truth for the voucher date/number,
+        // not whatever raw_json happens to carry. bulkPurchase.worker.js's
+        // invoiceData never included invoice_date OR invoice_no at all —
+        // generator.py's main <DATE> tag was silently blank for every
+        // bulk-pushed invoice, and `reference_number` below was always a
+        // dead key generator.py never reads (it reads `invoice_no` and
+        // `reference`, not `reference_number`) — so "Supplier Invoice No."
+        // came through blank in Tally too, on every bulk-pushed voucher.
+        invoice_date: row.invoice_date,
         reference_date: row.invoice_date,
-        reference_number: row.invoice_no,
+        invoice_no: row.invoice_no,
+        reference: row.invoice_no,
         voucher_type: "Purchase Invoice"
       });
 

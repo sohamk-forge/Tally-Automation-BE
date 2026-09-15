@@ -28,3 +28,17 @@ function shutdown(signal) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+// Backstop, not a fix — every worker (invoice push, purchase push, stock
+// item push, bulk sales, bank sync, ...) is imported into this same
+// process (app.js), so without this, one uncaught throw anywhere (e.g. the
+// double pg client.release() that used to live in connector.routes.js)
+// takes down every in-flight sync for every company, silently, until
+// someone notices and restarts. Log and stay up instead.
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED REJECTION] Backend stayed up. Reason:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[UNCAUGHT EXCEPTION] Backend stayed up. Error:", error);
+});

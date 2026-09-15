@@ -3,6 +3,7 @@ import pool from "../db/index.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 import { getCompanyMemberRole, checkSeatAvailable } from "../utils/companyMembers.js";
 import { PAGE_KEYS, EDITABLE_ROLES, getRolePermissionMatrix, getEnabledPagesForRole } from "../utils/pagePermissions.js";
+import { getEnabledFeatureKeys } from "../utils/featureFlags.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -241,7 +242,12 @@ router.get("/:id/my-role", async (req, res) => {
       ? [...PAGE_KEYS]
       : await getEnabledPagesForRole(req.params.id, role);
 
-    return res.json({ status: "success", data: { role, enabledPages } });
+    // Paid add-ons (e.g. bulk_purchase_reconciliation) — same for every
+    // role, unlike enabledPages. Piggybacked on this endpoint rather than
+    // a new one since the FE already calls this once per company switch.
+    const features = await getEnabledFeatureKeys(req.params.id);
+
+    return res.json({ status: "success", data: { role, enabledPages, features } });
   } catch (err) {
     console.log("COMPANY MY ROLE ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });

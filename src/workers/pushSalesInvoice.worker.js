@@ -7,7 +7,7 @@ import { DB_SCHEMA } from "../config/db.js";
 import { SALES_QUEUE_NAME, safeEnqueueSales } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
-import { generateSalesXml } from "../services/xmlGenerator.js";
+import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 import { getSalesVoucherExistsXML } from "../services/xmlBuilder.js";
 import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
@@ -617,7 +617,7 @@ const worker = new Worker(
         }
       }
 
-      const xml = await generateSalesXml({
+      const xml = await generateXmlViaQueue("sales", {
         ...invoice,
 
         company: row.company_name,

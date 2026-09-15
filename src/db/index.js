@@ -16,14 +16,33 @@ const pool = new Pool({
   allowExitOnIdle: false
 });
 
-pool.connect()
-  .then(client => {
-    console.log("✅ PostgreSQL Connected Successfully");
-    client.release();
-  })
-  .catch(err => {
-    console.error("❌ DB Connection Error:", err.message);
-    process.exit(1); // fail fast on startup if DB is unreachable
-  });
+// Retries with backoff instead of exiting on the first attempt — a DB that
+// just restarted/failed over can report "the database system is in
+// recovery mode" or ECONNRESET for a short window before it's actually
+// ready to accept connections. Exiting immediately on that first blip just
+// forces nodemon into a restart loop that keeps re-racing the same
+// not-yet-ready DB. Still fails fast overall — it gives up after the
+// retries are exhausted, same as before.
+async function verifyDbConnection(retries = 5, delayMs = 3000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const client = await pool.connect();
+      console.log("✅ PostgreSQL Connected Successfully");
+      client.release();
+      return;
+    } catch (err) {
+      console.error(`❌ DB Connection Error (attempt ${attempt}/${retries}):`, err.message);
+
+      if (attempt === retries) {
+        console.error(`DB still unreachable after ${retries} attempts — exiting.`);
+        process.exit(1);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+verifyDbConnection();
 
 export default pool;

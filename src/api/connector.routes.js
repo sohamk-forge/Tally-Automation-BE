@@ -232,8 +232,6 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     } = req.body;
 
     if (!jobId || !status) {
-      client.release();
-
       return res.status(400).json({
         status: "error",
         message: "jobId and status are required"
@@ -254,8 +252,6 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     const job = jobResult.rows[0];
 
     if (!job) {
-      client.release();
-
       return res.status(404).json({
         status: "error",
         message: "Job not found"

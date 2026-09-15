@@ -9,7 +9,18 @@ if len(sys.argv) >= 2 and sys.argv[1].endswith(".json"):
     with open(sys.argv[1], encoding="utf-8") as f:
         invoice = json.load(f)
 else:
+    # Node (xmlGenerator.js) writes JSON to stdin as UTF-8, but Python's
+    # sys.stdin defaults to the OS locale encoding (cp1252 on Windows), not
+    # UTF-8 — silently mangling any non-ASCII character (e.g. "–" en-dash in
+    # a stock item name) into mojibake by the time it reaches Tally.
+    sys.stdin.reconfigure(encoding="utf-8")
     invoice = json.loads(sys.stdin.read())
+
+# Debug prints below go to stderr as plain text — without this they hit the
+# same default-encoding problem stdin had, garbling any non-ASCII character
+# in the console log (the real XML output already writes raw UTF-8 bytes
+# via sys.stdout.buffer.write() further down, so it isn't affected).
+sys.stderr.reconfigure(encoding="utf-8")
 
 
 COMPANY_NAME       = invoice.get("company", "")

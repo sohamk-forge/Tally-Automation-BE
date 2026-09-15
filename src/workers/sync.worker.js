@@ -174,7 +174,7 @@ const worker = new Worker(
   SYNC_QUEUE_NAME,
 
   async (job) => {
-    const { jobLogId, company, fromYear, toYear, userId } = job.data;
+    const { jobLogId, company, companyId, fromYear, toYear, userId } = job.data;
 
     console.log("\n=================================================");
     console.log("[SYNC] 🔄 Job started");
@@ -212,7 +212,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "COMPANY DETAILS",
       path: "/api/sync/company-details",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -220,7 +220,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "ALL LEDGERS",
       path: "/api/sync/all-ledgers-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -228,7 +228,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "BANK ACCOUNTS",
       path: "/api/sync/group-summary-bank",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -236,7 +236,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "STOCK GROUP GST DETAILS",
       path: "/api/sync/stock-group-gst-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -244,7 +244,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "STOCK GROUP SUMMARY",
       path: "/api/sync/stock-group-summary-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -252,7 +252,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "UNITS",
       path: "/api/sync/units-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -260,7 +260,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "GODOWNS",
       path: "/api/sync/godown-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -268,7 +268,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "PURCHASE/SALES LEDGERS",
       path: "/api/sync/purchase-sales-ledgers-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -276,7 +276,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "PAYABLE/DEBTORS",
       path: "/api/sync/payable-debtors",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -284,7 +284,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "PARENT GROUPS",
       path: "/api/sync/parent-groups",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -292,7 +292,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "PROFIT & LOSS",
       path: "/api/sync/profit-loss-sync",
-      params: { company, fromDate, toDate },
+      params: { company, companyId, fromDate, toDate },
       userId,
       results
     });
@@ -300,7 +300,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "PROFIT & LOSS SUMMARY",
       path: "/api/sync/profit-loss-summary-sync",
-      params: { company },
+      params: { company, companyId },
       userId,
       results
     });
@@ -308,7 +308,7 @@ const worker = new Worker(
     await runSyncStep({
       label: "VOUCHERS",
       path: "/api/sync/voucher-sync",
-      params: { company, fromDate, toDate },
+      params: { company, companyId, fromDate, toDate },
       userId,
       results
     });

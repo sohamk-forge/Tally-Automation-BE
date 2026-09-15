@@ -33,6 +33,8 @@ import "./workers/pushOdBank.worker.js";
 
 import "./workers/pushStockItem.worker.js";
 
+import "./workers/xmlGeneration.worker.js";
+
 import "./workers/pushInvoice.worker.js";
 
 import "./workers/pushSalesInvoice.worker.js";
@@ -48,6 +50,8 @@ import "./workers/bulkSales.worker.js";
 import "./workers/pushVoucher.worker.js";
 
 import "./workers/bulkSalesV2.worker.js";
+
+import "./workers/bulkPurchase.worker.js";
 
 /* =================================
 
@@ -78,6 +82,9 @@ from "./api/groupSummaryBank.routes.js";
 
 import ledgerVouchersRoutes
 from "./api/ledgerVouchers.routes.js";
+
+import bankInterestRoutes
+from "./api/bankInterest.routes.js";
 
 import payableDebtorsRoutes
 from "./api/payableDebtors.routes.js";
@@ -142,6 +149,12 @@ from "./api/godown.routes.js";
 
 import bulkSalesUploadRoutes
  from "./api/bulkSalesUpload.routes.js";
+
+import bulkPurchaseUploadRoutes
+from "./api/bulkPurchaseUpload.routes.js";
+
+import vendorGstinMappingRoutes
+from "./api/vendorGstinMapping.routes.js";
 
  import connectorRoutes
 from "./api/connector.routes.js";
@@ -359,6 +372,16 @@ app.use(
 );
 
 /* =================================
+   BANK INTEREST APIs
+================================= */
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  bankInterestRoutes
+);
+
+/* =================================
    PARENT GROUP APIs
 ================================= */
 
@@ -535,6 +558,18 @@ app.use(
   "/api",
   ...requireSessionOrApiKey(),
   bulkSalesUploadRoutes
+);
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  bulkPurchaseUploadRoutes
+);
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  vendorGstinMappingRoutes
 );
 
 /* =================================

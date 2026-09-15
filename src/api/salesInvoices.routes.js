@@ -804,9 +804,43 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
       }
     }
 
+    const missingLedgerNames = [...ledgerMap.values()];
+
+    // Real creation status, from the same table the "+ Create Item"/"New
+    // Ledger" modals themselves write to — not inferred from the parent
+    // invoice's sync_status or the frontend's own unsaved checkbox
+    // selection (that heuristic is what made the "Missing" table keep
+    // showing "Not created" for items that had, in fact, already been
+    // pushed successfully).
+    if (missingItemNames.length) {
+      const pushedItemsResult = await pool.query(
+        `SELECT DISTINCT LOWER(TRIM(item_name)) AS name
+         FROM app_test.push_stock_item
+         WHERE company_id = $1 AND status = 'success'`,
+        [companyId]
+      );
+      const pushedItemNames = new Set(pushedItemsResult.rows.map((r) => r.name));
+      for (const entry of missingItemNames) {
+        entry.created = pushedItemNames.has(entry.name.trim().toLowerCase());
+      }
+    }
+
+    if (missingLedgerNames.length) {
+      const pushedLedgersResult = await pool.query(
+        `SELECT DISTINCT LOWER(TRIM(ledger_name)) AS name
+         FROM app_test.push_ledger
+         WHERE company_id = $1 AND status = 'success'`,
+        [companyId]
+      );
+      const pushedLedgerNames = new Set(pushedLedgersResult.rows.map((r) => r.name));
+      for (const entry of missingLedgerNames) {
+        entry.created = pushedLedgerNames.has(entry.name.trim().toLowerCase());
+      }
+    }
+
     return res.status(200).json({
       status: "success",
-      missing_ledgers: [...ledgerMap.values()].sort((a, b) => b.count - a.count),
+      missing_ledgers: missingLedgerNames.sort((a, b) => b.count - a.count),
       missing_stock_items: missingItemNames.sort((a, b) => b.count - a.count)
     });
   } catch (err) {
