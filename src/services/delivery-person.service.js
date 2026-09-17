@@ -56,11 +56,10 @@ export async function getDeliveryPersonById(companyId, deliveryPersonId) {
   if (!deliveryPersonId) return null;
 
   const res = await pool.query(
-    `SELECT id, name, phone_number, created_at
-     FROM ${DB_SCHEMA}.delivery_persons
-     WHERE id = $1 AND company_id = $2`,
-    [deliveryPersonId, companyId]
-  );
-
-  return res.rows[0] || null;
+  `SELECT id, name, phone_number, created_at
+   FROM ${DB_SCHEMA}.delivery_persons
+   WHERE id = $1 AND company_id = $2`,
+  [deliveryPersonId, companyId]
+);
+return res.rows[0] || null;
 }

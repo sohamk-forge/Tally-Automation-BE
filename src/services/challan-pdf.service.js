@@ -4,9 +4,9 @@
  * Renders a single challan (fetched via getChallanById) into a printable
  * PDF buffer using Puppeteer (HTML -> PDF).
  *
- * Header layout: company details on the left; Challan No / Date and
- * Delivery Person details stacked on the right (challan no/date on top,
- * delivery person below it).
+ * Header layout: company details on the left; Challan No / Date, Site,
+ * and Delivery Person details stacked on the right (challan no/date on
+ * top, then site, then delivery person below it).
  *
  * GST columns/rows (GST %, CGST, SGST, IGST) are shown only when
  * challan.gst_enabled is true.
@@ -154,20 +154,28 @@ const STYLE = `
   .party-block .name { font-weight: bold; }
   .party-block .muted-line { color: #4b5563; font-size: 11px; margin-top: 1px; }
 
-  /* ---- items table: full grid ---- */
-  table.items { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  /* ---- items table: full grid ----
+     NOTE: border-collapse: separate (not collapse) is intentional here.
+     Chromium's print/PDF engine has a known artifact where a
+     border-collapse:collapse table that breaks across a page boundary
+     leaves a stray leftover border segment floating in the blank gap
+     between pages. Using separate + border-spacing:0 with explicit
+     per-cell borders renders visually the same solid grid but avoids
+     that shared-border resolution, which is what triggers the artifact. */
+  table.items { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+  table.items tr { break-inside: avoid; page-break-inside: avoid; }
   table.items th, table.items td {
-    border: 1px solid #000; padding: 5px 8px; word-break: break-word; overflow-wrap: break-word;
+    border: 1px solid #9aa1ab; padding: 5px 8px; word-break: break-word; overflow-wrap: break-word;
   }
   table.items th { background: #f4f6f9; text-align: left; font-weight: bold; color: #111; font-size: 11px; }
   table.items td { font-size: 11.5px; vertical-align: top; }
   table.items td.num, table.items th.num { text-align: right; }
   .item-name { font-weight: 600; }
-  .item-sub { font-size: 10px; color: #9ca3af; margin-top: 1px; }
+  .item-sub { font-size: 10px; color: #000; margin-top: 1px; }
 
   /* ---- totals ---- */
   table.totals-table { width: 100%; border-collapse: collapse; }
-  table.totals-table td { padding: 4px 8px; font-size: 11.5px; border-top: 1px solid #000; }
+  table.totals-table td { padding: 4px 8px; font-size: 11.5px; border-top: 1px solid #9aa1ab; }
   table.totals-table td.label { color: #333; }
   table.totals-table td.value { text-align: right; }
   table.totals-table tr.grand-row td { font-weight: bold; font-size: 13px; background: #f4f6f9; }
@@ -203,10 +211,12 @@ const STYLE = `
     padding: 6px;
   }
 
-  .page {
-    box-sizing: border-box;
-    border: 1.5px solid #000;
-  }
+ .page {
+  box-sizing: border-box;
+  border: 1.5px solid #000;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
 </style>`;
 
 function buildItemRows(items = [], gstEnabled = true) {
@@ -217,10 +227,11 @@ function buildItemRows(items = [], gstEnabled = true) {
       <tr>
         <td>${idx + 1}</td>
         <td>
-          <div class="item-name">${esc(it.item_name)}</div>
-          ${it.godown_name ? `<div class="item-sub">Godown: ${esc(it.godown_name)}</div>` : ""}
-          ${it.bin ? `<div class="item-sub">Bin: ${esc(it.bin)}</div>` : ""}
-        </td>
+  <div class="item-name">${esc(it.item_name)}</div>
+  ${it.godown_name ? `<div class="item-sub">Godown: ${esc(it.godown_name)}</div>` : ""}
+  ${it.bin ? `<div class="item-sub">Bin: ${esc(it.bin)}</div>` : ""}
+  ${it.narration ? `<div class="item-sub">${esc(it.narration)}</div>` : ""}
+</td>
         <td>${esc(it.hsn_code || "-")}</td>
         <td class="num">${formatQty(amt.qty)}</td>
         <td class="num">${amt.rate.toFixed(2)}</td>
@@ -249,6 +260,7 @@ function buildHtml(challan) {
     challan_type,
     movement_type,
     delivery_person,
+    site_name,
     items = [],
   } = challan;
 
@@ -330,6 +342,18 @@ function buildHtml(challan) {
       : ""
   }
 
+  ${
+    site_name
+      ? `
+        <div class="doc-meta-line">
+          <span class="label-text">Site</span>
+          <span class="colon">:</span>
+          <span class="value">${esc(site_name)}</span>
+        </div>
+      `
+      : ""
+  }
+
 </div>
         </div>
       </div>
@@ -352,7 +376,7 @@ function buildHtml(challan) {
         </colgroup>
         <thead>
           <tr>
-            <th>Sl</th><th>Description of Goods</th><th>HSN/SAC</th>
+            <th>SN</th><th>Description of Goods</th><th>HSN/SAC</th>
             <th class="num">Quantity</th><th class="num">Rate</th><th class="num">Disc %</th>
             ${gstEnabled ? '<th class="num">GST %</th>' : ""}
             <th class="num">Amount</th>
