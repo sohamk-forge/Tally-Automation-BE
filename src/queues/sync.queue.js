@@ -41,7 +41,7 @@ of calling syncQueue.add() directly.
 ====================================
 */
 
-const PROCESSABLE_STATES = [
+export const PROCESSABLE_STATES = [
   "waiting",
   "active",
   "delayed",

@@ -3,7 +3,7 @@ import IORedis from "ioredis";
 import axios from "axios";
 
 import pool from "../db/index.js";
-import { SYNC_QUEUE_NAME, safeEnqueueSync } from "../queues/sync.queue.js";
+import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -95,6 +95,27 @@ async function markJobCompleted(jobLogId, results = []) {
   );
 }
 
+// Writes the results array so far to raw_response after each step, not
+// just once at the end — this is what lets GET /status/:jobId report real
+// step-by-step progress instead of the frontend's old fake fixed-timer
+// animation. Best-effort: a failure here should never abort the sync
+// itself, just leave that one step's progress unreflected until the next
+// step's write catches up.
+async function updateJobProgress(jobLogId, results) {
+  try {
+    await pool.query(
+      `
+      UPDATE app_test.job_logs
+      SET raw_response = $2
+      WHERE id = $1
+      `,
+      [jobLogId, JSON.stringify(results)]
+    );
+  } catch (err) {
+    console.error(`Failed to write progress for job ${jobLogId}:`, err.message);
+  }
+}
+
 async function markJobFailed(jobLogId, errorMessage) {
   await pool.query(
     `
@@ -113,7 +134,7 @@ async function markJobFailed(jobLogId, errorMessage) {
   the rest of the sync from attempting to run.
 =================================================== */
 
-async function runSyncStep({ label, path, params, userId, results }) {
+async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
   console.log(`\n➡️  [${label}] STARTING`);
   console.log(`   GET ${path}`, { params, userId });
 
@@ -142,6 +163,7 @@ async function runSyncStep({ label, path, params, userId, results }) {
       durationMs,
       summary: response.data?.summary || null
     });
+    await updateJobProgress(jobLogId, results);
 
   } catch (err) {
     const durationMs = Date.now() - startedAt;
@@ -159,6 +181,7 @@ async function runSyncStep({ label, path, params, userId, results }) {
       durationMs,
       error: message
     });
+    await updateJobProgress(jobLogId, results);
 
     // Intentionally does NOT re-throw — one step failing (e.g. a
     // company-specific data issue in Tally) shouldn't prevent the
@@ -214,7 +237,8 @@ const worker = new Worker(
       path: "/api/sync/company-details",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -222,7 +246,8 @@ const worker = new Worker(
       path: "/api/sync/all-ledgers-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -230,7 +255,8 @@ const worker = new Worker(
       path: "/api/sync/group-summary-bank",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -238,7 +264,8 @@ const worker = new Worker(
       path: "/api/sync/stock-group-gst-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -246,7 +273,8 @@ const worker = new Worker(
       path: "/api/sync/stock-group-summary-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -254,7 +282,8 @@ const worker = new Worker(
       path: "/api/sync/units-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -262,7 +291,8 @@ const worker = new Worker(
       path: "/api/sync/godown-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -270,7 +300,8 @@ const worker = new Worker(
       path: "/api/sync/purchase-sales-ledgers-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -278,7 +309,8 @@ const worker = new Worker(
       path: "/api/sync/payable-debtors",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -286,7 +318,8 @@ const worker = new Worker(
       path: "/api/sync/parent-groups",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -294,7 +327,8 @@ const worker = new Worker(
       path: "/api/sync/profit-loss-sync",
       params: { company, companyId, fromDate, toDate },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -302,7 +336,8 @@ const worker = new Worker(
       path: "/api/sync/profit-loss-summary-sync",
       params: { company, companyId },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     await runSyncStep({
@@ -310,7 +345,8 @@ const worker = new Worker(
       path: "/api/sync/voucher-sync",
       params: { company, companyId, fromDate, toDate },
       userId,
-      results
+      results,
+      jobLogId
     });
 
     /* ===============================================
@@ -376,7 +412,17 @@ const worker = new Worker(
 
   {
     connection,
-    concurrency: 1
+    // Was 1 — a single GLOBAL slot for every user's sync, system-wide, not
+    // per-user/company. Each sync runs 12-13 sequential internal steps,
+    // each with its own 5-minute timeout, so one slow (or genuinely stuck)
+    // sync could hold that one slot for a long time, leaving every other
+    // unrelated user's sync sitting at 'pending' behind it — the actual
+    // cause of the "5 min cooling period" users were seeing, not an
+    // intentional rate limit (there wasn't one). Raised to a small pool so
+    // unrelated syncs run concurrently instead of fully serializing. This
+    // only lets multiple DIFFERENT syncs run at once — each individual
+    // sync's own 13 steps still run sequentially, unaffected.
+    concurrency: 5
   }
 );
 
@@ -427,19 +473,49 @@ checks instead of one:
 
 const STALE_RUNNING_MINUTES = 90;
 
+// Previously only ever called once, at worker startup — safe there
+// because nothing could legitimately be mid-flight yet. Now also run on a
+// recurring interval (see the setInterval below) so a genuinely orphaned
+// row doesn't sit silently forever between restarts — but on a recurring
+// schedule the startup-time assumption no longer holds: with concurrency
+// raised above 1, a 'pending' row can be perfectly healthy, just waiting
+// behind other jobs for a free slot. So first check whether a live,
+// still-processable BullMQ job actually exists for each candidate row —
+// only mark it failed if there's genuinely nothing behind it (the actual
+// orphaned case this was written for), not just because it's been
+// waiting a while.
 async function markStalePendingSyncAsFailed() {
-  const result = await pool.query(
-    `UPDATE app_test.job_logs
-     SET
-       status = 'failed',
-       error_message = 'Sync interrupted / worker restarted before it started',
-       completed_at = NOW()
+  const candidates = await pool.query(
+    `SELECT id FROM app_test.job_logs
      WHERE status = 'pending'
        AND job_type IN ('manual_sync')
-       AND created_at < NOW() - INTERVAL '5 minutes'
-     RETURNING id`
+       AND created_at < NOW() - INTERVAL '5 minutes'`
   );
-  console.log(`Marked ${result.rowCount} stale pending sync jobs as failed`);
+
+  let failedCount = 0;
+
+  for (const row of candidates.rows) {
+    const existingJob = await syncQueue.getJob(getSyncJobId(row.id));
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (PROCESSABLE_STATES.includes(state)) continue; // genuinely still queued, not stuck
+    }
+
+    const updated = await pool.query(
+      `UPDATE app_test.job_logs
+       SET status = 'failed',
+           error_message = 'Sync interrupted / worker restarted before it started',
+           completed_at = NOW()
+       WHERE id = $1 AND status = 'pending'
+       RETURNING id`,
+      [row.id]
+    );
+    if (updated.rowCount > 0) failedCount++;
+  }
+
+  if (failedCount > 0) {
+    console.log(`Marked ${failedCount} stale pending sync jobs as failed`);
+  }
 }
 
 async function markStaleRunningSyncAsFailed() {
@@ -493,14 +569,58 @@ async function enqueuePendingSyncJobs() {
   console.log(`Enqueued ${enqueuedCount} of ${result.rowCount} pending sync jobs (rest already queued/active)`);
 }
 
-(async () => {
+// connector_jobs had no staleness handling at all for rows stuck 'pending'
+// (never claimed by a connector) — unlike 'processing' rows, which
+// connectorJobClaim.service.js already sweeps, but only lazily, as a side
+// effect of that SAME user's connector polling (so it never fires if that
+// connector is offline). A row here stuck pending usually means the
+// user's connector app isn't running/online to ever claim it. 10 minutes
+// matches waitForConnectorSyncJob's own existing wait timeout in
+// connectorSync.service.js, so this lines up with when the caller HTTP
+// request itself would already have given up waiting.
+const CONNECTOR_JOB_STALE_PENDING_MINUTES = 10;
+
+async function markStalePendingConnectorJobsAsFailed() {
+  const result = await pool.query(
+    `UPDATE app_test.connector_jobs
+     SET status = 'failed',
+         error_message = 'Connector never came online to claim this job',
+         completed_at = NOW(),
+         updated_at = NOW()
+     WHERE status = 'pending'
+       AND created_at < NOW() - INTERVAL '${CONNECTOR_JOB_STALE_PENDING_MINUTES} minutes'
+     RETURNING id`
+  );
+  if (result.rowCount > 0) {
+    console.log(`Marked ${result.rowCount} stale pending connector jobs as failed`);
+  }
+}
+
+async function runStalenessSweep() {
   try {
     await markStaleRunningSyncAsFailed();
     await markStalePendingSyncAsFailed();
+    await markStalePendingConnectorJobsAsFailed();
+  } catch (error) {
+    console.error("Sync staleness sweep failed:", error.message);
+  }
+}
+
+const STALENESS_SWEEP_INTERVAL_MS = 2 * 60 * 1000;
+
+(async () => {
+  try {
+    await runStalenessSweep();
     await enqueuePendingSyncJobs();
   } catch (error) {
     console.error("Sync startup recovery failed:", error.message);
   }
+
+  // Was previously only ever run once, here at startup — a genuinely
+  // orphaned job_logs/connector_jobs row (the INSERT-then-enqueue race, or
+  // a connector that never comes online) had no way to ever get cleaned
+  // up between restarts. Now re-checked on a recurring interval instead.
+  setInterval(runStalenessSweep, STALENESS_SWEEP_INTERVAL_MS);
 })();
 
 console.log("🚀 Sync Worker Started");

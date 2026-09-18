@@ -175,6 +175,42 @@ async function userOwnsCompany(userId, companyId, client = null) {
 }
 
 /* ===================================================
+  SYNC RATE LIMIT — once per 5 minutes, per (user, company)
+  No rate limit of any kind existed on /manual or /manual-auto before
+  this — a user could spam "Sync Now" repeatedly, each click creating a
+  brand-new job_logs row/BullMQ job (safeEnqueueSync's dedup can't help
+  here since jobId is derived from the fresh jobLogId every time). This
+  reuses the exact { throttled, retryAfterSeconds } shape already
+  established for the OTP resend cooldown (otp.service.js's
+  sendSignupOtp) for consistency, rather than inventing a new response
+  shape for the same kind of cooldown.
+=================================================== */
+const SYNC_COOLDOWN_SECONDS = 5 * 60;
+
+async function checkSyncCooldown(userId, companyId) {
+  const recent = await pool.query(
+    `
+    SELECT created_at
+    FROM app_test.job_logs
+    WHERE user_id = $1
+      AND job_type = 'manual_sync'
+      AND (payload->>'companyId')::int = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [userId, companyId]
+  );
+
+  if (!recent.rows[0]) return { throttled: false };
+
+  const elapsedSeconds = (Date.now() - new Date(recent.rows[0].created_at).getTime()) / 1000;
+  if (elapsedSeconds < SYNC_COOLDOWN_SECONDS) {
+    return { throttled: true, retryAfterSeconds: Math.ceil(SYNC_COOLDOWN_SECONDS - elapsedSeconds) };
+  }
+  return { throttled: false };
+}
+
+/* ===================================================
   STABLE FALLBACK GUID
 =================================================== */
 const generateFallbackGuid = (company, uniqueValue, type) => {
@@ -192,7 +228,7 @@ let ignoredSameGuid = 0;
 let ignoredDifferentGuid = 0;
 let guidSourceChanged = 0;
 
-async function upsertRecord(tableName, guid, masterId, alterId, data, columns, client = null) {
+async function upsertRecord(tableName, guid, masterId, alterId, data, columns, client = null, { forceOverwrite = false } = {}) {
   if (!allowedTables.includes(tableName)) {
     throw new Error(`Invalid table name: ${tableName}`);
   }
@@ -280,17 +316,27 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
     ? data[columns.indexOf("ledger_name")]
     : (columns.includes("name") ? data[columns.indexOf("name")] : "unknown");
 
-  if (isSameMaster && guidChanged) {
-    guidSourceChanged++;
-    if (newAlterId < dbAlterId) {
-      ignoredDifferentGuid++;
-      return { action: "ignored", reason: "guid_changed_old_alterid" };
+  // Balance-snapshot tables (group_balances, bank_accounts) opt out of all
+  // of this: alter_id only advances when a Tally MASTER record (the Group/
+  // Ledger definition) is edited, not when a new voucher changes its
+  // computed opening/closing balance. Gating on it here meant every sync
+  // after the first silently discarded the fresh balance forever, freezing
+  // the dashboard's Sales/Purchase/Stock/Debtors/Creditors/Bank cards at
+  // whatever the first sync happened to write. These are point-in-time
+  // snapshots, not versioned master data — always take the latest number.
+  if (!forceOverwrite) {
+    if (isSameMaster && guidChanged) {
+      guidSourceChanged++;
+      if (newAlterId < dbAlterId) {
+        ignoredDifferentGuid++;
+        return { action: "ignored", reason: "guid_changed_old_alterid" };
+      }
+    } else if (newAlterId <= dbAlterId) {
+      const ignoreReason = guidChanged ? "guid_changed_but_different_master" : "alter_id_not_newer";
+      if (dbGuid === finalGuid) ignoredSameGuid++;
+      else ignoredDifferentGuid++;
+      return { action: "ignored", reason: ignoreReason, dbAlterId, newAlterId };
     }
-  } else if (newAlterId <= dbAlterId) {
-    const ignoreReason = guidChanged ? "guid_changed_but_different_master" : "alter_id_not_newer";
-    if (dbGuid === finalGuid) ignoredSameGuid++;
-    else ignoredDifferentGuid++;
-    return { action: "ignored", reason: ignoreReason, dbAlterId, newAlterId };
   }
 
   const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(", ");
@@ -650,6 +696,8 @@ router.get("/group-summary-bank", async (req, res) => {
 
       const result = await upsertRecord(
         "app_test.bank_accounts", guid, masterId, alterId,
+        // See upsertRecord's forceOverwrite comment — this is a balance
+        // snapshot (opening/closing), not versioned master data.
         [
           companyId, company, ledgerName, "Bank Accounts",
           clean(ledger?.BANKACCHOLDERNAME || ledger?.ACHOLDERNAME || ledger?.BankAccHolderName),
@@ -676,7 +724,8 @@ router.get("/group-summary-bank", async (req, res) => {
           "opening_balance_type", "closing_balance_type",
           "email", "phone_number", "primary_phone_number", "od_limit"
         ],
-        client
+        client,
+        { forceOverwrite: true }
       );
 
       if (result.action === "inserted") inserted++;
@@ -1051,6 +1100,12 @@ router.get("/payable-debtors", async (req, res) => {
       const guid = originalGuid || generateFallbackGuid(company, groupName, 'groupbalance');
 
       return {
+        // Tally returned nothing for this group at all (transient
+        // connector/timeout miss, no retry today) — distinct from "Tally
+        // returned a real zero balance". upsertGroup below skips the
+        // write entirely when this is false, instead of writing a
+        // synthetic-GUID zero-balance row that would shadow the real one.
+        hasData: Boolean(group),
         guid,
         masterId: group?.MASTERID || null,
         alterId: group?.ALTERID || null,
@@ -1086,6 +1141,8 @@ router.get("/payable-debtors", async (req, res) => {
       const guid = originalGuid || generateFallbackGuid(company, fallbackLabel, 'groupbalance');
 
       return {
+        // See getGroupData's identical hasData comment above.
+        hasData: Boolean(group),
         guid,
         masterId: group?.MASTERID || null,
         alterId: group?.ALTERID || null,
@@ -1111,14 +1168,30 @@ router.get("/payable-debtors", async (req, res) => {
     const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
     const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
 
-    let inserted = 0, updated = 0, ignored = 0;
+    let inserted = 0, updated = 0, ignored = 0, skipped = 0;
 
     const upsertGroup = async (g) => {
+      // Tally's connector call for this group came back empty (transient
+      // miss) — writing a synthetic-fallback-GUID zero-balance row here
+      // would create a duplicate that the read side's "most recently
+      // updated" query picks over the real row, silently zeroing out the
+      // dashboard's Sales/Purchase/etc. figure until some future sync
+      // happens to round-trip that group successfully again. Skip the
+      // write entirely instead — leave the real row exactly as it was.
+      if (!g.hasData) {
+        skipped++;
+        return;
+      }
+
       const result = await upsertRecord(
         "app_test.group_balances", g.guid, g.masterId, g.alterId,
         [companyId, company, g.group_name, g.parent_group, g.opening_balance, g.closing_balance],
         ["company_id", "company_name", "group_name", "parent_group", "opening_balance", "closing_balance"],
-        client
+        client,
+        // Balance snapshot, not master data — see upsertRecord's
+        // forceOverwrite comment. Without this, every sync after the
+        // first silently froze Sales/Purchase/Stock/Debtors/Creditors.
+        { forceOverwrite: true }
       );
       if (result.action === "inserted") inserted++;
       else if (result.action === "updated") updated++;
@@ -1138,7 +1211,7 @@ router.get("/payable-debtors", async (req, res) => {
       source: "tally",
       message: "Group balances synced successfully",
       company,
-      summary: { inserted, updated, ignored, total: 5 },
+      summary: { inserted, updated, ignored, skipped, total: 5 },
       data: { debtors, creditors, stock, sales, purchase }
     });
   } catch (err) {
@@ -1703,6 +1776,15 @@ router.post("/manual", async (req, res) => {
       });
     }
 
+    const cooldown = await checkSyncCooldown(userId, companyId);
+    if (cooldown.throttled) {
+      return res.status(429).json({
+        status: "error",
+        message: `Please wait ${cooldown.retryAfterSeconds}s before syncing this company again`,
+        retryAfterSeconds: cooldown.retryAfterSeconds
+      });
+    }
+
     await pool.query(
       `
       UPDATE app_test.companies
@@ -1714,7 +1796,7 @@ router.post("/manual", async (req, res) => {
       [companyId, fromYear, toYear]
     );
 
-    const payload = { company: trimmedCompany, fromYear, toYear };
+    const payload = { company: trimmedCompany, companyId, fromYear, toYear };
 
     const result = await pool.query(
       `
@@ -1815,6 +1897,15 @@ router.post("/manual-auto", async (req, res) => {
       financial_year_start: from_year,
       financial_year_end: to_year
     } = companyResult.rows[0];
+
+    const cooldown = await checkSyncCooldown(userId, syncCompanyId);
+    if (cooldown.throttled) {
+      return res.status(429).json({
+        status: "error",
+        message: `Please wait ${cooldown.retryAfterSeconds}s before syncing this company again`,
+        retryAfterSeconds: cooldown.retryAfterSeconds
+      });
+    }
 
     console.log("===============================================");
     console.log("🔄 DASHBOARD AUTO SYNC");
@@ -2331,7 +2422,8 @@ router.get("/status/:jobId", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT id, status, payload, error_message, started_at, completed_at, user_id
+      SELECT id, status, payload, error_message, started_at, completed_at, user_id,
+             created_at, raw_response
       FROM app_test.job_logs
       WHERE id = $1
       `,
@@ -2348,6 +2440,34 @@ router.get("/status/:jobId", async (req, res) => {
       return res.status(404).json({ status: "error", message: "Job not found" });
     }
 
+    // raw_response is now written incrementally by sync.worker.js's
+    // updateJobProgress() after every step (not just once at the end), so
+    // this is real live progress, not a stale end-of-job dump. Parse
+    // defensively — an old pre-fix row, or one caught mid-write, could be
+    // null/malformed.
+    let steps = [];
+    if (job.raw_response) {
+      try {
+        steps = JSON.parse(job.raw_response);
+      } catch {
+        steps = [];
+      }
+    }
+
+    // "Stuck" is relative to status: a pending job older than 5 minutes
+    // hasn't even been picked up by the worker yet (matches the same
+    // 5-minute threshold markStalePendingSyncAsFailed() uses to eventually
+    // fail it); a running job with no step progress written in the last 5
+    // minutes is presumably wedged mid-step rather than genuinely
+    // progressing. Only compute this off real timestamps so the frontend
+    // never has to do its own clock-skew-prone staleness math.
+    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+    const now = Date.now();
+
+    const isStuck =
+      (job.status === "pending" && now - new Date(job.created_at).getTime() > STALE_THRESHOLD_MS) ||
+      (job.status === "running" && job.started_at && now - new Date(job.started_at).getTime() > STALE_THRESHOLD_MS && steps.length === 0);
+
     return res.status(200).json({
       status: "success",
       data: {
@@ -2359,6 +2479,8 @@ router.get("/status/:jobId", async (req, res) => {
         startedAt: job.started_at,
         completedAt: job.completed_at,
         error: job.error_message,
+        steps,
+        isStuck,
         message:
           job.status === "completed" ? "Synchronization completed successfully." :
           job.status === "running" ? "Synchronization is in progress." :

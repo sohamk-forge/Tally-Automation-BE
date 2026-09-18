@@ -170,10 +170,17 @@ router.get("/profit-margin", async (req, res) => {
       toDate: row.to_date,
       totalSales: Number(row.total_sales),
       grossProfit: Number(row.gross_profit),
-      grossProfitPercent: Number(row.gross_profit_percent),
+      // profit_loss_summary has no gross_profit_percent column — only
+      // gross_profit and profit_margin_percent. Reading the nonexistent
+      // column made this always Number(undefined) === NaN, so the
+      // Dashboard's Profit Margin card literally rendered "NaN%" no
+      // matter what. Dashboard.jsx reads this response under the
+      // grossProfitPercent key, so keep that key name and just source it
+      // from the column that actually exists, instead of also touching
+      // the frontend.
+      grossProfitPercent: Number(row.profit_margin_percent),
       netResult: Number(row.net_result),
       resultType: row.result_type,
-      profitMarginPercent: Number(row.profit_margin_percent),
       lastSyncedAt: row.updated_at
     });
 
