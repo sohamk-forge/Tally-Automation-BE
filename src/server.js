@@ -1,11 +1,17 @@
 import "dotenv/config";
 
 import app from "./app.js";
+import { resumeExtractionJobs } from "./services/statementExtraction.js";
+import { backfillGroupKeyEmbeddings } from "./services/ledgerEmbedding.js";
 
 const PORT = process.env.PORT || 5001;
 
 const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  resumeExtractionJobs();
+  backfillGroupKeyEmbeddings().catch((err) =>
+    console.error("group key embedding backfill failed:", err.message)
+  );
 });
 
 function shutdown(signal) {

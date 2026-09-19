@@ -117,50 +117,85 @@ export async function suggestLedgersForGroupKeys(companyName, groupKeys) {
 
   if (!distinctKeys.length) return suggestionMap;
 
-  let vectors;
+  // Embeddings are cached per group_key at upload time, so this is a pure SQL lookup (no Python).
   try {
-    vectors = await embedGroupKeysBatch(distinctKeys);
+    const result = await db.query(
+      `SELECT g.group_key, best.ledger_name, best.similarity
+       FROM unnest($2::text[]) AS g(group_key)
+       JOIN app_test.group_key_embeddings ke ON ke.group_key = g.group_key
+       CROSS JOIN LATERAL (
+         SELECT le.ledger_name, 1 - (le.embedding <=> ke.embedding) AS similarity
+         FROM app_test.ledger_embeddings le
+         WHERE le.company_name = $1
+         ORDER BY le.embedding <=> ke.embedding
+         LIMIT 1
+       ) best`,
+      [companyName, distinctKeys]
+    );
+
+    for (const row of result.rows) {
+      const similarity = Number(row.similarity);
+      suggestionMap.set(
+        row.group_key,
+        similarity < SIMILARITY_THRESHOLD
+          ? { suggested: false, similarity }
+          : { suggested: true, ledger_name: row.ledger_name, similarity }
+      );
+    }
   } catch (err) {
-    console.error("suggestLedgersForGroupKeys embed failed:", err.message);
+    console.error("suggestLedgersForGroupKeys lookup failed:", err.message);
     for (const key of distinctKeys) {
-      suggestionMap.set(key, { suggested: false, reason: "embedding failed" });
+      suggestionMap.set(key, { suggested: false, reason: err.message });
     }
     return suggestionMap;
   }
 
-  for (let i = 0; i < distinctKeys.length; i++) {
-    const key = distinctKeys[i];
-    const vector = vectors[i];
-
-    try {
-      const result = await db.query(
-        `SELECT ledger_name, 1 - (embedding <=> $2) AS similarity
-         FROM app_test.ledger_embeddings
-         WHERE company_name = $1
-         ORDER BY embedding <=> $2
-         LIMIT 1`,
-        [companyName, JSON.stringify(vector)]
-      );
-
-      const best = result.rows[0];
-      if (!best) {
-        suggestionMap.set(key, { suggested: false, reason: "no history for this company yet" });
-        continue;
-      }
-
-      const similarity = Number(best.similarity);
-      if (similarity < SIMILARITY_THRESHOLD) {
-        suggestionMap.set(key, { suggested: false, similarity });
-        continue;
-      }
-
-      suggestionMap.set(key, { suggested: true, ledger_name: best.ledger_name, similarity });
-
-    } catch (err) {
-      console.error(`suggestLedgersForGroupKeys lookup failed for "${key}":`, err.message);
-      suggestionMap.set(key, { suggested: false, reason: err.message });
+  for (const key of distinctKeys) {
+    if (!suggestionMap.has(key)) {
+      suggestionMap.set(key, { suggested: false, reason: "no history or embedding not ready yet" });
     }
   }
 
   return suggestionMap;
+}
+
+/*
+====================================
+BACKFILL — cache embeddings for group_keys that don't have one yet
+(fallback-derived keys, or rows uploaded before embeddings were cached).
+Spawns Python ONCE, and only if something is actually missing.
+====================================
+*/
+
+export async function backfillGroupKeyEmbeddings(companyId = null, fileName = null) {
+  const params = [];
+  let scope = "";
+  if (companyId !== null && fileName !== null) {
+    params.push(companyId, fileName);
+    scope = "AND cv.company_id = $1 AND cv.file_name = $2";
+  }
+
+  const missing = await db.query(
+    `SELECT DISTINCT cv.group_key
+     FROM app_test.contra_vouchers cv
+     LEFT JOIN app_test.group_key_embeddings ke ON ke.group_key = cv.group_key
+     WHERE cv.group_key IS NOT NULL AND cv.group_key <> ''
+       AND cv.status IN ('WAITING_LEDGER', 'FAILED')
+       AND ke.group_key IS NULL
+       ${scope}
+     LIMIT 3000`,
+    params
+  );
+  const keys = missing.rows.map((r) => r.group_key);
+  if (!keys.length) return 0;
+
+  const vectors = await embedGroupKeysBatch(keys);
+  for (let i = 0; i < keys.length; i++) {
+    await db.query(
+      `INSERT INTO app_test.group_key_embeddings (group_key, embedding)
+       VALUES ($1, $2::vector) ON CONFLICT (group_key) DO NOTHING`,
+      [keys[i], JSON.stringify(vectors[i])]
+    );
+  }
+  return keys.length;
 }

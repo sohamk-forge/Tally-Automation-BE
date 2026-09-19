@@ -3,7 +3,6 @@ import db from "../db/index.js";
 import multer from "multer";
 import xlsx from "xlsx";
 import path from "path";
-import { spawn } from "child_process";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -14,6 +13,13 @@ import {
 } from "../queues/voucher.queue.js";
 import { formatVoucherDate, checkDuplicateFromDb, validateBankMatchesLedger } from "./voucher.js";
 import { suggestLedgersForGroupKeys } from "../services/ledgerEmbedding.js";
+import {
+  JOB_STATUS,
+  deriveFallbackGroupKey,
+  setJobStatus,
+  deleteJobs,
+  enqueueExtraction
+} from "../services/statementExtraction.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 
 
@@ -216,87 +222,6 @@ async function getUniqueFileName(company_id, fileName) {
 }
 
 /* ===========================
-   FALLBACK GROUP KEY EXTRACTOR
-=========================== */
-
-function deriveFallbackGroupKey(narration) {
-  if (!narration) return null;
-
-  const impsMatch = narration.match(/^(?:IMPS|NEFT|RTGS)-\d+-(.+?)-[A-Z]{3,6}-/i);
-  if (impsMatch) {
-    return impsMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
-  }
-
-  const upiMatch = narration.match(/^UPI-(.+?)-[\w.]+@[\w]+-/i);
-  if (upiMatch) {
-    return upiMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
-  }
-
-  return null;
-}
-
-/* ===========================
-   SEMANTIC ENRICHMENT
-=========================== */
-
-const SEMANTIC_CLI_TIMEOUT_MS = 15000;
-
-function runSemanticEnrichment(transactions) {
-  return new Promise((resolve) => {
-    if (!transactions.length) return resolve(transactions);
-
-    const pyFile = path.join(process.cwd(), "src", "python", "semantic_cli.py");
-    const python = spawn("python3", [pyFile]);
-
-    let output = "";
-    let errorOutput = "";
-    let settled = false;
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-
-    const timer = setTimeout(() => {
-      console.error("semantic_cli timed out after", SEMANTIC_CLI_TIMEOUT_MS, "ms — killing process");
-      python.kill();
-      finish(transactions.map(() => ({})));
-    }, SEMANTIC_CLI_TIMEOUT_MS);
-
-    python.stdout.on("data", (d) => (output += d.toString()));
-    python.stderr.on("data", (d) => (errorOutput += d.toString()));
-
-    python.on("close", (code) => {
-      if (code !== 0) {
-        console.error("semantic_cli failed:", errorOutput);
-        return finish(transactions.map(() => ({})));
-      }
-      try {
-        const parsed = JSON.parse(output);
-        if (parsed?.error) {
-          console.error("semantic_cli error:", parsed.error);
-          return finish(transactions.map(() => ({})));
-        }
-        finish(parsed);
-      } catch (e) {
-        console.error("semantic_cli parse error:", e.message, output);
-        finish(transactions.map(() => ({})));
-      }
-    });
-
-    python.on("error", (err) => {
-      console.error("semantic_cli spawn error:", err.message);
-      finish(transactions.map(() => ({})));
-    });
-
-    python.stdin.write(JSON.stringify(transactions));
-    python.stdin.end();
-  });
-}
-
-/* ===========================
    DUPLICATE CHECK — DIRECT DB, NO SYNC CALL
 =========================== */
 
@@ -470,7 +395,11 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     narration: String(pickField(normRow, "narration") ?? "").trim()
   }));
 
-  const enriched = await runSemanticEnrichment(narrationInputs);
+  // Merchant/group-key extraction runs in the background after upload (see statementExtraction.js);
+  // rows are inserted now with only the cheap regex fallback key.
+  const enriched = narrationInputs.map(() => ({}));
+
+  await setJobStatus(company_id, fileName, JOB_STATUS.PROCESSING);
 
   const inserted = [];
   const transactions = [];
@@ -608,6 +537,7 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
   }
 
   if (!inserted.length) {
+    await deleteJobs(company_id, [fileName]);
     return {
       file_name: fileName,
       original_file_name: wasRenamed ? originalFileName : undefined,
@@ -616,6 +546,9 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
       message: "No valid transaction rows found in the file"
     };
   }
+
+  await setJobStatus(company_id, fileName, JOB_STATUS.EXTRACTING);
+  enqueueExtraction(company_id, fileName);
 
   const newRows     = inserted.filter(v => v._action === 'inserted');
   const skippedRows = inserted.filter(v => v._action === 'skipped');
@@ -766,6 +699,93 @@ router.get("/statement-details", async (req, res) => {
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
 =========================== */
+
+/* Manual retry: re-queue merchant/group-key + embedding extraction for an uploaded statement. */
+router.post("/regroup-statement", async (req, res) => {
+  try {
+    const { company_id, file_name } = req.body || {};
+    if (!company_id || !file_name) {
+      return res.status(400).json({ success: false, message: "company_id and file_name are required" });
+    }
+
+    await setJobStatus(company_id, file_name, JOB_STATUS.EXTRACTING);
+    enqueueExtraction(company_id, file_name);
+
+    return res.json({ success: true, queued: true });
+  } catch (err) {
+    console.error("REGROUP STATEMENT ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to queue extraction" });
+  }
+});
+
+/* Bulk-delete uploaded (Excel) statements. A file is skipped, not deleted,
+   if any of its vouchers are already pushed / being pushed to Tally. */
+router.delete("/statement-files", async (req, res) => {
+  try {
+    const { company_id, file_names } = req.body || {};
+    if (!company_id || !Array.isArray(file_names) || file_names.length === 0) {
+      return res.status(400).json({ success: false, message: "company_id and file_names are required" });
+    }
+
+    const locked = await db.query(
+      `SELECT DISTINCT file_name FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE company_id = $1 AND file_name = ANY($2)
+         AND status IN ('SUCCESS', 'PENDING')`,
+      [company_id, file_names]
+    );
+    const skipped = locked.rows.map((r) => r.file_name);
+    const deletable = file_names.filter((f) => !skipped.includes(f));
+
+    let deleted = 0;
+    if (deletable.length > 0) {
+      const r = await db.query(
+        `DELETE FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE company_id = $1 AND file_name = ANY($2)`,
+        [company_id, deletable]
+      );
+      deleted = r.rowCount;
+      await deleteJobs(company_id, deletable);
+    }
+
+    return res.json({ success: true, deleted_files: deletable, skipped_files: skipped, deleted_rows: deleted });
+  } catch (err) {
+    console.error("STATEMENT FILES DELETE ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to delete statement files" });
+  }
+});
+
+router.get("/statement-files", async (req, res) => {
+  try {
+    const { company_id } = req.query;
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
+
+    const result = await db.query(
+      `SELECT
+         cv.file_name,
+         MAX(cv.bank_ledger) AS bank_ledger,
+         to_char(MIN(cv.voucher_date), 'YYYY-MM-DD') AS start_date,
+         to_char(MAX(cv.voucher_date), 'YYYY-MM-DD') AS end_date,
+         COUNT(*)::int AS total,
+         COALESCE(MAX(j.status), 'REVIEW') AS job_status,
+         MAX(j.error) AS job_error
+       FROM ${DB_SCHEMA}.contra_vouchers cv
+       LEFT JOIN ${DB_SCHEMA}.statement_jobs j
+         ON j.company_id = cv.company_id AND j.file_name = cv.file_name
+       WHERE cv.company_id = $1
+         AND cv.file_name IS NOT NULL
+       GROUP BY cv.file_name
+       ORDER BY cv.file_name ASC`,
+      [company_id]
+    );
+
+    return res.json({ success: true, files: result.rows });
+  } catch (err) {
+    console.error("STATEMENT FILES ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to fetch statement files" });
+  }
+});
 
 router.get("/statement-transactions", async (req, res) => {
   try {

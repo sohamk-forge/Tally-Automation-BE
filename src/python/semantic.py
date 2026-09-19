@@ -201,4 +201,22 @@ def process_transactions(transactions):
         txn["group_key"] = group_keys[i] if meaningful else None
         txn.pop("cluster_id", None)
 
+    # One normalized embedding per distinct group_key (attached to its first
+    # transaction only) so the backend can cache it and never need Python again
+    # to suggest a ledger. Same model + normalization as ledger_embedding_cli.py.
+    if SEMANTIC_AVAILABLE:
+        try:
+            first_idx = {}
+            for i, txn in enumerate(transactions):
+                key = txn.get("group_key")
+                if key and key not in first_idx:
+                    first_idx[key] = i
+            if first_idx:
+                keys = list(first_idx.keys())
+                vectors = model.encode(keys, normalize_embeddings=True)
+                for key, vec in zip(keys, vectors):
+                    transactions[first_idx[key]]["group_key_embedding"] = vec.tolist()
+        except Exception:
+            pass
+
     return transactions
