@@ -14,7 +14,9 @@ async function getCompanyInfo(companyId, companyName) {
     result = await pool.query(
       `SELECT id, name, financial_year_start, financial_year_end
        FROM ${DB_SCHEMA}.companies
-       WHERE LOWER(name) = LOWER($1)`,
+       WHERE LOWER(name) = LOWER($1)
+       ORDER BY (SELECT COUNT(*) FROM ${DB_SCHEMA}.vouchers v WHERE v.company_id = companies.id) DESC, id DESC
+       LIMIT 1`,
       [companyName]
     );
   } else {
