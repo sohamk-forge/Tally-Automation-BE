@@ -1,36 +1,35 @@
-import express from "express";
-import pool from "../db/index.js";
-import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
-import { resolveUserId } from "../utils/resolveUserId.js";
-import axios from "axios";
-import {
-  getCompaniesXML,
-    getUnitsXML,
-  getLedgersXML,
-  getLedgerDetailsXML,
-  getGroupSummaryBankXML,
-  getLedgerVouchersXML,
-  getParentGroupsXML,
-  getGroupBalanceXML,
-  getAllParentGroupDetailsXML,
-  getProfitLossXML,
-    getStockGroupSummaryXML,
-    getStockGroupGSTXML,
-      getAllLedgersXML,
-        getPurchaseSalesLedgersXML,
-        getCompanyDetailsXML,
-        getCompanyGSTDetailsXML,
-        getGodownsXML,
-        getSalesGroupXML, getPurchaseGroupXML,
-        getSalesInvoiceDetailsXML,
-
-} from "../services/xmlBuilder.js";
-import { parseXML } from "../services/parser.js";
-import {
-  createAuditLog
-} from "../utils/createAuditLog.js";
-import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
-import { safeEnqueueSync } from "../queues/sync.queue.js";
+  import express from "express";
+    import pool from "../db/index.js";
+    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
+    import { resolveUserId } from "../utils/resolveUserId.js";
+    import axios from "axios";
+    import {
+      getCompaniesXML,
+        getUnitsXML,
+      getLedgersXML,
+      getLedgerDetailsXML,
+      getGroupSummaryBankXML,
+      getLedgerVouchersXML,
+      getParentGroupsXML,
+      getGroupBalanceXML,
+      getAllParentGroupDetailsXML,
+      getProfitLossXML,
+        getStockGroupSummaryXML,
+        getStockGroupGSTXML,
+          getAllLedgersXML,
+            getPurchaseSalesLedgersXML,
+            getCompanyDetailsXML,
+            getCompanyGSTDetailsXML,
+            getGodownsXML,
+            getSalesGroupXML, getPurchaseGroupXML,
+        
+    } from "../services/xmlBuilder.js";
+    import { parseXML } from "../services/parser.js";
+    import {
+      createAuditLog
+    } from "../utils/createAuditLog.js";
+  import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
+    import { safeEnqueueSync } from "../queues/sync.queue.js";
 
 
 
@@ -985,132 +984,6 @@ router.get("/voucher-sync", async (req, res) => {
 });
 
 /* ===================================================
-  SALES INVOICE DELIVERY / DISPATCH DETAILS SYNC
-  ---------------------------------------------------
-  Sales-only. Populates app_test.vouchers.delivery_notes (jsonb) with
-  the printed-invoice header block: Reference No. & Date, Other
-  References, Mode/Terms of Payment, Buyer's Order No. & Date, Delivery
-  Note & Delivery Note Date, Dispatch Doc No., Dispatched Through,
-  Destination, Terms of Delivery.
-
-  DEPENDS ON /voucher-sync HAVING ALREADY RUN for the same
-  company/fromDate/toDate: this route only UPDATEs rows that
-  /voucher-sync already inserted (matched on company_id + voucher_number
-  + voucher_date, the same key voucher-sync upserts on), it never
-  inserts new voucher rows itself. In the sync worker's step sequence
-  this must run AFTER voucher-sync — same ordering dependency as
-  stock-group-gst-sync running before stock-group-summary-sync.
-
-  Non-Sales vouchers are skipped even if Tally somehow returns one,
-  since $VoucherTypeName = "Sales" is also enforced server-side in the
-  XML's SalesInvoiceDeliveryOnly formula (getSalesInvoiceDetailsXML).
-=================================================== */
-router.get("/sales-invoice-details-sync", async (req, res) => {
-  const company = req.query.company;
-  const fromDate = req.query.fromDate;
-  const toDate = req.query.toDate;
-
-  if (!company || !fromDate || !toDate) {
-    return res.status(400).json({ status: "error", message: "company, fromDate and toDate required" });
-  }
-
-  const client = await pool.connect();
-
-  try {
-    const userId = await requireUser(req, res);
-    if (!userId) return;
-
-    await client.query("BEGIN");
-
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
-    if (!companyId) throw new Error("Company not found");
-
-    const owns = await userOwnsCompany(userId, companyId, client);
-    if (!owns) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
-    }
-
-    const xml = getSalesInvoiceDetailsXML(company, fromDate, toDate);
-    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-    const parsed = await parseXML(responseXML);
-
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
-
-    let updated = 0, notFound = 0, skipped = 0;
-
-    for (const voucher of list) {
-      const voucherNumber = clean(voucher?.VOUCHERNUMBER);
-      const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
-      const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
-
-      // Belt-and-braces on top of the XML's own SalesInvoiceDeliveryOnly
-      // filter — never let a non-Sales voucher touch delivery_notes.
-      if (!voucherNumber || !voucherDate) { skipped++; continue; }
-      if (voucherTypeName && voucherTypeName.trim().toLowerCase() !== "sales") { skipped++; continue; }
-
-      const deliveryNotes = {
-        reference_no: clean(voucher?.REFERENCE),
-        reference_date: clean(voucher?.REFERENCEDATE),
-        other_references: clean(voucher?.OTHERREFERENCE),
-        mode_terms_of_payment: clean(voucher?.PAYMENTMODE || voucher?.BASICPAYMENTTERMS),
-        buyers_order_no: clean(voucher?.BASICBUYERORDERNO),
-        buyers_order_date: clean(voucher?.BASICBUYERORDERDATE),
-       delivery_note: clean(
-  voucher?.BASICSHIPDELIVERYNOTE ||
-  voucher?.CURRBASICSHIPDELIVERYNOTE
-),
-
-delivery_note_date: clean(voucher?.BASICSHIPPINGDATE),
-        dispatch_doc_no: clean(voucher?.BASICSHIPDOCUMENTNO),
-        dispatched_through: clean(voucher?.BASICSHIPPEDBY),
-        vessel_no: clean(voucher?.BASICSHIPVESSELNO),
-        vessel_date: clean(voucher?.BASICSHIPVESSELDATE),
-        destination: clean(voucher?.BASICSHIPDESTINATION),
-        final_destination: clean(voucher?.BASICFINALDESTINATION),
-        terms_of_delivery: clean(voucher?.BASICSHIPDELIVERYTERMS)
-      };
-
-      const result = await client.query(
-        `
-        UPDATE app_test.vouchers
-        SET delivery_notes = $1::jsonb,
-            updated_at = NOW()
-        WHERE company_id = $2
-          AND voucher_number = $3
-          AND voucher_date = $4
-          AND voucher_type = 'Sales'
-        `,
-        [JSON.stringify(deliveryNotes), companyId, voucherNumber, voucherDate]
-      );
-
-      // rowCount === 0 means voucher-sync hasn't written this voucher yet
-      // for this date range — most likely this route ran before
-      // voucher-sync, or the two were called with different date ranges.
-      if (result.rowCount > 0) updated++;
-      else notFound++;
-    }
-
-    await client.query("COMMIT");
-
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "Sales invoice delivery details synced successfully",
-      company, fromDate, toDate,
-      summary: { total: list.length, updated, notFound, skipped }
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ SALES INVOICE DELIVERY DETAILS SYNC ERROR:", err.message);
-    return res.status(500).json({ status: "error", message: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-/* ===================================================
   PARENT GROUPS SYNC
 =================================================== */
 router.get("/parent-groups", async (req, res) => {
@@ -1185,6 +1058,10 @@ router.get("/parent-groups", async (req, res) => {
     client.release();
   }
 });
+
+    /* ===================================================
+      GROUP BALANCES SYNC (UPDATED WITH company_id)
+    =================================================== */
 
 /* ===================================================
    GROUP BALANCES SYNC (UPDATED WITH company_id)
@@ -1298,10 +1175,9 @@ router.get("/payable-debtors", async (req, res) => {
       // miss) — writing a synthetic-fallback-GUID zero-balance row here
       // would create a duplicate that the read side's "most recently
       // updated" query picks over the real row, silently zeroing out the
-      // dashboard's Sales/Purchase/Stock/Debtors/Creditors figure until
-      // some future sync happens to round-trip that group successfully
-      // again. Skip the write entirely instead — leave the real row
-      // exactly as it was.
+      // dashboard's Sales/Purchase/etc. figure until some future sync
+      // happens to round-trip that group successfully again. Skip the
+      // write entirely instead — leave the real row exactly as it was.
       if (!g.hasData) {
         skipped++;
         return;
@@ -1347,112 +1223,112 @@ router.get("/payable-debtors", async (req, res) => {
   }
 });
 
-/* ===================================================
-   ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
-=================================================== */
+    /* ===================================================
+      ALL PARENT GROUPS DETAILS SYNC (UPDATED WITH company_id)
+    =================================================== */
 
-router.get("/all-parent-groups", async (req, res) => {
-  const company = req.query.company;
-  const groupName = req.query.groupName;
-
-  if (!company || !groupName) {
-    return res.status(400).json({
-      status: "error",
-      message: "company and groupName required"
-    });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // Get company_id using helper
-    const companyId = await getCompanyId(company, client);
-    if (!companyId) {
-      throw new Error("Company not found");
-    }
-
-    const xml = getAllParentGroupDetailsXML(company, groupName);
-    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
-    const parsed = await parseXML(responseXML);
-
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
-
-    let inserted = 0, updated = 0, ignored = 0;
-
-    for (const ledger of list) {
-      const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
-      if (!ledgerName) continue;
-
-      const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
-      const guid = originalGuid || generateFallbackGuid(company, `${groupName}_${ledgerName}`, 'allparentgroup');
-      const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
-      const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
-      const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
-      const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
-
-      const result = await upsertRecord(
-        "app_test.all_parent_groups", guid, masterId, alterId,
-        [
-          companyId,
+    router.get("/all-parent-groups", async (req, res) => {
+      const company = req.query.company;
+      const groupName = req.query.groupName;
+      
+      if (!company || !groupName) {
+        return res.status(400).json({
+          status: "error",
+          message: "company and groupName required"
+        });
+      }
+      
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        
+        // Get company_id using helper
+        const companyId = await getCompanyId(company, client);
+        if (!companyId) {
+          throw new Error("Company not found");
+        }
+        
+        const xml = getAllParentGroupDetailsXML(company, groupName);
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        const parsed = await parseXML(responseXML);
+        
+        const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
+        const list = Array.isArray(collection) ? collection : [collection];
+        
+        let inserted = 0, updated = 0, ignored = 0;
+        
+        for (const ledger of list) {
+          const ledgerName = clean(ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME);
+          if (!ledgerName) continue;
+          
+          const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
+          const guid = originalGuid || generateFallbackGuid(company, `${groupName}_${ledgerName}`, 'allparentgroup');
+          const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
+          const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+          const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
+          const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
+          
+          const result = await upsertRecord(
+            "app_test.all_parent_groups", guid, masterId, alterId,
+            [
+              companyId,
+              company,
+              ledgerName,
+              groupName,
+              Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
+                ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
+                : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
+              clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
+              clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
+              clean(ledger?.PINCODE),
+              clean(ledger?.INCOMETAXNUMBER),
+              clean(ledger?.PARTYGSTIN),
+              clean(ledger?.GSTREGISTRATIONTYPE),
+              clean(ledger?.CONTACTPERSON),
+              clean(ledger?.PHONE || ledger?.LEDGERPHONE),
+              clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
+              clean(ledger?.FAX),
+              clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
+              openingBalance,
+              closingBalance,
+              openingBalance < 0 ? "Cr" : "Dr",
+              closingBalance < 0 ? "Cr" : "Dr"
+            ],
+            [
+              "company_id", "company_name", "ledger_name", "parent_group", "address", "state", "country",
+              "pincode", "pan_number", "gst_number", "gst_registration_type", "contact_name",
+              "phone_number", "primary_phone_number", "fax_no", "email", "opening_balance",
+              "closing_balance", "opening_balance_type", "closing_balance_type"
+            ],
+            client
+          );
+          
+          if (result.action === "inserted") inserted++;
+          else if (result.action === "updated") updated++;
+          else ignored++;
+        }
+        
+        await client.query("COMMIT");
+        
+        return res.status(200).json({
+          status: "success",
+          source: "tally",
+          message: "All parent groups details synced successfully",
           company,
-          ledgerName,
-          groupName,
-          Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
-            ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
-            : clean(ledger?.["ADDRESS.LIST"]?.ADDRESS),
-          clean(ledger?.STATENAME || ledger?.STATE || ledger?.LEDSTATENAME),
-          clean(ledger?.COUNTRYNAME || ledger?.LEDCOUNTRYNAME),
-          clean(ledger?.PINCODE),
-          clean(ledger?.INCOMETAXNUMBER),
-          clean(ledger?.PARTYGSTIN),
-          clean(ledger?.GSTREGISTRATIONTYPE),
-          clean(ledger?.CONTACTPERSON),
-          clean(ledger?.PHONE || ledger?.LEDGERPHONE),
-          clean(ledger?.MOBILE || ledger?.LEDGERMOBILE),
-          clean(ledger?.FAX),
-          clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
-          openingBalance,
-          closingBalance,
-          openingBalance < 0 ? "Cr" : "Dr",
-          closingBalance < 0 ? "Cr" : "Dr"
-        ],
-        [
-          "company_id", "company_name", "ledger_name", "parent_group", "address", "state", "country",
-          "pincode", "pan_number", "gst_number", "gst_registration_type", "contact_name",
-          "phone_number", "primary_phone_number", "fax_no", "email", "opening_balance",
-          "closing_balance", "opening_balance_type", "closing_balance_type"
-        ],
-        client
-      );
-
-      if (result.action === "inserted") inserted++;
-      else if (result.action === "updated") updated++;
-      else ignored++;
-    }
-
-    await client.query("COMMIT");
-
-    return res.status(200).json({
-      status: "success",
-      source: "tally",
-      message: "All parent groups details synced successfully",
-      company,
-      parent_group: groupName,
-      summary: { inserted, updated, ignored, total: list.length }
+          parent_group: groupName,
+          summary: { inserted, updated, ignored, total: list.length }
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.log("❌ ALL PARENT GROUPS ERROR:", err.message);
+        return res.status(500).json({
+          status: "error",
+          message: err.message
+        });
+      } finally {
+        client.release();
+      }
     });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("❌ ALL PARENT GROUPS ERROR:", err.message);
-    return res.status(500).json({
-      status: "error",
-      message: err.message
-    });
-  } finally {
-    client.release();
-  }
-});
 
 /* ===================================================
   PROFIT LOSS SYNC

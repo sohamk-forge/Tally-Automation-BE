@@ -1,3 +1,5 @@
+
+
 import pool from "../db/index.js";
 
 /*
@@ -180,7 +182,6 @@ export const BANK_NAME_KEYWORDS = {
   "UTTARAKHAND GRAMIN BANK": /uttarakhand gramin bank/i,
   "WEST BENGAL GRAMIN BANK": /west bengal gramin bank/i
 };
-
 // HDFC-specific fallback: its own .xls export renders the bank name/IFSC
 // with dropped letters (e.g. "H BANK Ltd.", "H0001782"), so we detect it
 // via the structural fingerprint of its statement layout instead.
@@ -192,7 +193,6 @@ function looksLikeHdfc(allText) {
   const hits = [hasBankLtd, hasCustId, hasNomination, hasOdLimit].filter(Boolean).length;
   return hits >= 2;
 }
-
 export function detectBankFromSheet(sheet, xlsxUtils) {
   if (!sheet["!ref"]) return { detected: null, evidence: null };
 
@@ -207,7 +207,13 @@ export function detectBankFromSheet(sheet, xlsxUtils) {
     }
   }
 
-  // (debug console.log block removed — it printed sheet contents on every upload)
+  console.log("=== BANK DETECT DEBUG ===");
+  console.log("allText length:", allText.length);
+  console.log("allText sample:", allText.slice(0, 500));
+  console.log("hasBankLtd:", /\bBANK Ltd\.?/i.test(allText));
+  console.log("hasCustId:", /Cust ID\s*:/i.test(allText));
+  console.log("hasNomination:", /Nomination\s*:/i.test(allText));
+  console.log("hasOdLimit:", /OD Limit\s*:/i.test(allText));
 
   const ifscMatch = allText.match(/\b([A-Z]{4})0[A-Z0-9]{6}\b/);
   if (ifscMatch && IFSC_PREFIX_TO_BANK[ifscMatch[1]]) {
