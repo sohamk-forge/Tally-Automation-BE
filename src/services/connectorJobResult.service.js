@@ -10,9 +10,19 @@
 // Tally had accepted it.
 import { storeLedgerEmbedding } from "./ledgerEmbedding.js";
 
-function resolveTallyOutcome(responseXml) {
+function resolveTallyOutcome(responseXml, connectorError = null) {
   let finalStatus = "failed";
   let errorMessage = null;
+
+  // No Tally response at all (Tally unreachable, connector timeout, job
+  // went stale) — surface the connector's own reason instead of the
+  // generic "Tally import failed".
+  if (!responseXml) {
+    return {
+      finalStatus: "failed",
+      errorMessage: connectorError || "No response received from Tally"
+    };
+  }
 
   try {
     const xml = responseXml || "";
@@ -21,14 +31,14 @@ function resolveTallyOutcome(responseXml) {
     const altered = parseInt(xml.match(/<ALTERED>(\d+)<\/ALTERED>/)?.[1] || "0");
     const exceptions = parseInt(xml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/)?.[1] || "0");
     const errors = parseInt(xml.match(/<ERRORS>(\d+)<\/ERRORS>/)?.[1] || "0");
-    const lineError = xml.match(/<LINEERROR>(.*?)<\/LINEERROR>/)?.[1] || null;
+    const lineError = xml.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/)?.[1] || null;
 
     if ((created + altered) > 0 && exceptions === 0 && errors === 0) {
       finalStatus = "success";
       errorMessage = null;
     } else {
       finalStatus = "failed";
-      errorMessage = lineError || "Tally import failed";
+      errorMessage = lineError?.trim() || connectorError || "Tally import failed";
     }
   } catch (e) {
     console.error("Error parsing Tally response:", e.message);
@@ -53,7 +63,7 @@ function isPossibleDuplicateVoucher(responseXml) {
   const altered = parseInt(xml.match(/<ALTERED>(\d+)<\/ALTERED>/)?.[1] || "0");
   const exceptions = parseInt(xml.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/)?.[1] || "0");
   const errors = parseInt(xml.match(/<ERRORS>(\d+)<\/ERRORS>/)?.[1] || "0");
-  const lineError = xml.match(/<LINEERROR>(.*?)<\/LINEERROR>/)?.[1] || null;
+  const lineError = xml.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/)?.[1] || null;
 
   return created === 0 && altered === 0 && errors === 0 && exceptions > 0 && !lineError;
 }
@@ -62,13 +72,18 @@ export async function processConnectorJobResult(client, job) {
   try {
     const { id, job_type, status, response_xml, result, payload } = job;
 
+    // Connector-side failure reason, used when there is no Tally response
+    // XML to parse (or the XML carries no LINEERROR text).
+    const connectorError =
+      result?.line_error || result?.error || job.error_message || null;
+
     console.log(
       `Processing connector job result: job_id=${id}, job_type=${job_type}, status=${status}`
     );
 
     switch (job_type) {
       case "ledger": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         await client.query(
           `
@@ -88,7 +103,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "sales_invoice": {
-        let { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        let { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         if (finalStatus === "failed" && isPossibleDuplicateVoucher(response_xml)) {
           finalStatus = "possible_duplicate";
@@ -114,7 +129,13 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "purchase_invoice": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        let { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
+
+        if (finalStatus === "failed" && isPossibleDuplicateVoucher(response_xml)) {
+          finalStatus = "possible_duplicate";
+          errorMessage =
+            "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
+        }
 
         await client.query(
           `UPDATE app_test.invoice_extractions
@@ -133,7 +154,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "stock_item": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         await client.query(
           `
@@ -153,7 +174,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "bank": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         await client.query(
           `
@@ -173,7 +194,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "odbank": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         await client.query(
           `
@@ -193,7 +214,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "alter_stock_item": {
-        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
         // ✅ FIXED: was UPDATE app_test.alter_stock_item.
         // payload.alter_stock_item_id is a push_stock_item.id — the opening
@@ -226,7 +247,7 @@ export async function processConnectorJobResult(client, job) {
       }
 
       case "voucher": {
-  const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml);
+  const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
   const voucherResult = await client.query(
     `
@@ -282,5 +303,28 @@ export async function processConnectorJobResult(client, job) {
       err.message
     );
     throw err;
+  }
+}
+
+// Called when a connector job dies without a result (never claimed, or
+// claimed and timed out). Without this, only connector_jobs was marked
+// failed and the business row (e.g. invoice_extractions) stayed 'pending'
+// forever.
+export async function failConnectorJobBusinessRecord(client, job, message) {
+  try {
+    await processConnectorJobResult(client, {
+      id: job.id,
+      job_type: job.job_type,
+      status: "failed",
+      response_xml: null,
+      result: { error: message },
+      error_message: message,
+      payload: job.payload
+    });
+  } catch (err) {
+    console.error(
+      `❌ Failed to propagate connector job ${job.id} failure to its record:`,
+      err.message
+    );
   }
 }

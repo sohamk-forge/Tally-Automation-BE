@@ -5,8 +5,27 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { validateCompanyId } from "../utils/companyAccess.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 
 const router = express.Router();
+
+// Fail fast when the user's own connector isn't live for this company.
+// Previously the route saved + queued the invoice and answered "success";
+// the offline connector was only discovered later in the worker, so the UI
+// had already reported a successful push. Returns true if it has already
+// sent the 409 response (caller must return).
+async function rejectIfConnectorOffline(res, companyId, userId) {
+  const connector = await resolveConnectorForCompany(companyId, userId);
+  if (connector) return false;
+
+  res.status(409).json({
+    status: "error",
+    code: "CONNECTOR_OFFLINE",
+    message:
+      "Tally connector is not running. Please open the connector (and Tally) and retry pushing this invoice to Tally."
+  });
+  return true;
+}
 
 // Shared by the three routes below — same user-scoped company-by-name
 // lookup used throughout this codebase (bulkSalesUpload.routes.js,
@@ -54,7 +73,17 @@ router.post("/invoices", async (req, res) => {
       });
     }
 
-    const { invoice_no, invoice_date, customer_name, gstin } = invoice_data;
+    const { invoice_no, invoice_date, gstin } = invoice_data;
+
+    if (!invoice_data.purchase_ledger?.trim()) {
+      return res.status(400).json({
+        status: "error",
+        message: "Please select a ledger before pushing to Tally."
+      });
+    }
+    // The review form sends `vendor_name`; older callers send `customer_name`.
+    // Reading only customer_name left the vendor column blank.
+    const customer_name = invoice_data.customer_name || invoice_data.vendor_name;
 
     if (!invoice_no?.trim()) {
       return res.status(400).json({
@@ -93,6 +122,8 @@ router.post("/invoices", async (req, res) => {
 
     const companyId = companyResult.rows[0].id;
     console.log(`✅ Company found: ID ${companyId}`);
+
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
 
     console.log(`📝 Creating/updating purchase invoice: ${invoice_no}`);
 
@@ -317,6 +348,8 @@ router.put("/invoices/:id", async (req, res) => {
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
+
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
 
     const existing = await pool.query(
       `SELECT id, raw_json FROM ${DB_SCHEMA}.invoice_extractions WHERE id = $1 AND company_id = $2`,
@@ -555,6 +588,8 @@ router.post("/invoices/retry-batch", async (req, res) => {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
 
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
+
     const existing = await pool.query(
       `SELECT id FROM ${DB_SCHEMA}.invoice_extractions WHERE id = ANY($1) AND company_id = $2`,
       [invoice_ids, companyId]
@@ -618,6 +653,8 @@ router.post("/invoices/resolve-missing-item", async (req, res) => {
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
+
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
 
     const existing = await pool.query(
       `SELECT id, raw_json FROM ${DB_SCHEMA}.invoice_extractions WHERE id = ANY($1) AND company_id = $2`,
@@ -705,6 +742,8 @@ router.post("/invoices/resolve-missing-ledger", async (req, res) => {
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
+
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
 
     const existing = await pool.query(
       `SELECT id, raw_json FROM ${DB_SCHEMA}.invoice_extractions WHERE id = ANY($1) AND company_id = $2`,

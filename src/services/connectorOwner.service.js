@@ -1,7 +1,10 @@
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 
-const CONNECTOR_ONLINE_WINDOW = "30 seconds";
+// Now that pushes are hard-gated on this check (invoices.routes.js rejects
+// with 409 when offline), a 30s window would flag a connector as offline
+// whenever it is briefly busy inside a slow Tally call and skips a poll.
+export const CONNECTOR_ONLINE_WINDOW = "60 seconds";
 
 export const resolveConnectorForCompany = async (
   companyId,
@@ -26,7 +29,7 @@ export const resolveConnectorForCompany = async (
   // 5. Pairing machine_id must match connector machine_id
   // 6. API key user/company must match
   // 7. API key must not be revoked
-  // 8. Connector must be live within 30 seconds
+  // 8. Connector must be live within CONNECTOR_ONLINE_WINDOW
   // 9. NEVER fallback to another user's connector
   // =====================================================
 

@@ -6,6 +6,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
+import { resolveConnectorForCompany, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -78,6 +79,27 @@ router.get("/current", verifySession(), async (req, res) => {
       });
     }
 
+    // Optional company scope: the same check pushes use, so the UI badge
+    // and the push gate can never disagree about "live".
+    const scopedCompanyId = Number(req.query.company_id);
+    if (scopedCompanyId) {
+      const live = await resolveConnectorForCompany(scopedCompanyId, user_id);
+      if (!live) {
+        return res.status(404).json({
+          status: "error",
+          message: "Connector is offline"
+        });
+      }
+      return res.status(200).json({
+        status: "success",
+        data: {
+          connected: true,
+          machine_id: live.machine_id,
+          last_seen_at: live.last_seen_at
+        }
+      });
+    }
+
     // Live status comes from connector_api_keys.last_seen_at.
     // Machine table is used only for display/company information.
     const result = await pool.query(
@@ -94,7 +116,7 @@ router.get("/current", verifySession(), async (req, res) => {
        AND m.user_id = k.user_id
       WHERE k.user_id = $1
         AND k.revoked_at IS NULL
-        AND k.last_seen_at >= NOW() - INTERVAL '30 seconds'
+        AND k.last_seen_at >= NOW() - INTERVAL '${CONNECTOR_ONLINE_WINDOW}'
       ORDER BY k.last_seen_at DESC
       LIMIT 1
       `,
@@ -258,8 +280,34 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
       });
     }
 
+    // Idempotency: a replayed result must not overwrite a job (and its
+    // invoice) that already finished successfully. A 'failed' job may
+    // still receive a late result — e.g. it was marked timed-out by a
+    // sweep but the connector did eventually push it to Tally.
+    if (["completed", "success"].includes(job.status)) {
+      return res.status(200).json({
+        status: "success",
+        message: "Job result already recorded"
+      });
+    }
+
+    const errorMessage =
+      status === "failed"
+        // line_error: Tally rejected an XML import (request reached
+        // Tally fine, Tally itself refused a line). error: the
+        // connector never got a usable response at all — Tally
+        // unreachable, network failure, timeout, etc. Prefer
+        // line_error when both are somehow present since it's the
+        // more specific, Tally-sourced reason.
+        ? (result?.line_error || result?.error || null)
+        : null;
+
     // =========================================
-    // RECORD CONNECTOR RESULT
+    // RECORD CONNECTOR RESULT + BUSINESS PROCESSING
+    // One transaction: if updating the business record (e.g. the invoice's
+    // sync_status) fails, the job result rolls back and the connector gets
+    // a 500, so it retries instead of leaving the invoice 'pending' forever
+    // behind a job that looks completed.
     // =========================================
 
     await client.query("BEGIN");
@@ -282,44 +330,26 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
         status,
         responseXml || null,
         result || null,
-        status === "failed"
-          // line_error: Tally rejected an XML import (request reached
-          // Tally fine, Tally itself refused a line). error: the
-          // connector never got a usable response at all — Tally
-          // unreachable, network failure, timeout, etc. Prefer
-          // line_error when both are somehow present since it's the
-          // more specific, Tally-sourced reason.
-          ? (result?.line_error || result?.error || null)
-          : null,
+        errorMessage,
         jobId,
         userId
       ]
     );
 
+    if (job.job_type !== "sync") {
+      await processConnectorJobResult(client, {
+        id: job.id,
+        job_type: job.job_type,
+        status,
+        response_xml: responseXml || null,
+        result: result || null,
+        error_message: errorMessage,
+        payload: job.payload
+      });
+    }
+
     await client.query("COMMIT");
     transactionStarted = false;
-
-    // =========================================
-    // BUSINESS PROCESSING
-    // =========================================
-
-    if (job.job_type !== "sync") {
-      try {
-        await processConnectorJobResult(pool, {
-          id: job.id,
-          job_type: job.job_type,
-          status,
-          response_xml: responseXml || null,
-          result: result || null,
-          payload: job.payload
-        });
-      } catch (processingError) {
-        console.error(
-          `⚠️ Business processing failed for connector job ${jobId}:`,
-          processingError.message
-        );
-      }
-    }
 
     // =========================================
     // STOCK ITEM CHAIN

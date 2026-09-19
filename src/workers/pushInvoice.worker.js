@@ -115,7 +115,10 @@ async function partyLedgerExists(companyId, vendorName) {
     ORDER BY LENGTH(ledger_name) ASC
     LIMIT 1
     `,
-    [companyId, `${normalized}%`]
+    // Only accept "<vendor> (suffix)" — a bare startsWith turned a vendor
+    // typed as "Sai" into an unrelated ledger like "SAI COMPUTECH (25-26)".
+    // LIKE wildcards in the name itself are escaped.
+    [companyId, `${normalized.replace(/[\\%_]/g, "\\$&")} (%`]
   );
   if (prefixMatch.rows.length > 0) {
     return { exists: true, matchedName: prefixMatch.rows[0].ledger_name };
@@ -135,7 +138,7 @@ async function validatePurchaseInvoice(invoice, mapping, companyId) {
   const missingStockItemDetails = {};
 
   const ledgersToValidate = [
-    { field: "purchase_ledger", value: mapping.purchase_ledger },
+    { field: "purchase_ledger", value: invoice.purchase_ledger || mapping.purchase_ledger },
     { field: "cgst_ledger", value: mapping.cgst_ledger },
     { field: "sgst_ledger", value: mapping.sgst_ledger },
     { field: "igst_ledger", value: mapping.igst_ledger },
@@ -196,6 +199,34 @@ async function validatePurchaseInvoice(invoice, mapping, companyId) {
     missingStockItems,
     missingStockItemDetails,
     renamedItems
+  };
+}
+
+// Fallback for the voucher's party state when the invoice carries no vendor
+// GSTIN (generator.py can only derive the state from a GSTIN prefix). Uses
+// the vendor's own ledger details in Tally: its state, else the state code of
+// the GSTIN stored on that ledger. Prefers Sundry Creditor ledgers so a
+// same-named debtor ledger isn't used.
+async function getPartyLedgerStateInfo(companyId, ledgerName) {
+  if (!ledgerName) return { state: "", gstin: "" };
+
+  const result = await pool.query(
+    `
+    SELECT state, gst_number
+    FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1
+      AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+    ORDER BY (parent_group ILIKE '%creditor%') DESC,
+             (COALESCE(TRIM(state), '') <> '') DESC
+    LIMIT 1
+    `,
+    [companyId, ledgerName]
+  );
+
+  const row = result.rows[0];
+  return {
+    state: String(row?.state || "").trim(),
+    gstin: String(row?.gst_number || "").trim()
   };
 }
 
@@ -275,6 +306,36 @@ const worker = new Worker(
     }
 
     console.log(`[PURCHASE-INVOICE] Processing invoice ID ${invoiceId} requested by user ${userId}`);
+
+    // Duplicate-in-flight guard (same as pushSalesInvoice.worker.js): a
+    // double click, retry or startup recovery must not hand Tally the same
+    // voucher twice while a connector job for it is still pending/processing.
+    const existingJobResult = await pool.query(
+      `
+      SELECT id, status
+      FROM ${DB_SCHEMA}.connector_jobs
+      WHERE job_type = 'purchase_invoice'
+        AND payload->>'invoice_id' = $1
+        AND payload->>'requested_by_user_id' = $2
+        AND status IN ('pending', 'processing')
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [String(invoiceId), String(userId)]
+    );
+
+    if (existingJobResult.rows.length > 0) {
+      const existingJob = existingJobResult.rows[0];
+      console.log(`⚠️ Skipping — connector job already in flight for invoice ${invoiceId}`, {
+        connectorJobId: existingJob.id,
+        connectorJobStatus: existingJob.status
+      });
+      return {
+        invoiceId,
+        status: "skipped_duplicate",
+        connectorJobId: existingJob.id
+      };
+    }
 
     await pool.query(
       `UPDATE app_test.invoice_extractions SET sync_status = 'processing', updated_at = NOW() WHERE id = $1`,
@@ -365,15 +426,31 @@ const worker = new Worker(
         return { invoiceId, status: "failed", error: message };
       }
 
+      const partyName = invoice.customer_name || invoice.vendor_name || "";
+      const partyGstin = invoice.gstin || invoice.vendor_gstin || "";
+
+      // No GSTIN on the invoice → fall back to the vendor ledger's details.
+      // An explicit vendor_state on the invoice still wins.
+      let ledgerFallback = { state: "", gstin: "" };
+      if (!partyGstin && !invoice.vendor_state) {
+        ledgerFallback = await getPartyLedgerStateInfo(row.company_id, partyName);
+        console.log(`🗺️ No vendor GSTIN — ledger state fallback for "${partyName}":`, ledgerFallback);
+      }
+
       const xml = await generateXmlViaQueue("purchase", {
         ...invoice,
+
+        ...(ledgerFallback.state ? { vendor_state: ledgerFallback.state } : {}),
+        // Used by generator.py only to derive the state code when the
+        // ledger has a GSTIN but no state text.
+        ...(ledgerFallback.gstin ? { ledger_gstin: ledgerFallback.gstin } : {}),
 
         company: row.company_name,
 
         vendor_name: invoice.customer_name || invoice.vendor_name || "",
         vendor_gstin: invoice.gstin || invoice.vendor_gstin || "",
 
-        purchase_ledger: mapping.purchase_ledger,
+        purchase_ledger: invoice.purchase_ledger || mapping.purchase_ledger,
 
         line_items: (invoice.line_items || []).map(item => ({
           ...item,
@@ -410,7 +487,7 @@ const worker = new Worker(
 
       if (!connector) {
         throw new Error(
-          `No active connector found for company ${row.company_id} and user ${userId}`
+          "Tally connector is offline — start the connector app and Tally, then retry this invoice."
         );
       }
 
@@ -532,6 +609,14 @@ async function markStalePendingInvoicesAsFailed() {
        updated_at = NOW()
      WHERE sync_status = 'pending'
        AND updated_at < NOW() - INTERVAL '5 minutes'
+       -- 'pending' is also the normal "waiting for the connector" state —
+       -- only rows with NO in-flight connector job are genuinely orphaned.
+       AND NOT EXISTS (
+         SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
+         WHERE cj.job_type = 'purchase_invoice'
+           AND cj.payload->>'invoice_id' = invoice_extractions.id::text
+           AND cj.status IN ('pending', 'processing')
+       )
      RETURNING id`
   );
   console.log(`Marked ${result.rowCount} stale pending purchase invoices as failed`);
@@ -539,9 +624,15 @@ async function markStalePendingInvoicesAsFailed() {
 
 async function enqueuePendingInvoiceJobs() {
   const result = await pool.query(
-    `SELECT id, user_id FROM app_test.invoice_extractions
-     WHERE sync_status = 'pending'
-     ORDER BY id ASC`
+    `SELECT id, user_id FROM app_test.invoice_extractions ie
+     WHERE ie.sync_status = 'pending'
+       AND NOT EXISTS (
+         SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
+         WHERE cj.job_type = 'purchase_invoice'
+           AND cj.payload->>'invoice_id' = ie.id::text
+           AND cj.status IN ('pending', 'processing')
+       )
+     ORDER BY ie.id ASC`
   );
 
   let enqueuedCount = 0;

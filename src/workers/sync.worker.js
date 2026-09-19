@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import axios from "axios";
 
 import pool from "../db/index.js";
+import { failConnectorJobBusinessRecord } from "../services/connectorJobResult.service.js";
 import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
 
 const connection = new IORedis({
@@ -589,10 +590,21 @@ async function markStalePendingConnectorJobsAsFailed() {
          updated_at = NOW()
      WHERE status = 'pending'
        AND created_at < NOW() - INTERVAL '${CONNECTOR_JOB_STALE_PENDING_MINUTES} minutes'
-     RETURNING id`
+     RETURNING id, job_type, payload`
   );
   if (result.rowCount > 0) {
     console.log(`Marked ${result.rowCount} stale pending connector jobs as failed`);
+  }
+
+  // Without this the linked business row (e.g. a purchase invoice) stayed
+  // 'pending' forever while only connector_jobs showed the failure.
+  for (const job of result.rows) {
+    if (job.job_type === "sync") continue;
+    await failConnectorJobBusinessRecord(
+      pool,
+      job,
+      "Connector never came online to claim this job"
+    );
   }
 }
 

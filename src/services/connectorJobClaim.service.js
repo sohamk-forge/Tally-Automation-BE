@@ -1,4 +1,5 @@
 import pool from "../db/index.js";
+import { failConnectorJobBusinessRecord } from "./connectorJobResult.service.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: claimPendingConnectorJobs
@@ -100,6 +101,17 @@ const result = await client.query(
 
     // Commit transaction
     await client.query("COMMIT");
+
+    // Push the timeout failure through to each job's business record
+    // (e.g. invoice_extractions) — done after COMMIT on the pool, not this
+    // transaction's client, so one failing update can't poison the claim.
+    for (const staleJob of staleJobs.rows) {
+      await failConnectorJobBusinessRecord(
+        pool,
+        staleJob,
+        "Connector processing timeout - no result received"
+      );
+    }
 
     // ⚠️ UPDATE ... FROM does not guarantee RETURNING preserves CTE ORDER BY
     // Re-sort to keep API response consistent (oldest jobs first)

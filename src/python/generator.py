@@ -124,6 +124,11 @@ party_country = (
 if not party_state and party_gstin:
     party_state = GST_STATE_MAP.get(party_gstin[:2], "")
 
+# Fallback: no GSTIN on the invoice -> state code from the GSTIN stored on
+# the vendor's Tally ledger (worker passes it as ledger_gstin).
+if not party_state and invoice.get("ledger_gstin"):
+    party_state = GST_STATE_MAP.get(str(invoice.get("ledger_gstin"))[:2], "")
+
 place_of_supply = invoice.get("place_of_supply") or party_state or ""
 
 narration = invoice.get(
