@@ -538,8 +538,7 @@ export const getGroupSummaryCRXML = (company) => {
   `;
 
   };
-
-  export function getLedgerVouchersXML(
+export function getLedgerVouchersXML(
     company,
     fromDate,
     toDate
@@ -605,19 +604,17 @@ export const getGroupSummaryCRXML = (company) => {
                           </TYPE>
 
                           <FETCH>
-
                               DATE,
-
                               VOUCHERTYPENAME,
-
                               VOUCHERNUMBER,
-
                               PARTYLEDGERNAME,
-
                               NARRATION,
-
-                              ALLLEDGERENTRIES.LIST
-
+                              ALLLEDGERENTRIES.LIST,
+                              REFERENCE,
+                              REFERENCEDATE,
+                              INVDELIVERYDATE,
+                            CURRBASICSHIPDELIVERYNOTE,
+                            INVOICEDELNOTES.*
                           </FETCH>
 
                       </COLLECTION>
@@ -1678,3 +1675,123 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
 </ENVELOPE>
   `;
 };
+
+export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
+ 
+  return `
+<ENVELOPE>
+ 
+  <HEADER>
+ 
+    <VERSION>1</VERSION>
+ 
+    <TALLYREQUEST>Export</TALLYREQUEST>
+ 
+    <TYPE>Collection</TYPE>
+ 
+    <ID>SalesInvoiceDeliveryDetails</ID>
+ 
+  </HEADER>
+ 
+  <BODY>
+ 
+    <DESC>
+ 
+      <STATICVARIABLES>
+ 
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+ 
+        <SVFROMDATE TYPE="Date">
+          ${fromDate}
+        </SVFROMDATE>
+ 
+        <SVTODATE TYPE="Date">
+          ${toDate}
+        </SVTODATE>
+ 
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+ 
+      </STATICVARIABLES>
+ 
+      <TDL>
+ 
+        <TDLMESSAGE>
+ 
+          <COLLECTION
+            NAME="SalesInvoiceDeliveryDetails"
+            ISMODIFY="No"
+            ISFIXED="No"
+            ISINITIALIZE="No"
+            ISOPTION="No"
+            ISINTERNAL="No"
+          >
+ 
+            <TYPE>Voucher</TYPE>
+ 
+            <FILTER>SalesInvoiceDeliveryOnly</FILTER>
+ 
+            <FETCH>
+ 
+              DATE,
+              GUID,
+              MASTERID,
+              ALTERID,
+ 
+              VOUCHERTYPENAME,
+              VOUCHERNUMBER,
+ 
+              PARTYLEDGERNAME,
+ 
+              REFERENCE,
+              REFERENCEDATE,
+              OTHERREFERENCE,
+ 
+              BASICPAYMENTTERMS,
+              PAYMENTMODE,
+ 
+              BASICBUYERORDERNO,
+              BASICBUYERORDERDATE,
+ 
+              BASICSHIPDELIVERYNOTE,
+BASICSHIPPINGDATE,
+CURRBASICSHIPDELIVERYNOTE,
+              BASICSHIPDOCUMENTNO,
+              BASICSHIPPEDBY,
+              BASICSHIPVESSELNO,
+              BASICSHIPVESSELDATE,
+ 
+              BASICSHIPDESTINATION,
+              BASICFINALDESTINATION,
+ 
+              BASICSHIPDELIVERYTERMS
+ 
+            </FETCH>
+ 
+          </COLLECTION>
+ 
+          <SYSTEM
+            TYPE="Formulae"
+            NAME="SalesInvoiceDeliveryOnly"
+          >
+            $VoucherTypeName = "Sales"
+          </SYSTEM>
+ 
+        </TDLMESSAGE>
+ 
+      </TDL>
+ 
+    </DESC>
+ 
+    <DATA></DATA>
+ 
+  </BODY>
+ 
+</ENVELOPE>
+`;
+ 
+}
+ 

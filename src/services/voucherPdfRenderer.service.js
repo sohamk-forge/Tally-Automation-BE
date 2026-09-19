@@ -81,6 +81,19 @@ table.info-table td.value {
   text-align: left;
 }
 
+  /* ---- Dispatch / order details box (Sales only) ---- */
+  table.dispatch-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10.5px; }
+  table.dispatch-table td {
+    border-bottom: 1px solid #000;
+    padding: 4px 8px;
+    height: 36px;
+    vertical-align: top;
+    word-break: break-word;
+  }
+  table.dispatch-table td:first-child:not([colspan]) { border-right: 1px solid #000; }
+  table.dispatch-table .dl { display: block; color: #222; }
+  table.dispatch-table .dv { display: block; font-weight: bold; margin-top: 2px; min-height: 12px; }
+
   /* ---- Consignee / Buyer block ---- */
   .party-block { display: flex; border-bottom: 1px solid #000; }
   .party-block .half { flex: 1; padding: 6px 8px; }
@@ -290,6 +303,36 @@ function buildTaxTableHtml(v) {
 function taxAmountWordsFor(v) {
   const totalTax = (v.cgst || 0) + (v.sgst || 0) + (v.igst || 0);
   return amountToWords(totalTax);
+}
+
+// ---------- dispatch / order details box (Sales only) ----------
+
+/**
+ * 2-column bordered box shown after the invoice no./date row and before the
+ * Consignee/Buyer block. Each cell = small label on top, bold value below.
+ * "Terms of Delivery" spans the full width. Empty values render as blank
+ * cells so the box always looks the same.
+ *
+ * @param {Object} d - v.orderDetails from normalizeOrderDetails()
+ */
+function buildDispatchDetailsHtml(d = {}) {
+  d = d || {};
+  const cell = (label, value, colspan = 1) => `
+    <td${colspan > 1 ? ` colspan="${colspan}"` : ""}>
+      <span class="dl">${esc(label)}</span>
+      <span class="dv">${esc(value)}</span>
+    </td>`;
+
+  return `
+  <table class="dispatch-table">
+    <colgroup><col style="width:50%"><col style="width:50%"></colgroup>
+    <tr>${cell("Delivery Note", d.deliveryNote)}${cell("Mode/Terms of Payment", d.modeTermsOfPayment)}</tr>
+    <tr>${cell("Reference No. & Date.", d.reference)}${cell("Other References", d.otherReferences)}</tr>
+    <tr>${cell("Buyer's Order No.", d.buyersOrderNo)}${cell("Dated", d.buyersOrderDate)}</tr>
+    <tr>${cell("Dispatch Doc No.", d.dispatchDocNo)}${cell("Delivery Note Date", d.deliveryNoteDate)}</tr>
+    <tr>${cell("Dispatched through", d.dispatchedThrough)}${cell("Destination", d.destination)}</tr>
+    <tr>${cell("Terms of Delivery", d.termsOfDelivery, 2)}</tr>
+  </table>`;
 }
 
 // ---------- one builder function per voucher type ----------
@@ -751,12 +794,10 @@ const roundOffRow = buildRoundOffRowHtml(actualRoundOff);
     ${headerHtml(v.company, "Tax Invoice")}
     <table class="info-table">
   <colgroup>
-    <col style="width:17%">
-    <col style="width:18%">
-    <col style="width:8%">
-    <col style="width:13%">
-    <col style="width:17%">
-    <col style="width:27%">
+    <col style="width:20%">
+    <col style="width:30%">
+    <col style="width:12%">
+    <col style="width:38%">
   </colgroup>
 
   <tr>
@@ -765,11 +806,9 @@ const roundOffRow = buildRoundOffRowHtml(actualRoundOff);
 
     <td class="label">Date :</td>
     <td>${esc(v.date)}</td>
-
-    <td class="label">Buyer's Order No :</td>
-    <td>${esc(v.buyerOrderNo || "")}</td>
   </tr>
 </table>
+    ${buildDispatchDetailsHtml(v.orderDetails)}
     <div class="party-block">
       <div class="half">
         <div><strong>Consignee (Ship to)</strong></div>

@@ -17,6 +17,11 @@
  * HSN/SAC codes are NOT read from ledger_entries. They are looked up from
  * the `stock_group_summary` table by stock item name, via the `hsnMap`
  * param passed into normalizeVoucherRow() (built by the route handler).
+ *
+ * Sales vouchers additionally carry an "order details" JSON (delivery note,
+ * reference no/date, buyer's order no, dispatch info, destination, terms of
+ * delivery, etc). It is read from the `delivery_notes` column of the vouchers
+ * table (jsonb or JSON string) -- see ORDER_DETAILS_SOURCE below.
  */
 
 // ---------- generic helpers ----------
@@ -44,6 +49,57 @@ function formatDate(dateValue) {
   const yy = String(d.getUTCFullYear()).slice(2);
   return `${dd}-${months[d.getUTCMonth()]}-${yy}`;
 }
+
+/** "20260418" -> "18-Apr-26"; also accepts "2026-04-18" or a Date */
+function formatCompactDate(value) {
+  if (!value) return "";
+  const s = String(value).trim();
+  const m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m) return formatDate(`${m[1]}-${m[2]}-${m[3]}`);
+  return formatDate(s);
+}
+
+/**
+ * Normalizes the fetched order/dispatch details JSON (object or JSON string)
+ * into the fields the Sales PDF "dispatch details" box needs.
+ *
+ * Input example:
+ * {"vessel_no":"","destination":null,"vessel_date":null,
+ *  "reference_no":"5930052600080","delivery_note":"10011",
+ *  "reference_date":"20260418","buyers_order_no":null,
+ *  "dispatch_doc_no":"","other_references":null,"buyers_order_date":null,
+ *  "final_destination":"","terms_of_delivery":null,
+ *  "delivery_note_date":null,"dispatched_through":"",
+ *  "mode_terms_of_payment":null}
+ */
+function normalizeOrderDetails(raw) {
+  let d = raw;
+  if (typeof d === "string") {
+    try { d = JSON.parse(d); } catch { d = {}; }
+  }
+  d = d || {};
+  const s = (x) => (x === null || x === undefined ? "" : String(x).trim());
+
+  const refNo = s(d.reference_no);
+  const refDate = formatCompactDate(d.reference_date);
+
+  return {
+    deliveryNote: s(d.delivery_note),
+    deliveryNoteDate: formatCompactDate(d.delivery_note_date),
+    modeTermsOfPayment: s(d.mode_terms_of_payment),
+    reference: refNo ? (refDate ? `${refNo} dt. ${refDate}` : refNo) : "",
+    otherReferences: s(d.other_references),
+    buyersOrderNo: s(d.buyers_order_no),
+    buyersOrderDate: formatCompactDate(d.buyers_order_date),
+    dispatchDocNo: s(d.dispatch_doc_no),
+    dispatchedThrough: s(d.dispatched_through),
+    destination: s(d.destination) || s(d.final_destination),
+    termsOfDelivery: s(d.terms_of_delivery),
+  };
+}
+
+/** Where the order-details JSON is read from on the vouchers row. */
+const ORDER_DETAILS_SOURCE = (row) => row.delivery_notes;
 
 /** Maps voucher_type text to the EJS/HTML template key. Keyword match, not
  *  exact, since Tally installs sometimes rename voucher types
@@ -350,15 +406,22 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
       ];
     }
 
-   // Total comes straight from the DB row, never recomputed from parsed lines.
-const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
+    // Total comes straight from the DB row, never recomputed from parsed lines.
+    const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
 
     const firstEntry = Array.isArray(row.ledger_entries) ? row.ledger_entries[0] : undefined;
+
+    // Order / dispatch details box: Sales vouchers only.
+    const orderDetails =
+      templateKey === "sales"
+        ? normalizeOrderDetails(ORDER_DETAILS_SOURCE(row))
+        : null;
 
     return {
       ...base,
       supplierInvoiceNo: pick(firstEntry, ["supplier_invoice_no", "reference"], ""),
       buyerOrderNo: pick(firstEntry, ["buyer_order_no"], ""),
+      orderDetails,
       supplierOrBuyerName: row.party_ledger_name || "",
       supplierOrBuyerAddress: pick(firstEntry, ["address"], ""),
       gstin: pick(firstEntry, ["gstin", "party_gstin"], ""),

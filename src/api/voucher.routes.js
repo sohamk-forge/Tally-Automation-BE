@@ -74,16 +74,13 @@ const HEADER_ALIASES = {
   balance: [
     "closing balance", "balance", "balance(inr)", "bal"
   ],
-  // NEW: banks that report a single Amount column plus a separate
-  // Dr/Cr type flag instead of splitting into two amount columns
-  // (e.g. Kotak Mahindra's exports)
+  // Banks that report a single Amount column plus a separate
+  // Dr/Cr type flag (e.g. Kotak Mahindra's exports)
   amount: ["amount", "transaction amount", "amount(inr)"],
   drCr: ["dr / cr", "dr/cr", "cr/dr", "cr / dr", "type", "transaction type"]
 };
 
-// Header names used ONLY to *find* the header row (kept separate from
-// HEADER_ALIASES.date since a couple of these, e.g. plain "particulars",
-// are too generic to safely double as a date match).
+// Header names used ONLY to *find* the header row.
 const HEADER_ROW_DETECTORS = [
   ...HEADER_ALIASES.date,
   ...HEADER_ALIASES.withdrawal,
@@ -94,10 +91,6 @@ function normalizeHeaderKey(key) {
   return String(key || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// Re-keys a sheet_to_json row (whose keys are the literal, possibly
-// whitespace-padded / inconsistently-cased header text) into a row
-// keyed by normalized header text. Done once per row instead of
-// normalizing on every lookup.
 function normalizeRow(row) {
   const out = {};
   for (const [key, value] of Object.entries(row)) {
@@ -106,8 +99,6 @@ function normalizeRow(row) {
   return out;
 }
 
-// Looks up a field on an already-normalized row using an alias list
-// from HEADER_ALIASES. Returns the first non-empty match.
 function pickField(normRow, aliasListKey) {
   for (const alias of HEADER_ALIASES[aliasListKey]) {
     const val = normRow[normalizeHeaderKey(alias)];
@@ -297,6 +288,24 @@ function runSemanticEnrichment(transactions) {
 }
 
 /* ===========================
+   LEDGER SUGGESTIONS — computed ONCE (at upload), then stored
+
+   Wrapped so a failure in the embedding service never breaks an upload
+   or the Review page; it just means "no suggestion".
+=========================== */
+
+async function computeSuggestionsSafe(companyName, groupKeys) {
+  const distinctKeys = [...new Set((groupKeys || []).filter(Boolean))];
+  if (!companyName || !distinctKeys.length) return new Map();
+  try {
+    return (await suggestLedgersForGroupKeys(companyName, distinctKeys)) || new Map();
+  } catch (err) {
+    console.error("ledger suggestion computation failed:", err.message);
+    return new Map();
+  }
+}
+
+/* ===========================
    DUPLICATE CHECK — DIRECT DB, NO SYNC CALL
 =========================== */
 
@@ -396,7 +405,79 @@ router.post("/create", async (req, res) => {
 });
 
 /* ===========================
+   BULK HELPERS FOR UPLOAD
+=========================== */
+
+const INSERT_CHUNK_SIZE = 500; // 15 params/row * 500 = 7,500 params (pg limit is 65,535)
+
+// Key used to detect "this exact transaction already exists in this file".
+// Mirrors the old per-row WHERE clause: date + amount + debit/credit + narration.
+function txnKey(debitCredit, dateStr, amount, narration) {
+  return `${debitCredit}|${dateStr}|${Number(amount).toFixed(2)}|${narration ?? ""}`;
+}
+
+async function bulkInsertVouchers(client, rows) {
+  const inserted = [];
+
+  for (let start = 0; start < rows.length; start += INSERT_CHUNK_SIZE) {
+    const chunk = rows.slice(start, start + INSERT_CHUNK_SIZE);
+    const params = [];
+    const tuples = chunk.map((r, i) => {
+      const b = i * 15;
+      params.push(
+        r.company_id, r.company_name, r.voucher_date, r.bank_ledger, r.bank_name,
+        r.amount, r.narration, r.instrument_number, r.debit_credit,
+        r.statement_password, r.file_name, r.merchant_name, r.group_key,
+        r.suggested_party_ledger, r.suggestion_similarity
+      );
+      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},
+               NULL,NULL,'WAITING_LEDGER',
+               $${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15},NOW())`;
+    });
+
+    const res = await client.query(
+      `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+        (company_id, company_name, voucher_date, bank_ledger, bank_name,
+         amount, narration, instrument_number, debit_credit,
+         voucher_type, party_ledger, status,
+         statement_password, file_name, merchant_name, group_key,
+         suggested_party_ledger, suggestion_similarity, suggestion_computed_at)
+       VALUES ${tuples.join(",")}
+       RETURNING *`,
+      params
+    );
+    inserted.push(...res.rows);
+  }
+
+  return inserted;
+}
+
+async function bulkResetFailed(client, resets) {
+  if (!resets.length) return [];
+  const res = await client.query(
+    `UPDATE ${DB_SCHEMA}.contra_vouchers AS c
+     SET status = 'WAITING_LEDGER',
+         err_message = NULL,
+         instrument_number = v.cheque,
+         voucher_type = NULL,
+         party_ledger = NULL
+     FROM (
+       SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS cheque
+     ) AS v
+     WHERE c.id = v.id
+     RETURNING c.*`,
+    [resets.map((r) => r.id), resets.map((r) => r.chequeRef)]
+  );
+  return res.rows;
+}
+
+/* ===========================
    PROCESS A SINGLE UPLOADED FILE
+
+   ALL heavy work happens here, once:
+     parse Excel → semantic enrichment → group keys →
+     ledger suggestions → ONE existing-rows lookup → bulk insert.
+   The Review endpoints only SELECT what this stores.
 =========================== */
 async function processStatementFile({ file, company_id, company_name, bank_ledger, bank_name, password }) {
   const originalFileName = file.originalname;
@@ -422,10 +503,7 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
-  // ── Bank NAME cross-check — BEFORE any row is touched.
-  // Validated against bank_name (the fixed dropdown value, e.g.
-  // "HDFC Bank"), NOT bank_ledger (which is a free-form Tally ledger
-  // account name and could be anything the user typed there).
+  // Bank NAME cross-check — BEFORE any row is touched.
   const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils);
   if (!bankCheck.ok) {
     return {
@@ -441,7 +519,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   }
 
   const headerRowIndex = findHeaderRowIndex(sheet);
-  // ...rest of the function stays exactly the same
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
     defval: null,
@@ -461,9 +538,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     };
   }
 
-  // Normalize every raw row ONCE up front so every lookup below goes
-  // through the alias table instead of a hardcoded bracket key. This is
-  // what makes the parser bank-agnostic — see HEADER_ALIASES above.
   const normalizedRows = rawRows.map(normalizeRow);
 
   const narrationInputs = normalizedRows.map((normRow) => ({
@@ -472,17 +546,17 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 
   const enriched = await runSemanticEnrichment(narrationInputs);
 
-  const inserted = [];
+  /* ── Pass 1: parse every row in memory (no DB calls) ── */
   const transactions = [];
+  const candidates = []; // one entry per DEBIT / CREDIT side
 
-  for (const [i, row] of rawRows.entries()) {
+  for (let i = 0; i < rawRows.length; i++) {
     const normRow = normalizedRows[i];
 
     let withdrawalAmt = parseAmount(pickField(normRow, "withdrawal"));
     let depositAmt = parseAmount(pickField(normRow, "deposit"));
 
-    // Fallback for banks using one Amount column + a Dr/Cr flag
-    // instead of separate debit/credit columns
+    // Single Amount column + Dr/Cr flag fallback
     if (withdrawalAmt === null && depositAmt === null) {
       const combinedAmt = parseAmount(pickField(normRow, "amount"));
       const flag = String(pickField(normRow, "drCr") ?? "").trim().toUpperCase();
@@ -504,9 +578,7 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
 
     if (!groupKey || groupKey.toLowerCase() === "unknown") {
       const fallbackKey = deriveFallbackGroupKey(narration);
-      if (fallbackKey) {
-        groupKey = fallbackKey;
-      }
+      if (fallbackKey) groupKey = fallbackKey;
     }
 
     const rawRef = pickField(normRow, "chequeRef") ?? "";
@@ -526,86 +598,117 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
       group_key: groupKey || ""
     });
 
+    const base = { txnDate, narration, chequeRef, merchantName, groupKey };
+
     if (withdrawalAmt !== null && withdrawalAmt > 0) {
-      const existingDebit = await db.query(
-        `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
-         WHERE company_id = $1 AND bank_ledger = $2 AND file_name = $3
-           AND voucher_date = $4 AND amount = $5
-           AND debit_credit = 'DEBIT' AND narration IS NOT DISTINCT FROM $6`,
-        [company_id, bank_ledger, fileName, txnDate, withdrawalAmt, narration]
-      );
-
-      if (existingDebit.rows.length > 0) {
-        const ex = existingDebit.rows[0];
-        if (ex.status === 'FAILED') {
-          const r = await db.query(
-            `UPDATE ${DB_SCHEMA}.contra_vouchers
-             SET status = 'WAITING_LEDGER', err_message = NULL,
-                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-             WHERE id = $2 RETURNING *`,
-            [chequeRef, ex.id]
-          );
-          inserted.push({ ...r.rows[0], _action: 'reset' });
-        } else {
-          inserted.push({ ...ex, _action: 'skipped' });
-        }
-      } else {
-        const r = await db.query(
-          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-           (company_id, company_name, voucher_date, bank_ledger,
-            amount, narration, instrument_number,
-            debit_credit, voucher_type, party_ledger, status,
-            statement_password, file_name, merchant_name, group_key)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'DEBIT',NULL,NULL,'WAITING_LEDGER',$8,$9,$10,$11)
-           RETURNING *`,
-          [company_id, company_name, txnDate, bank_ledger,
-           withdrawalAmt, narration, chequeRef, password || null, fileName,
-           merchantName, groupKey]
-        );
-        inserted.push({ ...r.rows[0], _action: 'inserted' });
-      }
+      candidates.push({ ...base, debit_credit: "DEBIT", amount: withdrawalAmt });
     }
-
     if (depositAmt !== null && depositAmt > 0) {
-      const existingCredit = await db.query(
-        `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
-         WHERE company_id = $1 AND bank_ledger = $2 AND file_name = $3
-           AND voucher_date = $4 AND amount = $5
-           AND debit_credit = 'CREDIT' AND narration IS NOT DISTINCT FROM $6`,
-        [company_id, bank_ledger, fileName, txnDate, depositAmt, narration]
-      );
-
-      if (existingCredit.rows.length > 0) {
-        const ex = existingCredit.rows[0];
-        if (ex.status === 'FAILED') {
-          const r = await db.query(
-            `UPDATE ${DB_SCHEMA}.contra_vouchers
-             SET status = 'WAITING_LEDGER', err_message = NULL,
-                 instrument_number = $1, voucher_type = NULL, party_ledger = NULL
-             WHERE id = $2 RETURNING *`,
-            [chequeRef, ex.id]
-          );
-          inserted.push({ ...r.rows[0], _action: 'reset' });
-        } else {
-          inserted.push({ ...ex, _action: 'skipped' });
-        }
-      } else {
-        const r = await db.query(
-  `INSERT INTO ${DB_SCHEMA}.contra_vouchers
-   (company_id, company_name, voucher_date, bank_ledger, bank_name,
-    amount, narration, instrument_number,
-    debit_credit, voucher_type, party_ledger, status,
-    statement_password, file_name, merchant_name, group_key)
-   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'CREDIT',NULL,NULL,'WAITING_LEDGER',$9,$10,$11,$12)
-   RETURNING *`,
-  [company_id, company_name, txnDate, bank_ledger, bank_name,
-   depositAmt, narration, chequeRef, password || null, fileName,
-   merchantName, groupKey]
-);
-inserted.push({ ...r.rows[0], _action: 'inserted' });
-      }
+      candidates.push({ ...base, debit_credit: "CREDIT", amount: depositAmt });
     }
   }
+
+  if (!candidates.length) {
+    return {
+      file_name: fileName,
+      original_file_name: wasRenamed ? originalFileName : undefined,
+      renamed: wasRenamed,
+      success: false,
+      message: "No valid transaction rows found in the file"
+    };
+  }
+
+  /* ── ONE query: everything already stored for this file ── */
+  const existingRes = await db.query(
+    `SELECT id, status, voucher_date, amount, debit_credit, narration,
+            TO_CHAR(voucher_date, 'YYYY-MM-DD') AS vdate
+     FROM ${DB_SCHEMA}.contra_vouchers
+     WHERE company_id = $1 AND bank_ledger = $2 AND file_name = $3`,
+    [company_id, bank_ledger, fileName]
+  );
+  const existingMap = new Map();
+  for (const r of existingRes.rows) {
+    existingMap.set(txnKey(r.debit_credit, r.vdate, r.amount, r.narration), r);
+  }
+
+  /* ── Ledger suggestions: ONE call for all distinct group keys ── */
+  const suggestionMap = await computeSuggestionsSafe(
+    company_name,
+    candidates.map((c) => c.groupKey)
+  );
+
+  /* ── Pass 2: decide insert / reset / skip in memory ── */
+  const toInsert = [];
+  const toReset = [];
+  const skipped = [];
+
+  for (const c of candidates) {
+    const key = txnKey(c.debit_credit, c.txnDate, c.amount, c.narration);
+    const ex = existingMap.get(key);
+
+    if (ex) {
+      if (ex.status === "FAILED") {
+        toReset.push({ id: ex.id, chequeRef: c.chequeRef });
+        // mark so a second identical row in the same file isn't reset twice
+        existingMap.set(key, { ...ex, status: "RESET_QUEUED" });
+      } else {
+        skipped.push({
+          id: ex.id,
+          status: ex.status,
+          voucher_date: ex.voucher_date || c.txnDate,
+          amount: c.amount,
+          debit_credit: c.debit_credit,
+          _action: "skipped"
+        });
+      }
+      continue;
+    }
+
+    const suggestion = c.groupKey ? suggestionMap.get(c.groupKey) : null;
+
+    toInsert.push({
+      company_id,
+      company_name,
+      voucher_date: c.txnDate,
+      bank_ledger,
+      bank_name,
+      amount: c.amount,
+      narration: c.narration,
+      instrument_number: c.chequeRef,
+      debit_credit: c.debit_credit,
+      statement_password: password || null,
+      file_name: fileName,
+      merchant_name: c.merchantName,
+      group_key: c.groupKey,
+      suggested_party_ledger: suggestion?.suggested ? suggestion.ledger_name : null,
+      suggestion_similarity: suggestion?.suggested ? suggestion.similarity : null
+    });
+
+    // Same-file duplicate rows are skipped, matching the previous behavior.
+    existingMap.set(key, { id: null, status: "NEW_IN_BATCH", voucher_date: c.txnDate });
+  }
+
+  /* ── Single transaction: all rows stored, or none ── */
+  const client = await db.connect();
+  let insertedRows = [];
+  let resetRows = [];
+  try {
+    await client.query("BEGIN");
+    resetRows = await bulkResetFailed(client, toReset);
+    insertedRows = await bulkInsertVouchers(client, toInsert);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const inserted = [
+    ...insertedRows.map((r) => ({ ...r, _action: "inserted" })),
+    ...resetRows.map((r) => ({ ...r, _action: "reset" })),
+    ...skipped
+  ];
 
   if (!inserted.length) {
     return {
@@ -617,18 +720,21 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
     };
   }
 
-  const newRows     = inserted.filter(v => v._action === 'inserted');
-  const skippedRows = inserted.filter(v => v._action === 'skipped');
-  const resetRows   = inserted.filter(v => v._action === 'reset');
+  const newRows     = inserted.filter(v => v._action === "inserted");
+  const skippedRows = inserted.filter(v => v._action === "skipped");
+  const resetOnly   = inserted.filter(v => v._action === "reset");
 
-  const allDates = inserted.map(v => v.voucher_date).filter(Boolean).sort();
+  const allDates = inserted
+    .map(v => (v.voucher_date instanceof Date ? v.voucher_date.toISOString().split("T")[0] : String(v.voucher_date || "").slice(0, 10)))
+    .filter(Boolean)
+    .sort();
 
   return {
     file_name: fileName,
     original_file_name: wasRenamed ? originalFileName : undefined,
     renamed: wasRenamed,
     success: true,
-    message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetRows.length} reset.` +
+    message: `${newRows.length} new, ${skippedRows.length} skipped, ${resetOnly.length} reset.` +
       (wasRenamed ? ` (saved as "${fileName}" — a file named "${originalFileName}" already existed for this company)` : ""),
     bank_ledger,
     start_date: allDates[0] || null,
@@ -636,7 +742,7 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
     total: inserted.length,
     inserted_count: newRows.length,
     skipped_count: skippedRows.length,
-    reset_count: resetRows.length,
+    reset_count: resetOnly.length,
     debit_count: inserted.filter(v => v.debit_credit === "DEBIT").length,
     credit_count: inserted.filter(v => v.debit_credit === "CREDIT").length,
     data: inserted,
@@ -765,6 +871,9 @@ router.get("/statement-details", async (req, res) => {
 
 /* ===========================
    GET STATEMENT TRANSACTIONS (AI Suggestion shape)
+
+   READ-ONLY: one SELECT over rows prepared at upload time.
+   No Excel parsing, no embedding calls, no per-row lookups.
 =========================== */
 
 router.get("/statement-transactions", async (req, res) => {
@@ -819,12 +928,12 @@ router.get("/statement-transactions", async (req, res) => {
       });
     }
 
+    const dateStr = (d) => (d ? new Date(d).toISOString().split("T")[0] : "");
+
     const toTxn = (r) => ({
       id: r.id,
       status: r.status,
-      transaction_date: r.voucher_date
-        ? new Date(r.voucher_date).toISOString().split("T")[0]
-        : "",
+      transaction_date: dateStr(r.voucher_date),
       narration: r.narration || "",
       cheque_ref: r.instrument_number || "",
       withdrawal: r.debit_credit === "DEBIT" ? String(r.amount) : "",
@@ -870,7 +979,7 @@ router.get("/statement-transactions", async (req, res) => {
         r.instrument_number || "",
         r.debit_credit,
         Number(r.amount),
-        r.voucher_date ? new Date(r.voucher_date).toISOString().split("T")[0] : ""
+        dateStr(r.voucher_date)
       ].join("|");
 
       bucket.distinctNarrations.add((r.narration || "").trim().toLowerCase());
@@ -878,8 +987,7 @@ router.get("/statement-transactions", async (req, res) => {
       if (bucket.seenRowKeys.has(rowKey)) continue;
       bucket.seenRowKeys.add(rowKey);
 
-      const txn = toTxn(r);
-      bucket.transactions.push(txn);
+      bucket.transactions.push(toTxn(r));
       bucket.count += 1;
       if (r.debit_credit === "DEBIT") bucket.total_withdrawal += Number(r.amount) || 0;
       if (r.debit_credit === "CREDIT") bucket.total_deposit += Number(r.amount) || 0;
@@ -1003,6 +1111,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
 
 /* ===========================
    SUGGEST PARTY LEDGER BY GROUP KEY (embedding similarity)
+   On-demand single lookup; the bulk path is precomputed at upload.
 =========================== */
 
 router.get("/suggest-ledger-by-group-key", async (req, res) => {
@@ -1034,11 +1143,17 @@ router.get("/suggest-ledger-by-group-key", async (req, res) => {
 
 /* ===========================
    GET WAITING LEDGER VOUCHERS
+
+   Suggestions are READ from the columns filled at upload time.
+   Only rows that have no stored suggestion yet (uploaded before this
+   change, or ?refresh=true) are computed — once — and persisted, so
+   the next open is a plain SELECT.
 =========================== */
 
 router.get("/waiting-ledger", async (req, res) => {
   try {
-    const { company_id, file_name } = req.query;
+    const { company_id, file_name, refresh } = req.query;
+    const forceRefresh = refresh === "true";
 
     if (!company_id) {
       return res.status(400).json({ success: false, message: "company_id is required" });
@@ -1056,7 +1171,8 @@ router.get("/waiting-ledger", async (req, res) => {
         id, company_id, company_name, voucher_type, voucher_number,
         voucher_date, bank_ledger, amount, narration,
         instrument_number, debit_credit, status, created_at,
-        merchant_name, group_key
+        merchant_name, group_key,
+        suggested_party_ledger, suggestion_similarity, suggestion_computed_at
        FROM ${DB_SCHEMA}.contra_vouchers
        WHERE status = 'WAITING_LEDGER'
          AND company_id = $1
@@ -1068,20 +1184,61 @@ router.get("/waiting-ledger", async (req, res) => {
     const rows = result.rows;
     const companyName = rows[0]?.company_name;
 
-    let suggestionMap = new Map();
-    if (companyName) {
-      const groupKeys = rows.map((r) => r.group_key);
-      suggestionMap = await suggestLedgersForGroupKeys(companyName, groupKeys);
+    // One-time backfill for rows that never got a stored suggestion.
+    const needsCompute = rows.filter(
+      (r) => r.group_key && (forceRefresh || !r.suggestion_computed_at)
+    );
+
+    if (companyName && needsCompute.length) {
+      const keys = [...new Set(needsCompute.map((r) => r.group_key))];
+      const suggestionMap = await computeSuggestionsSafe(companyName, keys);
+
+      const ledgers = keys.map((k) => {
+        const s = suggestionMap.get(k);
+        return s?.suggested ? s.ledger_name : null;
+      });
+      const sims = keys.map((k) => {
+        const s = suggestionMap.get(k);
+        return s?.suggested ? s.similarity : null;
+      });
+
+      try {
+        await db.query(
+          `UPDATE ${DB_SCHEMA}.contra_vouchers AS c
+           SET suggested_party_ledger = v.ledger,
+               suggestion_similarity  = v.sim,
+               suggestion_computed_at = NOW()
+           FROM (
+             SELECT unnest($2::text[])   AS gk,
+                    unnest($3::text[])   AS ledger,
+                    unnest($4::float8[]) AS sim
+           ) AS v
+           WHERE c.company_id = $1
+             AND c.status = 'WAITING_LEDGER'
+             AND c.group_key = v.gk
+             ${forceRefresh ? "" : "AND c.suggestion_computed_at IS NULL"}`,
+          [company_id, keys, ledgers, sims]
+        );
+      } catch (persistErr) {
+        console.error("persisting backfilled suggestions failed:", persistErr.message);
+      }
+
+      // Reflect the fresh values in this response too.
+      const byKey = new Map(keys.map((k, i) => [k, { ledger: ledgers[i], sim: sims[i] }]));
+      for (const r of rows) {
+        const hit = r.group_key ? byKey.get(r.group_key) : null;
+        if (hit && (forceRefresh || !r.suggestion_computed_at)) {
+          r.suggested_party_ledger = hit.ledger;
+          r.suggestion_similarity = hit.sim;
+        }
+      }
     }
 
-    const data = rows.map((r) => {
-      const suggestion = r.group_key ? suggestionMap.get(r.group_key) : null;
-      return {
-        ...r,
-        suggested_party_ledger: suggestion?.suggested ? suggestion.ledger_name : null,
-        suggestion_similarity: suggestion?.suggested ? suggestion.similarity : null
-      };
-    });
+    const data = rows.map(({ suggestion_computed_at, ...r }) => ({
+      ...r,
+      suggested_party_ledger: r.suggested_party_ledger || null,
+      suggestion_similarity: r.suggested_party_ledger ? r.suggestion_similarity : null
+    }));
 
     return res.status(200).json({
       success: true,
@@ -1173,14 +1330,8 @@ router.get("/filter", async (req, res) => {
 /* ===========================
    ASSIGN party_ledger + voucher_type — CORE LOGIC (shared)
 
-   ★ CHANGED: the UPDATE now also writes force_push = forcePushFlag.
-   Previously forcePushFlag only skipped the duplicate check on THIS
-   request — it never persisted anything, so when the job actually
-   ran on the worker, voucher.force_push was still falsy and the
-   worker re-ran checkDuplicateFromDb from scratch, undoing the force.
-   Explicitly writing it either way (true OR false) also means a
-   voucher that was previously force-pushed and later bounces back to
-   WAITING_LEDGER/FAILED doesn't silently keep a stale force_push=true.
+   force_push is persisted on the row so the worker's pre-push
+   duplicate re-check honors it (see confirm-push).
 =========================== */
 async function assignPartyLedger(vouchers, forcePushFlag, userId) {
   const allowed = ["payment", "receipt", "contra"];
@@ -1209,21 +1360,21 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
 
     const isContra = v.voucher_type.toLowerCase() === "contra";
 
-      const result = await db.query(
-    `UPDATE ${DB_SCHEMA}.contra_vouchers
-     SET
-       party_ledger  = $1,
-       voucher_type  = $2,
-       transfer_bank = $3,
-       force_push    = $4,
-       user_id       = $5,
-       status        = 'PENDING'
-     WHERE id = $6
-       AND status IN ('WAITING_LEDGER', 'FAILED')
-     RETURNING *`,
-    [v.party_ledger, v.voucher_type.toLowerCase(),
-     isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
-  );
+    const result = await db.query(
+      `UPDATE ${DB_SCHEMA}.contra_vouchers
+       SET
+         party_ledger  = $1,
+         voucher_type  = $2,
+         transfer_bank = $3,
+         force_push    = $4,
+         user_id       = $5,
+         status        = 'PENDING'
+       WHERE id = $6
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+       RETURNING *`,
+      [v.party_ledger, v.voucher_type.toLowerCase(),
+       isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
+    );
 
     if (result.rows.length === 0) {
       notFound.push(v.id);
@@ -1342,6 +1493,7 @@ router.put("/party-ledger", async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+
 /* ===========================
    BACKWARD-COMPATIBLE ALIASES (temporary)
 =========================== */
@@ -1385,8 +1537,15 @@ router.put("/bulk-party-ledger", async (req, res) => {
   }
 });
 
+// FIXED: previously never passed userId, so the worker later failed with
+// "Voucher has no user_id set". Now resolved like the other routes.
 router.put("/:id/party-ledger", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const forcePushFlag = req.body.forcePush === true;
     const vouchers = [{
       id: Number(req.params.id),
@@ -1394,7 +1553,7 @@ router.put("/:id/party-ledger", async (req, res) => {
       voucher_type: req.body.voucher_type
     }];
 
-    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag, userId);
     return res.status(status).json(body);
 
   } catch (err) {
@@ -1406,11 +1565,8 @@ router.put("/:id/party-ledger", async (req, res) => {
 /* ===========================
    CONFIRM PUSH
 
-   ★ CHANGED: now also sets force_push = true in the same UPDATE that
-   flips status → PENDING. This is the actual fix for the infinite
-   duplicate loop — without it, the worker re-ran checkDuplicateFromDb
-   once the queued job started and flipped the voucher straight back
-   to DUPLICATE_FOUND.
+   Sets force_push = true in the same UPDATE that flips status → PENDING,
+   so the worker's pre-push duplicate re-check doesn't undo the override.
 =========================== */
 
 router.post("/:id/confirm-push", async (req, res) => {
