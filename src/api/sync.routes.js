@@ -810,12 +810,12 @@ router.get("/voucher-sync", async (req, res) => {
     for (const voucher of list) {
       try {
         const voucherNumber = clean(voucher?.VOUCHERNUMBER);
-        if (!voucherNumber) { failed++; continue; }
+        const originalGuid = voucher?.GUID || null;
+        if (!voucherNumber && !originalGuid) { failed++; continue; }
 
         const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
         const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
 
-        const originalGuid = voucher?.GUID || null;
         const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
         const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
         const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
@@ -859,8 +859,12 @@ router.get("/voucher-sync", async (req, res) => {
               created_at, updated_at
             )
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
-            ON CONFLICT (company_id, voucher_number, voucher_date)
+            ON CONFLICT (company_id, guid) WHERE guid IS NOT NULL AND guid <> ''
             DO UPDATE SET
+              master_id = EXCLUDED.master_id,
+              alter_id = EXCLUDED.alter_id,
+              voucher_date = EXCLUDED.voucher_date,
+              voucher_number = EXCLUDED.voucher_number,
               voucher_type = EXCLUDED.voucher_type,
               party_ledger_name = EXCLUDED.party_ledger_name,
               narration = EXCLUDED.narration,

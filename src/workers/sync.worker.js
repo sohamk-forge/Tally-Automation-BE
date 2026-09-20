@@ -158,12 +158,22 @@ async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
       console.log(`   Summary:`, response.data.summary);
     }
 
-    results.push({
-      step: label,
-      status: "success",
-      durationMs,
-      summary: response.data?.summary || null
-    });
+    const summary = response.data?.summary || null;
+    const failedRecords = Number(summary?.failed) || 0;
+
+    // A 200 with per-record failures (e.g. vouchers rejected by a DB
+    // constraint) is not a clean success — surface it instead of a green tick.
+    if (failedRecords > 0) {
+      results.push({
+        step: label,
+        status: "failed",
+        durationMs,
+        summary,
+        error: `${failedRecords} of ${summary?.total ?? "?"} records failed to save`
+      });
+    } else {
+      results.push({ step: label, status: "success", durationMs, summary });
+    }
     await updateJobProgress(jobLogId, results);
 
   } catch (err) {
