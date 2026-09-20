@@ -3,7 +3,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { OD_BANK_QUEUE_NAME, safeEnqueueOdBank } from "../queues/odBank.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { createOdBankXML } from "../services/pushXmlBuilder.js";
 
 const connection = new IORedis({
@@ -102,7 +102,11 @@ const worker = new Worker(
 
       if (!connector) {
         throw new Error(
-          `No active connector found for company ${row.company_id} and user ${userId}`
+          await getConnectorOfflineMessage(
+            row.company_id,
+            userId,
+            `No active connector found for company ${row.company_id} and user ${userId}`
+          )
         );
       }
 

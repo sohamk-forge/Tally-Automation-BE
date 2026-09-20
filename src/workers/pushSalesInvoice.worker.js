@@ -6,7 +6,7 @@ import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { SALES_QUEUE_NAME, safeEnqueueSales } from "../queues/sales.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 import { getSalesVoucherExistsXML } from "../services/xmlBuilder.js";
@@ -652,7 +652,11 @@ const worker = new Worker(
 
       if (!connector) {
         throw new Error(
-          `No active connector found for company ${row.company_id} and user ${userId}`
+          await getConnectorOfflineMessage(
+            row.company_id,
+            userId,
+            `No active connector found for company ${row.company_id} and user ${userId}`
+          )
         );
       }
 

@@ -6,7 +6,7 @@ import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { PURCHASE_QUEUE_NAME, safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 
@@ -487,7 +487,11 @@ const worker = new Worker(
 
       if (!connector) {
         throw new Error(
-          "Tally connector is offline — start the connector app and Tally, then retry this invoice."
+          await getConnectorOfflineMessage(
+            row.company_id,
+            userId,
+            "Tally connector is offline — start the connector app and Tally, then retry this invoice."
+          )
         );
       }
 

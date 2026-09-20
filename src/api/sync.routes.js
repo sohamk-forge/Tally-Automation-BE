@@ -2,6 +2,7 @@
     import pool from "../db/index.js";
     import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
+    import { isTallyConnectorLive, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
     import axios from "axios";
     import {
       getCompaniesXML,
@@ -175,7 +176,8 @@ async function userOwnsCompany(userId, companyId, client = null) {
 }
 
 /* ===================================================
-  SYNC RATE LIMIT — once per 5 minutes, per (user, company)
+  SYNC RATE LIMIT — once per 5 minutes, per company (shared by all
+  members, since they all sync through the same admin connector / one Tally)
   No rate limit of any kind existed on /manual or /manual-auto before
   this — a user could spam "Sync Now" repeatedly, each click creating a
   brand-new job_logs row/BullMQ job (safeEnqueueSync's dedup can't help
@@ -187,18 +189,17 @@ async function userOwnsCompany(userId, companyId, client = null) {
 =================================================== */
 const SYNC_COOLDOWN_SECONDS = 5 * 60;
 
-async function checkSyncCooldown(userId, companyId) {
+async function checkSyncCooldown(companyId) {
   const recent = await pool.query(
     `
     SELECT created_at
     FROM app_test.job_logs
-    WHERE user_id = $1
-      AND job_type = 'manual_sync'
-      AND (payload->>'companyId')::int = $2
+    WHERE job_type = 'manual_sync'
+      AND (payload->>'companyId')::int = $1
     ORDER BY created_at DESC
     LIMIT 1
     `,
-    [userId, companyId]
+    [companyId]
   );
 
   if (!recent.rows[0]) return { throttled: false };
@@ -208,6 +209,24 @@ async function checkSyncCooldown(userId, companyId) {
     return { throttled: true, retryAfterSeconds: Math.ceil(SYNC_COOLDOWN_SECONDS - elapsedSeconds) };
   }
   return { throttled: false };
+}
+
+// Fail fast instead of queueing a sync that can't run: with the connector
+// off, the job would just sit pending until the staleness sweep fails it.
+// For accountants/staff this also emails the admin (see isTallyConnectorLive).
+async function rejectIfConnectorOffline(res, companyId, userId) {
+  if (await isTallyConnectorLive(companyId, userId)) return false;
+
+  res.status(409).json({
+    status: "error",
+    code: "CONNECTOR_OFFLINE",
+    message: await getConnectorOfflineMessage(
+      companyId,
+      userId,
+      "Tally connector is not running. Please open the connector (and Tally) and try syncing again."
+    )
+  });
+  return true;
 }
 
 /* ===================================================
@@ -1780,7 +1799,7 @@ router.post("/manual", async (req, res) => {
       });
     }
 
-    const cooldown = await checkSyncCooldown(userId, companyId);
+    const cooldown = await checkSyncCooldown(companyId);
     if (cooldown.throttled) {
       return res.status(429).json({
         status: "error",
@@ -1788,6 +1807,8 @@ router.post("/manual", async (req, res) => {
         retryAfterSeconds: cooldown.retryAfterSeconds
       });
     }
+
+    if (await rejectIfConnectorOffline(res, companyId, userId)) return;
 
     await pool.query(
       `
@@ -1902,7 +1923,7 @@ router.post("/manual-auto", async (req, res) => {
       financial_year_end: to_year
     } = companyResult.rows[0];
 
-    const cooldown = await checkSyncCooldown(userId, syncCompanyId);
+    const cooldown = await checkSyncCooldown(syncCompanyId);
     if (cooldown.throttled) {
       return res.status(429).json({
         status: "error",
@@ -1910,6 +1931,8 @@ router.post("/manual-auto", async (req, res) => {
         retryAfterSeconds: cooldown.retryAfterSeconds
       });
     }
+
+    if (await rejectIfConnectorOffline(res, syncCompanyId, userId)) return;
 
     console.log("===============================================");
     console.log("🔄 DASHBOARD AUTO SYNC");

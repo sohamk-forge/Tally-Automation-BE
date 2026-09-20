@@ -8,6 +8,7 @@
 
 import pool from "../db/index.js";
 import { createConnectorJob } from "./connectorJob.service.js";
+import { resolveTallyOwner } from "./connectorOwner.service.js";
 
 const POLL_INTERVAL_MS = 250; // check every 1 second
 const TIMEOUT_MS = 600000;     // 10 minutes
@@ -39,6 +40,9 @@ async function resolveConnectorPairing(companyId, userId) {
     );
   }
 
+  // Accountants/staff are delegated to the company admin's connector.
+  const { ownerUserId } = await resolveTallyOwner(companyId, userId);
+
   const result = await pool.query(
     `
     SELECT cpt.user_id
@@ -49,7 +53,7 @@ async function resolveConnectorPairing(companyId, userId) {
     ORDER BY cpt.created_at DESC
     LIMIT 1
     `,
-    [companyId, userId]
+    [companyId, ownerUserId]
   );
 
   const pairing = result.rows[0];
@@ -129,6 +133,7 @@ export async function createConnectorSyncJob(
     payload: {
       company_id: companyId,
       user_id: pairing.user_id,
+      requested_by_user_id: userId,
       sync: true
     }
   });
@@ -196,10 +201,18 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
 
     const result = await pool.query(
       `
-      SELECT status, response_xml, error_message
-      FROM app_test.connector_jobs
-      WHERE id = $1
-        AND user_id = $2
+      SELECT cj.status, cj.response_xml, cj.error_message
+      FROM app_test.connector_jobs cj
+      WHERE cj.id = $1
+        AND (
+          cj.user_id = $2
+          OR EXISTS (
+            SELECT 1
+            FROM app_test.company_members cm
+            WHERE cm.user_id = $2
+              AND cm.company_id = NULLIF(cj.payload->>'company_id', '')::int
+          )
+        )
       `,
       [connectorJobId, userId]
     );

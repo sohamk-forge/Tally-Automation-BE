@@ -169,7 +169,7 @@ async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
         status: "failed",
         durationMs,
         summary,
-        error: `${failedRecords} of ${summary?.total ?? "?"} records failed to save`
+        error: `${failedRecords} of ${summary?.total ?? summary?.total_found ?? "?"} records failed to save`
       });
     } else {
       results.push({ step: label, status: "success", durationMs, summary });

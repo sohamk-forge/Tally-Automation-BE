@@ -5,7 +5,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { validateCompanyId } from "../utils/companyAccess.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { DB_SCHEMA } from "../config/db.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 
 const router = express.Router();
 
@@ -21,8 +21,11 @@ async function rejectIfConnectorOffline(res, companyId, userId) {
   res.status(409).json({
     status: "error",
     code: "CONNECTOR_OFFLINE",
-    message:
+    message: await getConnectorOfflineMessage(
+      companyId,
+      userId,
       "Tally connector is not running. Please open the connector (and Tally) and retry pushing this invoice to Tally."
+    )
   });
   return true;
 }

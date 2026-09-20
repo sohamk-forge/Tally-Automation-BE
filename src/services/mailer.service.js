@@ -93,3 +93,20 @@ export const sendInviteEmail = async (toEmail, inviteLink) => {
     `,
   });
 };
+
+export const sendConnectorOfflineEmail = async (toEmail, companyName, actorEmail) => {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASSWORD) {
+    console.log(`SMTP not configured — connector-offline alert for ${toEmail} (company: ${companyName})`);
+    return;
+  }
+
+  await sendWithRetry({
+    from: `"${process.env.SMTP_FROM_NAME || "Tally Automation"}" <${process.env.SMTP_USER}>`,
+    to: toEmail,
+    subject: `Tally connector is offline — ${companyName}`,
+    html: `
+      <p>${actorEmail || "A team member"} tried to sync or push to Tally for <b>${companyName}</b>, but the Tally connector device is off.</p>
+      <p>Please start the connector app and Tally on the paired machine so their work can go through.</p>
+    `,
+  });
+};

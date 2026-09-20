@@ -4,7 +4,7 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { LEDGER_QUEUE_NAME } from "../queues/ledger.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
-import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { createLedgerXML } from "../services/pushXmlBuilder.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -108,7 +108,11 @@ const worker = new Worker(
 
       if (!connector) {
         throw new Error(
-          `No active connector found for company ${row.company_id} and user ${userId}`
+          await getConnectorOfflineMessage(
+            row.company_id,
+            userId,
+            `No active connector found for company ${row.company_id} and user ${userId}`
+          )
         );
       }
 
