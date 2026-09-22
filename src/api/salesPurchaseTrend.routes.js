@@ -59,7 +59,8 @@ async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
        FROM ${DB_SCHEMA}.vouchers
       WHERE company_id = $1
         AND DATE(voucher_date) >= $2
-        AND DATE(voucher_date) < $3`,
+        AND DATE(voucher_date) < $3
+        AND deleted_at IS NULL`,
     [companyId, yearStart, yearEnd]
   );
   return result.rows;

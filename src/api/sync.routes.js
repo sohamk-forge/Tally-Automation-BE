@@ -240,6 +240,15 @@ const generateFallbackGuid = (company, uniqueValue, type) => {
     .slice(0, 250);
 };
 
+// Tally's own GUID (uuid + hex master-id suffix), as opposed to the
+// fallback identity generateFallbackGuid() builds when Tally omits GUID.
+// Only real Tally GUIDs are permanent across edits (ALTERID moves, GUID
+// doesn't) — a fallback GUID is derived from date/type/number and changes
+// if any of those are edited in Tally, so it's not safe to use as the
+// "was this voucher deleted?" identity. The voucher-sync soft-delete below
+// only ever diffs/touches rows matching this pattern.
+const REAL_TALLY_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$/i;
+
 /* ===================================================
   UPSERT FUNCTION (PRODUCTION-SAFE)
 =================================================== */
@@ -825,6 +834,11 @@ router.get("/voucher-sync", async (req, res) => {
     });
 
     let inserted = 0, updated = 0, ignored = 0, failed = 0;
+    // Every real-Tally-GUID voucher successfully upserted this run — the
+    // "Set B" side of the deleted-in-Tally diff below. A fallback-GUID
+    // voucher is never added here, so it can never be soft-deleted by this
+    // pass (see REAL_TALLY_GUID_PATTERN's comment).
+    const syncedRealGuids = [];
 
     for (const voucher of list) {
       try {
@@ -891,6 +905,7 @@ router.get("/voucher-sync", async (req, res) => {
               debit_amount = EXCLUDED.debit_amount,
               credit_amount = EXCLUDED.credit_amount,
               balance = EXCLUDED.balance,
+              deleted_at = NULL,
               updated_at = NOW()
             RETURNING (xmax = 0) AS was_inserted
             `,
@@ -904,6 +919,10 @@ router.get("/voucher-sync", async (req, res) => {
 
           if (upsertResult.rows[0]?.was_inserted) inserted++;
           else updated++;
+
+          if (originalGuid && REAL_TALLY_GUID_PATTERN.test(guid)) {
+            syncedRealGuids.push(guid);
+          }
 
           for (const entry of normalized) {
             const inventoryAllocations = entry?.["INVENTORYALLOCATIONS.LIST"];
@@ -962,12 +981,50 @@ router.get("/voucher-sync", async (req, res) => {
       }
     }
 
+    // ===================================================
+    //   SOFT-DELETE VOUCHERS NO LONGER IN TALLY
+    //
+    // Diffs the DB's existing real-GUID vouchers for this exact
+    // (company, date range) against syncedRealGuids ("what Tally just
+    // sent"). Anything in the DB but missing from that list was deleted
+    // in Tally between syncs. Never touches fallback-GUID rows (see
+    // REAL_TALLY_GUID_PATTERN), never touches anything outside this
+    // sync's own date range, and — critically — never runs at all when
+    // Tally's response was empty, so a transient bad/empty response can
+    // never be misread as "the user deleted everything".
+    // ===================================================
+    let softDeleted = 0;
+    if (list.length > 0) {
+      const softDeleteResult = await client.query(
+        `
+        UPDATE app_test.vouchers
+        SET deleted_at = NOW()
+        WHERE company_id = $1
+          AND voucher_date BETWEEN $2 AND $3
+          AND deleted_at IS NULL
+          AND guid ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$'
+          AND guid <> ALL($4::text[])
+        RETURNING voucher_number
+        `,
+        [companyId, fromDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"), toDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"), syncedRealGuids]
+      );
+      softDeleted = softDeleteResult.rows.length;
+
+      if (softDeleted > 0) {
+        await createAuditLog({
+          action: "VOUCHER_SYNC_SOFT_DELETED",
+          entity: "voucher-sync",
+          metadata: { company, fromDate, toDate, softDeleted, voucherNumbers: softDeleteResult.rows.map((r) => r.voucher_number) }
+        });
+      }
+    }
+
     const executionTime = Date.now() - startTime;
 
     await createAuditLog({
       action: "SYNC_COMPLETE",
       entity: "voucher-sync",
-      metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, totalRecords: list.length, executionTime }
+      metadata: { company, fromDate, toDate, inserted, updated, ignored, failed, softDeleted, totalRecords: list.length, executionTime }
     });
 
     return res.status(200).json({
@@ -975,7 +1032,7 @@ router.get("/voucher-sync", async (req, res) => {
       source: "tally",
       message: "Vouchers synced successfully",
       company, fromDate, toDate,
-      summary: { inserted, updated, ignored, failed, total: list.length, executionTime },
+      summary: { inserted, updated, ignored, failed, softDeleted, total: list.length, executionTime },
       data: list.map((voucher) => ({
         guid: voucher?.GUID || null,
         master_id: voucher?.MASTERID || null,

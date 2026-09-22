@@ -68,7 +68,8 @@ async function getTopSellingItems(companyId, yearStart, yearEnd) {
        AND LOWER(voucher_type) LIKE '%sales%'
        AND LOWER(voucher_type) NOT LIKE '%return%'
        AND LOWER(voucher_type) NOT LIKE '%credit note%'
-       AND LOWER(voucher_type) NOT LIKE '%debit note%'`,
+       AND LOWER(voucher_type) NOT LIKE '%debit note%'
+       AND deleted_at IS NULL`,
     [companyId, yearStart, yearEnd]
   );
 

@@ -296,6 +296,7 @@ export async function checkDuplicateFromDb({
       AND voucher_date = $2
       AND voucher_type ILIKE $3
       AND LOWER(TRIM(party_ledger_name)) = $4
+      AND deleted_at IS NULL
     `,
     [companyId, voucherDate, displayType, normParty]
   );

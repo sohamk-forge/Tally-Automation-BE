@@ -29,7 +29,7 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Query params 'from' and 'to' (YYYY-MM-DD) are required" });
     }
 
-    const conditions = [];
+    const conditions = ["deleted_at IS NULL"];
     const params = [];
 
     if (company_id) {
@@ -108,7 +108,7 @@ router.get("/:id/pdf", async (req, res) => {
     }
 
     const result = await db.query(
-      `SELECT * FROM ${DB_SCHEMA}.vouchers WHERE id = $1 LIMIT 1`,
+      `SELECT * FROM ${DB_SCHEMA}.vouchers WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
       [id]
     );
     const row = result.rows[0];

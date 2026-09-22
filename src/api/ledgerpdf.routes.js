@@ -250,6 +250,7 @@ router.get("/", async (req, res) => {
 
         WHERE company_id = $1
           AND DATE(voucher_date) BETWEEN $2 AND $3
+          AND deleted_at IS NULL
 
         ORDER BY
           voucher_date ASC,
@@ -336,6 +337,7 @@ router.get("/", async (req, res) => {
           FROM ${DB_SCHEMA}.vouchers
 
           WHERE company_id = $1
+            AND deleted_at IS NULL
         `,
         [company_id]
       );
@@ -375,6 +377,7 @@ router.get("/", async (req, res) => {
             WHERE company_id = $1
               AND party_ledger_name ILIKE $2
               AND party_ledger_name IS NOT NULL
+              AND deleted_at IS NULL
 
             LIMIT 5
           `,

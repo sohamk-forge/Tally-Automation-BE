@@ -958,6 +958,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
         WHERE company_name = $1
           AND party_ledger_name IS NOT NULL
           AND narration ILIKE $2
+          AND deleted_at IS NULL
       `
       : "";
 

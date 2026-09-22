@@ -110,6 +110,8 @@ company_id = $1
 
 AND DATE(voucher_date)
 BETWEEN $2 AND $3
+
+AND deleted_at IS NULL
 `;
 
       /* =========================================
