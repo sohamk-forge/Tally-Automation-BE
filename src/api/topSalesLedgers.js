@@ -43,7 +43,10 @@ async function getCompanyInfo(companyId, companyName) {
   }
 
   const startYear = Number(row.financial_year_start);
-  const endYear = startYear + 1;
+  // Some company books span more than one FY (e.g. start 2025, end 2027);
+  // never end earlier than start + 1.
+  const storedEnd = Number(row.financial_year_end);
+  const endYear = Number.isFinite(storedEnd) && storedEnd > startYear + 1 ? storedEnd : startYear + 1;
 
   return {
     id: row.id,
@@ -60,7 +63,9 @@ async function getCompanyInfo(companyId, companyName) {
 =================================================== */
 async function getTopSellingItems(companyId, yearStart, yearEnd) {
   const result = await pool.query(
-    `SELECT ledger_entries
+    // Extract just the inventory lines in SQL — shipping every voucher's full
+    // ledger_entries JSON over the network is what made this endpoint slow.
+    `SELECT jsonb_path_query_array(ledger_entries, '$[*]."INVENTORYALLOCATIONS.LIST"') AS inventory_lines
      FROM ${DB_SCHEMA}.vouchers
      WHERE company_id = $1
        AND DATE(voucher_date) >= $2
@@ -76,11 +81,9 @@ async function getTopSellingItems(companyId, yearStart, yearEnd) {
   const itemMap = new Map();
 
   for (const row of result.rows) {
-    const entries = row.ledger_entries || [];
+    const inventoryLines = row.inventory_lines || [];
 
-    for (const entry of entries) {
-      const inventory = entry["INVENTORYALLOCATIONS.LIST"];
-
+    for (const inventory of inventoryLines) {
       if (!inventory) continue;
 
       const itemName = inventory.STOCKITEMNAME;

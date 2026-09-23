@@ -111,6 +111,51 @@ export async function loggerMiddleware(
       }
 
       /* ===================================
+         TRUNCATE LARGE RESPONSE BODIES
+         (full ledger/voucher lists etc. can
+         be megabytes — storing them in full
+         on every request/poll bloats
+         audit_logs and slows every insert
+         and later query on that table)
+      =================================== */
+
+      const RESPONSE_BODY_LIMIT_BYTES =
+        10 * 1024; // 10KB
+
+      let safeResponseSize = 0;
+
+      try {
+
+        safeResponseSize =
+          Buffer.byteLength(
+            JSON.stringify(
+              safeResponse ?? {}
+            )
+          );
+
+      } catch {
+
+        safeResponseSize = 0;
+
+      }
+
+      if (
+        safeResponseSize
+        > RESPONSE_BODY_LIMIT_BYTES
+      ) {
+
+        safeResponse = {
+
+          truncated: true,
+
+          original_size_bytes:
+            safeResponseSize
+
+        };
+
+      }
+
+      /* ===================================
          METADATA
       =================================== */
 
@@ -254,18 +299,27 @@ export async function loggerMiddleware(
 
   /* =====================================
      OVERRIDE res.json
+
+     Send the response first, log after —
+     the client should never wait on an
+     audit_logs insert. saveLog already
+     catches its own errors, so a failed
+     write can't crash the request.
   ===================================== */
 
-  res.json = async function (
+  res.json = function (
     body
   ) {
 
-    await saveLog(body);
+    const result =
+      originalJson.call(
+        this,
+        body
+      );
 
-    return originalJson.call(
-      this,
-      body
-    );
+    saveLog(body);
+
+    return result;
 
   };
 
@@ -273,16 +327,19 @@ export async function loggerMiddleware(
      OVERRIDE res.send
   ===================================== */
 
-  res.send = async function (
+  res.send = function (
     body
   ) {
 
-    await saveLog(body);
+    const result =
+      originalSend.call(
+        this,
+        body
+      );
 
-    return originalSend.call(
-      this,
-      body
-    );
+    saveLog(body);
+
+    return result;
 
   };
 

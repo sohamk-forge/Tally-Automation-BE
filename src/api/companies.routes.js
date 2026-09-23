@@ -60,7 +60,7 @@ router.get("/", async (req, res) => {
        INNER JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
            ON c.id = cpt.company_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE`,
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL`,
       [userId]
     );
 
@@ -83,7 +83,7 @@ router.get("/", async (req, res) => {
            ON m.company_name = c.name
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL
        ORDER BY c.id DESC
        LIMIT $2 OFFSET $3`,
       [userId, limit, offset]
@@ -143,7 +143,7 @@ router.get("/:id", async (req, res) => {
           AND m.user_id = cpt.user_id
        WHERE c.id = $1
          AND cpt.user_id = $2
-         AND cpt.is_used = TRUE`,
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL`,
       [id, userId]
     );
 
@@ -198,7 +198,7 @@ router.get("/all/list", async (req, res) => {
            ON m.company_name = c.name
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL
        ORDER BY c.id DESC`,
       [userId]
     );

@@ -6,8 +6,14 @@ import { DB_SCHEMA } from "../config/db.js";
 // have it; there is no "everyone gets it unless disabled" default, because
 // these are paid add-ons sold to one client at a time (see
 // company_feature_flags migration for the full rationale).
+
+// Add-ons that have graduated from per-company opt-in to available for every
+// company. Remove a key here to go back to company_feature_flags gating.
+const GLOBALLY_ENABLED_FEATURES = ["bulk_purchase_reconciliation"];
+
 export async function isFeatureEnabled(companyId, featureKey) {
   if (!companyId || !featureKey) return false;
+  if (GLOBALLY_ENABLED_FEATURES.includes(featureKey)) return true;
 
   const result = await pool.query(
     `
@@ -39,7 +45,12 @@ export async function getEnabledFeatureKeys(companyId) {
     [companyId]
   );
 
-  return result.rows.map((r) => r.feature_key);
+  return [
+    ...new Set([
+      ...GLOBALLY_ENABLED_FEATURES,
+      ...result.rows.map((r) => r.feature_key)
+    ])
+  ];
 }
 
 // Small Express helper for routes that already know companyId at the point
