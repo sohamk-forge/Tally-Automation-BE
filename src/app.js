@@ -200,6 +200,7 @@ import accountRoutes
 import challanPdfRoutes from "./api/challanpdf.routes.js";
 import quotationRoutes from "./api/quotation.routes.js";
 import quotationPdfRoutes from "./api/quotationpdf.routes.js";
+import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
 
 import companyLogoRoutes
 from "./api/companyLogo.routes.js";
@@ -639,6 +640,10 @@ app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanPdfRoutes);
 app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationRoutes);
 
 app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationPdfRoutes);
+
+// Was implemented (src/api/ledgerpdf.routes.js) but never mounted, so
+// every ledger "Print" click on the ledger detail page 404'd.
+app.use("/api/v1/ledger-pdf", ...requireSessionOrApiKey(), ledgerPdfRoutes);
 
 app.use("/api/gst/return-status", ...requireSessionOrApiKey(), gstReturnStatusRoutes);
 app.use(
