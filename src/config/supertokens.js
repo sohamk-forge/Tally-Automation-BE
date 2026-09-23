@@ -8,6 +8,7 @@ import Dashboard from "supertokens-node/recipe/dashboard/index.js";
 import { ensureLocalUserProfile } from "../services/userProfile.service.js";
 import { markInviteAccepted } from "../services/invite.service.js";
 import { sendSignupOtp } from "../services/otp.service.js";
+import { getApiDomain, getFrontendUrl } from "./env.js";
 
 export const initSupertokens = () => {
   supertokens.init({
@@ -18,8 +19,8 @@ export const initSupertokens = () => {
     },
     appInfo: {
       appName: "Tally Automation",
-      apiDomain: process.env.API_DOMAIN,
-      websiteDomain: process.env.FRONTEND_URL,
+      apiDomain: getApiDomain(),
+      websiteDomain: getFrontendUrl(),
       apiBasePath: "/auth",
       websiteBasePath: "/login",
     },

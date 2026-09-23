@@ -3,6 +3,7 @@ import cors from "cors";
 import supertokens from "supertokens-node";
 import { middleware as supertokensMiddleware, errorHandler as supertokensErrorHandler } from "supertokens-node/framework/express/index.js";
 import { initSupertokens } from "./config/supertokens.js";
+import { getStaticIp, getFrontendUrl } from "./config/env.js";
 import { requireSessionOrApiKey } from "./middleware/sessionOrApiKey.middleware.js";
 import { isQuietRoute } from "./utils/quietRoutes.js";
 
@@ -243,6 +244,9 @@ const allowedOrigins = [
   "http://192.168.0.7:5173",
   "http://100.91.212.45:5173",  // add every Tailscale IP you test from
   "http://103.215.115.12:5173",
+  `http://${getStaticIp()}:5173`,
+  `http://${getStaticIp()}`,
+  getFrontendUrl(),
 ];
 
 // Logs every incoming request before anything else touches it — including
