@@ -158,6 +158,10 @@ from "./api/vendorGstinMapping.routes.js";
 
  import connectorRoutes
 from "./api/connector.routes.js";
+import {
+  connectorInstallerLinkRouter,
+  connectorInstallerDownloadRouter
+} from "./api/connectorInstaller.routes.js";
 
 import connectorAuthRoutes from "./api/connectorAuth.routes.js";
 
@@ -287,6 +291,17 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(
   loggerMiddleware
 );
+
+/* =================================
+   CONNECTOR INSTALLER DOWNLOAD
+   /link verifies the session itself; /download/:token is public on purpose
+   (a plain browser navigation can't carry the session header) — the
+   single-use, 60s token is what authorises it.
+   Must stay above the app.use("/api", requireSessionOrApiKey()) mounts
+   below, which would otherwise reject the token URL before it is reached.
+================================= */
+app.use("/api/connector-installer", connectorInstallerLinkRouter);
+app.use("/api/connector-installer", connectorInstallerDownloadRouter);
 
 /* =================================
    DATABASE TEST API
