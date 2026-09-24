@@ -392,14 +392,23 @@ const worker = new Worker(
         ? JSON.parse(row.raw_json)
         : row.raw_json;
 
-      // Hard guards — the mapping is authoritative and overwrites whatever
-      // ledger name the request body sent, so it must never be blank when
-      // it's about to be used. A blank sales_ledger previously produced a
-      // bare <LEDGERNAME/> in the generated XML, which Tally rejected with
-      // a generic/misleading error instead of a clean validation message.
+      // The mapping's sales_ledger is authoritative, but it can legitimately
+      // be blank for a company that never set one (Sales Settings didn't
+      // collect it until recently; only Bulk Upload used to fill it in).
+      // Fall back to the ledger the user picked on this invoice rather than
+      // failing — it still goes through the same existence check in
+      // validateSalesInvoice below, so a bad name is caught there.
+      if (!mapping.sales_ledger?.trim() && invoice.sales_ledger?.trim()) {
+        mapping.sales_ledger = invoice.sales_ledger.trim();
+      }
+
+      // Hard guards — the value must never be blank when it's about to be
+      // used. A blank sales_ledger previously produced a bare <LEDGERNAME/>
+      // in the generated XML, which Tally rejected with a generic/misleading
+      // error instead of a clean validation message.
       if (!mapping.sales_ledger?.trim()) {
         throw new Error(
-          `Sales ledger mapping is missing for company ${row.company_id}`
+          `Sales ledger mapping is missing for company ${row.company_id}. Select a sales ledger on the invoice, or set one in Sales Settings.`
         );
       }
 

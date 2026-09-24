@@ -15,6 +15,7 @@ router.post("/sales-ledger-mapping", async (req, res) => {
     const {
       company_id,
       sales_parent_group,
+      sales_ledger,
       cgst_ledger,
       sgst_ledger,
       igst_ledger,
@@ -52,6 +53,9 @@ router.post("/sales-ledger-mapping", async (req, res) => {
           tds_ledger = $5,
           cess_ledger = $6,
           rounded_off_ledger = $7,
+          -- A blank value (older clients, or a form that didn't set it)
+          -- must not wipe a sales_ledger already saved, e.g. by Bulk Upload.
+          sales_ledger = COALESCE(NULLIF(TRIM($9), ''), sales_ledger),
           updated_at = NOW()
         WHERE company_id = $8
         `,
@@ -63,7 +67,8 @@ router.post("/sales-ledger-mapping", async (req, res) => {
           tds_ledger,
           cess_ledger,
           rounded_off_ledger,
-          company_id
+          company_id,
+          sales_ledger ?? ""
         ]
       );
 
@@ -84,9 +89,10 @@ router.post("/sales-ledger-mapping", async (req, res) => {
         igst_ledger,
         tds_ledger,
         cess_ledger,
-        rounded_off_ledger
+        rounded_off_ledger,
+        sales_ledger
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF(TRIM($9), ''))
       `,
       [
         company_id,
@@ -96,7 +102,8 @@ router.post("/sales-ledger-mapping", async (req, res) => {
         igst_ledger,
         tds_ledger,
         cess_ledger,
-        rounded_off_ledger
+        rounded_off_ledger,
+        sales_ledger ?? ""
       ]
     );
 
@@ -224,7 +231,7 @@ router.patch("/sales-ledger/:companyId", async (req, res) => {
       });
     }
 
-    await pool.query(
+    const updated = await pool.query(
       `
       UPDATE ${DB_SCHEMA}.company_sales_ledger_mappings
       SET
@@ -234,6 +241,13 @@ router.patch("/sales-ledger/:companyId", async (req, res) => {
       `,
       [sales_ledger, companyId]
     );
+
+    if (updated.rowCount === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: "Sales ledger mapping not found — save Sales Settings first"
+      });
+    }
 
     return res.json({
       status: "success",
