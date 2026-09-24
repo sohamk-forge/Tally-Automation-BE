@@ -149,5 +149,3 @@ machine-guid.txt
 
 sales_debug.xml
 
-# Connector installer served by /api/connector-installer (not stored in git)
-/downloads/

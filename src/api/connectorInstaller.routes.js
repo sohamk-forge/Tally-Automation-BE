@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { redisConnection } from "../config/redis.js";
 
@@ -17,14 +18,21 @@ Two-step so the ~100MB installer is downloaded natively by the browser
   2. GET  /api/connector-installer/download/:token  (public, token IS the auth)
      -> streams the installer as an attachment.
 
-The installer itself is not stored in git. Set CONNECTOR_INSTALLER_PATH to
-the .exe, or drop it into ./downloads (newest .exe there is served).
+The installer is committed under ./downloads, so a plain `git pull` on the
+server is all it takes. To serve a different file, set CONNECTOR_INSTALLER_PATH
+to it. If several installers are committed, the highest version in the file
+name wins.
 ====================================
 */
 
 const TOKEN_TTL_SECONDS = 60;
 const TOKEN_KEY_PREFIX = "connector-installer-token:";
-const DOWNLOADS_DIR = path.resolve(process.cwd(), "downloads");
+// Resolved from this file, not process.cwd(), so it works wherever the
+// server process is started from.
+const DOWNLOADS_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../downloads"
+);
 
 function resolveInstallerPath() {
   const configured = process.env.CONNECTOR_INSTALLER_PATH;
@@ -34,16 +42,14 @@ function resolveInstallerPath() {
 
   if (!fs.existsSync(DOWNLOADS_DIR)) return null;
 
-  const newest = fs
+  // Highest version wins ("1.0.10" beats "1.0.9"). Not by file time: a git
+  // checkout stamps every file with the checkout time.
+  const latest = fs
     .readdirSync(DOWNLOADS_DIR)
     .filter((name) => name.toLowerCase().endsWith(".exe"))
-    .map((name) => {
-      const full = path.join(DOWNLOADS_DIR, name);
-      return { full, mtime: fs.statSync(full).mtimeMs };
-    })
-    .sort((a, b) => b.mtime - a.mtime)[0];
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0];
 
-  return newest?.full ?? null;
+  return latest ? path.join(DOWNLOADS_DIR, latest) : null;
 }
 
 export const connectorInstallerLinkRouter = express.Router();
