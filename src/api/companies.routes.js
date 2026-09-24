@@ -394,6 +394,14 @@ router.patch("/:id/members/:memberId", async (req, res) => {
       return res.status(403).json({ status: "error", message: "Only an admin can change a member's role" });
     }
 
+    // The admin seat is single-seat, so an admin demoting themselves leaves
+    // the company with no admin (and revokes their own connector keys below),
+    // locking everyone out of Team & Access and the connector. Same rule as
+    // the remove-member route below.
+    if (String(memberId) === String(userId)) {
+      return res.status(400).json({ status: "error", message: "An admin cannot change their own role" });
+    }
+
     const seatCheck = await checkSeatAvailable(companyId, role, memberId);
     if (!seatCheck.available) {
       return res.status(409).json({
