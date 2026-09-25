@@ -11,7 +11,7 @@ import { DB_SCHEMA } from "../config/db.js";
 import { bulkPurchaseQueue, BULK_PURCHASE_JOB_OPTIONS, getPurchaseReportJobId, getSpareStatementJobId } from "../queues/bulkPurchase.queue.js";
 import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { requireFeature } from "../utils/featureFlags.js";
-import { computeBilledAmount } from "../workers/bulkPurchase.worker.js";
+import { computeBilledAmount, pushMatchedLinesToInvoices } from "../workers/bulkPurchase.worker.js";
 
 const FEATURE_KEY = "bulk_purchase_reconciliation";
 
@@ -52,6 +52,60 @@ async function resolveCompanyId(userId, companyName) {
   );
 
   return result.rows[0]?.id || null;
+}
+
+/* =========================================
+   PURCHASE LEDGER — the ledger Purchase Excel invoices are posted to.
+   Chosen from the ledgers directly under Tally's "Purchase Accounts"
+   group (no sub-groups) and stored per company in
+   company_ledger_mappings.purchase_excel_ledger.
+========================================= */
+async function listPurchaseLedgers(companyId) {
+  const result = await pool.query(
+    `
+    SELECT DISTINCT ledger_name
+    FROM ${DB_SCHEMA}.all_ledger_details
+    WHERE company_id = $1
+      AND LOWER(TRIM(parent_group)) = 'purchase accounts'
+      AND ledger_name IS NOT NULL
+      AND TRIM(ledger_name) <> ''
+    ORDER BY ledger_name
+    `,
+    [companyId]
+  );
+  return result.rows.map((r) => r.ledger_name);
+}
+
+async function getSelectedPurchaseLedger(companyId) {
+  const result = await pool.query(
+    `SELECT purchase_excel_ledger FROM ${DB_SCHEMA}.company_ledger_mappings WHERE company_id = $1`,
+    [companyId]
+  );
+  return result.rows[0]?.purchase_excel_ledger?.trim() || null;
+}
+
+// Only ledgers that really sit under Purchase Accounts are accepted — the
+// list is re-read on the server, never trusted from the browser.
+async function savePurchaseExcelLedger(companyId, requested) {
+  const wanted = String(requested || "").trim().toLowerCase();
+  const ledgers = await listPurchaseLedgers(companyId);
+  const match = ledgers.find((name) => name.trim().toLowerCase() === wanted);
+
+  if (!match) {
+    return { ok: false, message: "That ledger is not under Purchase Accounts for this company." };
+  }
+
+  await pool.query(
+    `
+    INSERT INTO ${DB_SCHEMA}.company_ledger_mappings (company_id, purchase_excel_ledger)
+    VALUES ($1, $2)
+    ON CONFLICT (company_id)
+    DO UPDATE SET purchase_excel_ledger = EXCLUDED.purchase_excel_ledger, updated_at = NOW()
+    `,
+    [companyId, match]
+  );
+
+  return { ok: true, ledger: match };
 }
 
 /* =========================================
@@ -101,6 +155,21 @@ router.post(
       if (!(await requireFeature(companyId, FEATURE_KEY, res))) {
         fs.unlink(req.file.path, () => {});
         return;
+      }
+
+      // The ledger picked in the upload dialog is saved first; a report
+      // can't be uploaded until the company has one, since every invoice
+      // made from it is posted to that ledger.
+      const pickedLedger = req.body.purchase_ledger?.trim();
+      if (pickedLedger) {
+        const saved = await savePurchaseExcelLedger(companyId, pickedLedger);
+        if (!saved.ok) {
+          fs.unlink(req.file.path, () => {});
+          return res.status(400).json({ status: "error", message: saved.message });
+        }
+      } else if (!(await getSelectedPurchaseLedger(companyId))) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ status: "error", message: "Select a purchase ledger before uploading." });
       }
 
       const batchId = Date.now();
@@ -197,6 +266,68 @@ router.post(
     }
   }
 );
+
+/* =========================================
+   Purchase ledger — list the choices + current selection
+========================================= */
+router.get("/bulk-purchase-upload/purchase-ledgers", verifySession(), async (req, res) => {
+  try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) return res.status(404).json({ status: "error", message: "No profile found for this account" });
+
+    const company = req.query.company?.trim();
+    if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
+
+    const companyId = await resolveCompanyId(userId, company);
+    if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
+
+    if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
+
+    const [ledgers, selected] = await Promise.all([
+      listPurchaseLedgers(companyId),
+      getSelectedPurchaseLedger(companyId)
+    ]);
+
+    return res.status(200).json({ status: "success", ledgers, selected });
+  } catch (error) {
+    console.error("Purchase ledgers list error:", error);
+    return res.status(500).json({ status: "error", message: error.message });
+  }
+});
+
+/* =========================================
+   Purchase ledger — save the selection, then release any matched invoices
+   that were being held because none was selected.
+========================================= */
+router.put("/bulk-purchase-upload/purchase-ledger", verifySession(), async (req, res) => {
+  try {
+    const userId = await getLocalUserId(req.session.getUserId());
+    if (!userId) return res.status(404).json({ status: "error", message: "No profile found for this account" });
+
+    const company = req.body.company?.trim();
+    const ledger = req.body.ledger?.trim();
+    if (!company || !ledger) {
+      return res.status(400).json({ status: "error", message: "company and ledger are required" });
+    }
+
+    const companyId = await resolveCompanyId(userId, company);
+    if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
+
+    if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
+
+    const saved = await savePurchaseExcelLedger(companyId, ledger);
+    if (!saved.ok) return res.status(400).json({ status: "error", message: saved.message });
+
+    pushMatchedLinesToInvoices(companyId).catch((err) =>
+      console.error("Releasing held Purchase Excel invoices failed:", err.message)
+    );
+
+    return res.status(200).json({ status: "success", ledger: saved.ledger });
+  } catch (error) {
+    console.error("Purchase ledger save error:", error);
+    return res.status(500).json({ status: "error", message: error.message });
+  }
+});
 
 /* =========================================
    Batch status — counts from purchase_po_lines for one upload's batchId.
