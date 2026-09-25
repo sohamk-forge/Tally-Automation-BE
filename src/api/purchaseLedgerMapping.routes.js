@@ -49,9 +49,7 @@ router.post("/ledger-mapping", async (req, res) => {
         `
         UPDATE ${DB_SCHEMA}.company_ledger_mappings
         SET
-          -- Saving the tax/group settings without a ledger must not wipe a
-          -- purchase ledger already chosen (e.g. on an invoice review).
-          purchase_ledger = COALESCE($1, purchase_ledger),
+          purchase_ledger = $1,
           invoice_parent_group = $2,
           cgst_ledger = $3,
           sgst_ledger = $4,
