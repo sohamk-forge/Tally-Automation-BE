@@ -57,19 +57,31 @@ async function resolveCompanyId(userId, companyName) {
 /* =========================================
    PURCHASE LEDGER — the ledger Purchase Excel invoices are posted to.
    Chosen from the ledgers directly under Tally's "Purchase Accounts"
-   group (no sub-groups) and stored per company in
+   group (no sub-groups), as picked up by the sync job, and stored per company in
    company_ledger_mappings.purchase_excel_ledger.
 ========================================= */
 async function listPurchaseLedgers(companyId) {
+  // Two places the sync job puts them: the dedicated PURCHASE/SALES LEDGERS
+  // step (Tally itself filters to children of "Purchase Accounts") and the
+  // general ALL LEDGERS step. Read both so the list doesn't depend on
+  // which of the two steps happened to succeed.
   const result = await pool.query(
     `
-    SELECT DISTINCT ledger_name
-    FROM ${DB_SCHEMA}.all_ledger_details
-    WHERE company_id = $1
-      AND LOWER(TRIM(parent_group)) = 'purchase accounts'
-      AND ledger_name IS NOT NULL
-      AND TRIM(ledger_name) <> ''
-    ORDER BY ledger_name
+    SELECT DISTINCT ON (LOWER(TRIM(ledger_name))) TRIM(ledger_name) AS ledger_name
+    FROM (
+      SELECT ledger_name
+      FROM ${DB_SCHEMA}.company_purchase_sales_ledgers
+      WHERE company_id = $1
+        AND ledger_type = 'PURCHASE'
+        AND LOWER(TRIM(parent_group)) = 'purchase accounts'
+      UNION ALL
+      SELECT ledger_name
+      FROM ${DB_SCHEMA}.all_ledger_details
+      WHERE company_id = $1
+        AND LOWER(TRIM(parent_group)) = 'purchase accounts'
+    ) l
+    WHERE ledger_name IS NOT NULL AND TRIM(ledger_name) <> ''
+    ORDER BY LOWER(TRIM(ledger_name))
     `,
     [companyId]
   );
