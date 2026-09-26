@@ -1080,9 +1080,11 @@ router.get("/voucher-sync", async (req, res) => {
   this must run AFTER voucher-sync — same ordering dependency as
   stock-group-gst-sync running before stock-group-summary-sync.
 
-  Non-Sales vouchers are skipped even if Tally somehow returns one,
-  since $VoucherTypeName = "Sales" is also enforced server-side in the
-  XML's SalesInvoiceDeliveryOnly formula (getSalesInvoiceDetailsXML).
+  Sales-only filtering happens Tally-side via $$IsSales:$VoucherTypeName
+  in the XML's SalesInvoiceDeliveryOnly formula (getSalesInvoiceDetailsXML),
+  so custom sales voucher types (e.g. "Sales GST") are included too. The
+  UPDATE matches on the exact voucher_type Tally returned, the same value
+  voucher-sync stored.
 =================================================== */
 router.get("/sales-invoice-details-sync", async (req, res) => {
   const company = req.query.company;
@@ -1214,12 +1216,10 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
   const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
   const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
 
-  if (!voucherNumber || !voucherDate) {
-    skipped++;
-    continue;
-  }
-
-  if (voucherTypeName && voucherTypeName.trim().toLowerCase() !== "sales") {
+  // Sales-only filtering is done Tally-side ($$IsSales in the XML), which
+  // also covers custom sales voucher types like "Sales GST" — a literal
+  // "sales" name check here would wrongly skip those.
+  if (!voucherNumber || !voucherDate || !voucherTypeName) {
     skipped++;
     continue;
   }
@@ -1263,9 +1263,9 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     WHERE company_id = $2
       AND voucher_number = $3
       AND voucher_date = $4
-      AND voucher_type = 'Sales'
+      AND voucher_type = $5
     `,
-    [JSON.stringify(deliveryNotes), companyId, voucherNumber, voucherDate]
+    [JSON.stringify(deliveryNotes), companyId, voucherNumber, voucherDate, voucherTypeName]
   );
 
   if (result.rowCount > 0) {

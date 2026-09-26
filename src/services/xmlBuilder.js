@@ -1733,8 +1733,12 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
             <NATIVEMETHOD>BasicShipDeliveryTerms</NATIVEMETHOD>
           </COLLECTION>
 
+          <!-- $$IsSales matches every voucher type whose base type is Sales
+               (e.g. "Sales GST", "Tax Invoice"), not only the one literally
+               named "Sales" - a plain name check returned nothing for
+               companies using custom sales voucher types. -->
           <SYSTEM TYPE="Formula" NAME="SalesInvoiceDeliveryOnly">
-            $VoucherTypeName = "Sales"
+            $$IsSales:$VoucherTypeName
           </SYSTEM>
         </TDLMESSAGE>
       </TDL>

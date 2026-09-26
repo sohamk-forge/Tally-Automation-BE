@@ -394,7 +394,7 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
     const roundOff = extractRoundOff(row.ledger_entries);
 
     // Only Sales rows ever get delivery_notes written (sales-invoice-
-    // details-sync filters to voucher_type = 'Sales'), but building this
+    // details-sync filters to Sales-type vouchers via $$IsSales), but building this
     // unconditionally means buildDeliveryDetails always returns a safe
     // all-empty-string shape for purchase rows or un-synced sales rows,
     // so the template never needs a null check.

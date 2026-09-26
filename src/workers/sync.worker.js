@@ -360,6 +360,18 @@ const worker = new Worker(
       jobLogId
     });
 
+    // Must run AFTER voucher-sync — this route only UPDATEs the
+    // delivery_notes column on voucher rows voucher-sync already inserted,
+    // it never inserts rows itself.
+    await runSyncStep({
+      label: "SALES INVOICE DELIVERY DETAILS",
+      path: "/api/sync/sales-invoice-details-sync",
+      params: { company, companyId, fromDate, toDate },
+      userId,
+      results,
+      jobLogId
+    });
+
     /* ===============================================
       FINAL SUMMARY LOG
     =============================================== */
