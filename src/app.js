@@ -204,7 +204,7 @@ import accountRoutes
 import challanPdfRoutes from "./api/challanpdf.routes.js";
 import quotationRoutes from "./api/quotation.routes.js";
 import quotationPdfRoutes from "./api/quotationpdf.routes.js";
-import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
+
 
 import companyLogoRoutes
 from "./api/companyLogo.routes.js";
