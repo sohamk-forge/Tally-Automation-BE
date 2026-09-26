@@ -1,0 +1,188 @@
+import express from "express";
+import pool from "../db/index.js";
+
+import { DB_SCHEMA } from "../config/db.js";
+const router = express.Router();
+
+const TOP_LEDGERS_LIMIT = 3;
+
+async function getCompanyInfo(companyId, companyName) {
+  let result;
+
+  if (companyName) {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM ${DB_SCHEMA}.companies
+       WHERE LOWER(name) = LOWER($1)
+       ORDER BY (SELECT COUNT(*) FROM ${DB_SCHEMA}.vouchers v WHERE v.company_id = companies.id) DESC, id DESC
+       LIMIT 1`,
+      [companyName]
+    );
+  } else {
+    result = await pool.query(
+      `SELECT id, name, financial_year_start, financial_year_end
+       FROM ${DB_SCHEMA}.companies
+       WHERE id = $1`,
+      [companyId]
+    );
+  }
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  if (!row.financial_year_start) {
+    const now = new Date();
+    const y = now.getFullYear();
+    return {
+      id: row.id,
+      name: row.name,
+      yearStart: `${y}-04-01`,
+      yearEnd: `${y + 1}-04-01`,
+      fyLabel: `${y}-${y + 1}`
+    };
+  }
+
+  const startYear = Number(row.financial_year_start);
+  // Some company books span more than one FY (e.g. start 2025, end 2027);
+  // never end earlier than start + 1.
+  const storedEnd = Number(row.financial_year_end);
+  const endYear = Number.isFinite(storedEnd) && storedEnd > startYear + 1 ? storedEnd : startYear + 1;
+
+  return {
+    id: row.id,
+    name: row.name,
+    yearStart: `${startYear}-04-01`,
+    yearEnd: `${endYear}-04-01`,
+    fyLabel: `${startYear}-${endYear}`
+  };
+}
+
+/* ===================================================
+   TOP SELLING ITEMS — parsed from ledger_entries
+   (INVENTORYALLOCATIONS.LIST -> STOCKITEMNAME/AMOUNT)
+=================================================== */
+async function getTopSellingItems(companyId, yearStart, yearEnd) {
+  const result = await pool.query(
+    // Extract just the inventory lines in SQL — shipping every voucher's full
+    // ledger_entries JSON over the network is what made this endpoint slow.
+    `SELECT jsonb_path_query_array(ledger_entries, '$[*]."INVENTORYALLOCATIONS.LIST"') AS inventory_lines
+     FROM ${DB_SCHEMA}.vouchers
+     WHERE company_id = $1
+       AND DATE(voucher_date) >= $2
+       AND DATE(voucher_date) < $3
+       AND LOWER(voucher_type) LIKE '%sales%'
+       AND LOWER(voucher_type) NOT LIKE '%return%'
+       AND LOWER(voucher_type) NOT LIKE '%credit note%'
+       AND LOWER(voucher_type) NOT LIKE '%debit note%'
+       AND deleted_at IS NULL`,
+    [companyId, yearStart, yearEnd]
+  );
+
+  const itemMap = new Map();
+
+  for (const row of result.rows) {
+    const inventoryLines = row.inventory_lines || [];
+
+    for (const inventory of inventoryLines) {
+      if (!inventory) continue;
+
+      const itemName = inventory.STOCKITEMNAME;
+      const amount = Math.abs(Number(inventory.AMOUNT) || 0);
+
+      if (!itemName) continue;
+
+      if (!itemMap.has(itemName)) {
+        itemMap.set(itemName, {
+          item_name: itemName,
+          total_sales: 0,
+          voucher_count: 0
+        });
+      }
+
+      const item = itemMap.get(itemName);
+      item.total_sales += amount;
+      item.voucher_count++;
+    }
+  }
+
+  const allItems = [...itemMap.values()].sort(
+    (a, b) => b.total_sales - a.total_sales
+  );
+
+  const grandTotal = allItems.reduce(
+    (sum, item) => sum + item.total_sales,
+    0
+  );
+
+  const topItems = allItems.slice(0, TOP_LEDGERS_LIMIT).map((item, index) => ({
+    rank: index + 1,
+    item_name: item.item_name,
+    total_sales: Number(item.total_sales.toFixed(2)),
+    voucher_count: item.voucher_count,
+    percentage:
+      grandTotal > 0
+        ? Number(((item.total_sales / grandTotal) * 100).toFixed(2))
+        : 0
+  }));
+
+  return {
+    topItems,
+    grandTotal: Number(grandTotal.toFixed(2)),
+    totalVoucherCount: allItems.reduce(
+      (sum, item) => sum + item.voucher_count,
+      0
+    )
+  };
+}
+
+router.get("/top-sales-ledgers", async (req, res) => {
+  try {
+    const companyId = req.query.company_id;
+    const companyName = req.query.company;
+
+    if (!companyId && !companyName) {
+      return res.status(400).json({
+        status: "error",
+        message: "company_id or company query parameter is required"
+      });
+    }
+
+    const companyInfo = await getCompanyInfo(companyId, companyName);
+
+    if (!companyInfo) {
+      return res.status(404).json({
+        status: "error",
+        message: "Company not found"
+      });
+    }
+
+    const { id, name: company, yearStart, yearEnd, fyLabel } = companyInfo;
+
+    const { topItems, grandTotal, totalVoucherCount } =
+       await getTopSellingItems(id, yearStart, yearEnd);
+
+    return res.status(200).json({
+      status: "success",
+      source: "database",
+      company_id: id,
+      company,
+      financial_year: fyLabel,
+      financial_year_start: yearStart,
+      financial_year_end: yearEnd,
+      voucher_count: totalVoucherCount,
+      grand_total_sales: grandTotal,
+      top_items_count: topItems.length,
+      data: topItems
+    });
+
+  } catch (err) {
+    console.error("❌ TOP SALES ITEMS ERROR:", err.message);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
+export default router;

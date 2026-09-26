@@ -1,0 +1,150 @@
+import express from "express";
+import db from "../db/index.js";
+import { DB_SCHEMA } from "../config/db.js";
+import { normalizeVoucherRow } from "../services/voucherPdf.service.js";
+import { renderVoucherPdf } from "../services/voucherPdfRenderer.service.js";
+import { getCompanyInfo } from "../services/companyInfo.service.js";
+
+const router = express.Router();
+
+/* ==========================================================
+   Mount this router at: app.use("/api/v1/voucher", ...requireSessionOrApiKey(), voucherPdfRoutes)
+
+   GET /api/v1/voucher?company_id=1&voucher_type=Journal&party_ledger_name=Rohit%20Kadam&from=2025-01-01&to=2026-12-31
+     -> lists vouchers (grouped by voucher_type) for the transactions table
+
+   GET /api/v1/voucher/:id/pdf
+     -> generates and streams back the PDF for one voucher row.
+        HSN/SAC codes for line items are looked up from
+        <schema>.stock_group_summary (by company_id + stock item name),
+        NOT read from the voucher's ledger_entries JSON.
+   ========================================================== */
+
+// ---- LIST: GET /api/v1/voucher ----
+router.get("/", async (req, res) => {
+  try {
+    const { company_id, party_ledger_name, voucher_type, from, to } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({ error: "Query params 'from' and 'to' (YYYY-MM-DD) are required" });
+    }
+
+    const conditions = ["deleted_at IS NULL"];
+    const params = [];
+
+    if (company_id) {
+      params.push(company_id);
+      conditions.push(`company_id = $${params.length}`);
+    }
+    if (party_ledger_name) {
+      params.push(party_ledger_name);
+      conditions.push(`party_ledger_name = $${params.length}`);
+    }
+    if (voucher_type) {
+      params.push(voucher_type);
+      conditions.push(`voucher_type ILIKE $${params.length}`);
+    }
+    params.push(from);
+    conditions.push(`voucher_date >= $${params.length}`);
+    params.push(to);
+    conditions.push(`voucher_date <= $${params.length}`);
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const sql = `
+      SELECT id, company_id, company_name, voucher_date, voucher_type, voucher_number,
+             party_ledger_name, narration, debit_amount, credit_amount, balance
+      FROM ${DB_SCHEMA}.vouchers
+      ${whereClause}
+      ORDER BY voucher_date ASC, id ASC
+    `;
+
+    const result = await db.query(sql, params);
+
+    // Group by voucher_type so the UI can render separate sections per type
+    const grouped = {};
+    for (const row of result.rows) {
+      const key = row.voucher_type || "Other";
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(row);
+    }
+
+    return res.json({ success: true, data: grouped });
+  } catch (err) {
+    console.error("GET /api/v1/voucher error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Builds a { [stock_item_name]: hsn_code } lookup map for a company from
+ * the stock_group_summary table.
+ *
+ * NOTE: adjust column names here (stock_item_name / hsn_code) if your
+ * actual stock_group_summary schema uses different names.
+ */
+async function buildHsnMap(companyId) {
+  const hsnResult = await db.query(
+    `SELECT item_name, hsn_code
+     FROM ${DB_SCHEMA}.stock_group_summary
+     WHERE company_id = $1`,
+    [companyId]
+  );
+
+  const hsnMap = {};
+  for (const r of hsnResult.rows) {
+    if (r.item_name) {
+      hsnMap[r.item_name] = r.hsn_code || "";
+    }
+  }
+  return hsnMap;
+}
+
+// ---- PDF: GET /api/v1/voucher/:id/pdf ----
+router.get("/:id/pdf", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "Voucher id is required" });
+    }
+
+    const result = await db.query(
+      `SELECT * FROM ${DB_SCHEMA}.vouchers WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [id]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return res.status(404).json({ error: `Voucher with id ${id} not found` });
+    }
+    if (!row.company_id) {
+      return res.status(422).json({ error: `Voucher ${id} has no company_id - cannot resolve letterhead` });
+    }
+
+    const companyInfo = await getCompanyInfo(row.company_id);
+
+    // HSN/SAC codes come exclusively from stock_group_summary, matched by
+    // stock item name -- not from the voucher's ledger_entries JSON.
+    const hsnMap = await buildHsnMap(row.company_id);
+
+    const voucher = normalizeVoucherRow(row, companyInfo, hsnMap);
+
+    if (!voucher.templateKey) {
+      return res.status(422).json({
+        error: `Voucher type "${voucher.voucherType}" is not one of the supported layouts (Contra, Journal, Payment, Receipt, Purchase, Sales)`,
+      });
+    }
+
+    const pdfBuffer = await renderVoucherPdf(voucher);
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${voucher.voucherType}_${voucher.voucherNumber}.pdf"`,
+      "Content-Length": pdfBuffer.length,
+    });
+    return res.end(pdfBuffer);
+  } catch (err) {
+    console.error("GET /api/v1/voucher/:id/pdf error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
