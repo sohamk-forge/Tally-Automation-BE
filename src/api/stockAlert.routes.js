@@ -3,7 +3,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-// import { checkCompanyAccess } from "../utils/companyAccess.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -68,28 +68,16 @@ router.post(
          COMPANY
       ============================== */
 
-      const companyResult =
-        await pool.query(
+      // Resolved among the caller's own companies only — a global name
+      // match could pick another tenant's company with the same name.
+      const companyId = await resolveOwnedCompanyByName(req, data.company);
 
-          `
-          SELECT id
-          FROM ${DB_SCHEMA}.companies
-          WHERE TRIM(name)=TRIM($1)
-          LIMIT 1
-          `,
-
-          [data.company]
-
-        );
-
-      if (companyResult.rows.length === 0) {
+      if (!companyId) {
         return res.status(404).json({
           status: "error",
           message: `Company not found: ${data.company}`
         });
       }
-
-      const companyId = companyResult.rows[0].id;
 
       // const hasAccess = await checkCompanyAccess(userId, companyId);
       // if (!hasAccess) {
@@ -110,8 +98,13 @@ router.post(
           SELECT id
           FROM ${DB_SCHEMA}.stock_alerts
           WHERE
-            LOWER(TRIM(company_name))
-              = LOWER(TRIM($1))
+            (
+              company_id = $3
+              OR (
+                company_id IS NULL
+                AND LOWER(TRIM(company_name)) = LOWER(TRIM($1))
+              )
+            )
           AND
             LOWER(TRIM(item_name))
               = LOWER(TRIM($2))
@@ -120,7 +113,8 @@ router.post(
 
           [
             data.company,
-            data.item_name
+            data.item_name,
+            companyId
           ]
 
         );

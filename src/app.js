@@ -4,6 +4,13 @@ import supertokens from "supertokens-node";
 import { middleware as supertokensMiddleware, errorHandler as supertokensErrorHandler } from "supertokens-node/framework/express/index.js";
 import { initSupertokens } from "./config/supertokens.js";
 import { requireSessionOrApiKey } from "./middleware/sessionOrApiKey.middleware.js";
+import { requireCompanyAccess } from "./middleware/companyAccess.middleware.js";
+
+// Auth + tenant guard: every company_id / companyId / x-company-id /
+// company name on the request must belong to the caller (see
+// companyAccess.middleware.js). Routers that check access themselves are
+// on its skip list.
+const requireSessionAndCompany = () => [...requireSessionOrApiKey(), requireCompanyAccess];
 import { isQuietRoute } from "./utils/quietRoutes.js";
 
 initSupertokens();
@@ -311,7 +318,7 @@ app.use("/api/connector-installer", connectorInstallerDownloadRouter);
 
 app.use(
   "/api/db",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   db
 );
 
@@ -321,7 +328,7 @@ app.use(
 
 app.use(
   "/api/companies",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   companies
 );
 
@@ -331,7 +338,7 @@ app.use(
 
 app.use(
   "/api/ledgers",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   ledgers
 );
 
@@ -341,7 +348,7 @@ app.use(
 
 app.use(
   "/api/sync",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   syncRoutes
 );
 
@@ -351,7 +358,7 @@ app.use(
 
 app.use(
   "/api/group-summary-bank",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   groupSummaryBank
 );
 
@@ -381,7 +388,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   ledgerVouchersRoutes
 );
 
@@ -391,7 +398,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   bankInterestRoutes
 );
 
@@ -401,13 +408,13 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   parentGroupsRoutes
 );
 
 app.use(
   "/api/all-parent-groups",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   allParentGroupsRoutes
 );
 
@@ -417,7 +424,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   payableDebtorsRoutes
 );
 
@@ -427,7 +434,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   profitLossRoutes
 );
 
@@ -437,7 +444,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   salesItemsRoutes
 );
 
@@ -447,7 +454,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   stockGroupSummaryRoute
 );
 
@@ -457,7 +464,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   invoiceCalculationRoutes
 );
 
@@ -467,7 +474,7 @@ app.use(
 
 app.use(
   "/api/units",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   unitsRoutes
 );
 
@@ -477,13 +484,13 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   stockAlertRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pullStockAlertRoutes
 );
 /* =================================
@@ -492,139 +499,139 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pushLedgerRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pushBankRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pushOdBankRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   invoiceRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   salesInvoiceRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pushStockItemRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   pushStockItemOpeningRoutes
 );
 
 app.use(
   "/api/all-ledger-details",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   allLedgerDetailsRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   bulkStockItemRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   purchaseLedgerMappingRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   salesLedgerMappingRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   purchaseSalesLedgerRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   godownRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   bulkSalesUploadRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   bulkPurchaseUploadRoutes
 );
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   vendorGstinMappingRoutes
 );
 
 /* =================================
    VOUCHER APIs
 ================================= */
-app.use("/api/v1/voucher", ...requireSessionOrApiKey(), voucherRoutes);
+app.use("/api/v1/voucher", ...requireSessionAndCompany(), voucherRoutes);
 
-app.use("/api/v1/sales", ...requireSessionOrApiKey(), salesAccountRoutes);
+app.use("/api/v1/sales", ...requireSessionAndCompany(), salesAccountRoutes);
 
-app.use("/api/v1/purchase", ...requireSessionOrApiKey(), purchaseAccountRoutes);
+app.use("/api/v1/purchase", ...requireSessionAndCompany(), purchaseAccountRoutes);
 
-app.use("/api/v1/stock", ...requireSessionOrApiKey(), stockInHandRoutes);
+app.use("/api/v1/stock", ...requireSessionAndCompany(), stockInHandRoutes);
 
-app.use("/api/v1/trends", ...requireSessionOrApiKey(), trendsRouter);
+app.use("/api/v1/trends", ...requireSessionAndCompany(), trendsRouter);
 
-app.use("/api/v1", ...requireSessionOrApiKey(), topSalesLedgersRouter);
+app.use("/api/v1", ...requireSessionAndCompany(), topSalesLedgersRouter);
 
-app.use("/api/v1", ...requireSessionOrApiKey(), monthlySalesTrendRouter);
+app.use("/api/v1", ...requireSessionAndCompany(), monthlySalesTrendRouter);
 
-app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanRoutes);
+app.use("/api/v1/challan", ...requireSessionAndCompany(), challanRoutes);
 
-app.use("/api/purchase-validation", ...requireSessionOrApiKey(), purchaseValidationRoutes);
+app.use("/api/purchase-validation", ...requireSessionAndCompany(), purchaseValidationRoutes);
 
 app.use(
   "/api/v1/voucher",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   voucherPdfRoutes
 );
 
-app.use("/api/v1/proforma", ...requireSessionOrApiKey(), proformaRoutes);
+app.use("/api/v1/proforma", ...requireSessionAndCompany(), proformaRoutes);
 
-app.use("/api/v1/delivery-person", ...requireSessionOrApiKey(), deliveryPersonRoutes);
-app.use("/api/v1/site", ...requireSessionOrApiKey(), siteRoutes);
+app.use("/api/v1/delivery-person", ...requireSessionAndCompany(), deliveryPersonRoutes);
+app.use("/api/v1/site", ...requireSessionAndCompany(), siteRoutes);
 
-app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
+app.use("/api/users", ...requireSessionAndCompany(), userRoutes);
 
-app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
+app.use("/api/gst/auth", ...requireSessionAndCompany(), gstAuthRoutes);
 
 app.use(
   "/api/v1/ledger-pdf",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   ledgerPdfRoutes
 );
 /* =================================
@@ -633,7 +640,7 @@ app.use(
 
 app.use(
   "/api/invites",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   invitesRoutes
 );
 
@@ -654,24 +661,24 @@ app.use(
 
 app.use(
   "/api/account",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   accountRoutes
 );
 
-app.use("/api/v1/challan", ...requireSessionOrApiKey(), challanPdfRoutes); 
+app.use("/api/v1/challan", ...requireSessionAndCompany(), challanPdfRoutes); 
 
-app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationRoutes);
+app.use("/api/v1/quotation", ...requireSessionAndCompany(), quotationRoutes);
 
-app.use("/api/v1/quotation", ...requireSessionOrApiKey(), quotationPdfRoutes);
+app.use("/api/v1/quotation", ...requireSessionAndCompany(), quotationPdfRoutes);
 
 // Was implemented (src/api/ledgerpdf.routes.js) but never mounted, so
 // every ledger "Print" click on the ledger detail page 404'd.
-app.use("/api/v1/ledger-pdf", ...requireSessionOrApiKey(), ledgerPdfRoutes);
+app.use("/api/v1/ledger-pdf", ...requireSessionAndCompany(), ledgerPdfRoutes);
 
-app.use("/api/gst/return-status", ...requireSessionOrApiKey(), gstReturnStatusRoutes);
+app.use("/api/gst/return-status", ...requireSessionAndCompany(), gstReturnStatusRoutes);
 app.use(
   "/api/companies",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   companyLogoRoutes
 );
 

@@ -1582,6 +1582,9 @@ router.get("/payable-debtors", async (req, res) => {
     =================================================== */
 
     router.get("/all-parent-groups", async (req, res) => {
+      const userId = await requireUser(req, res);
+      if (!userId) return;
+
       const company = req.query.company;
       const groupName = req.query.groupName;
       
@@ -1596,14 +1599,18 @@ router.get("/payable-debtors", async (req, res) => {
       try {
         await client.query("BEGIN");
         
-        // Get company_id using helper
-        const companyId = await getCompanyId(company, client);
-        if (!companyId) {
-          throw new Error("Company not found");
+        // Get company_id using helper — scoped to this user's own companies.
+        // (Was called as getCompanyId(company, client), shifting every
+        // argument by one, so it always failed; and it had no ownership check.)
+        const companyId = await getCompanyId(userId, company, client);
+        if (!companyId || !(await userOwnsCompany(userId, companyId, client))) {
+          await client.query("ROLLBACK");
+          return res.status(404).json({ status: "error", message: "Company not found" });
         }
-        
+
         const xml = getAllParentGroupDetailsXML(company, groupName);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        // The resolved user, not a client-supplied x-user-id header.
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
         const parsed = await parseXML(responseXML);
         
         const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];

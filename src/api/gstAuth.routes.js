@@ -16,8 +16,12 @@ import {
   verifyGstOtp,
   getGstConnectionStatus,
 } from "../services/gstAuth.service.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
+
+// Every :companyId in this router must belong to the caller.
+router.param("companyId", companyParamGuard);
 
 /**
  * Resolve "who made this request" as a local numeric user id, whichever

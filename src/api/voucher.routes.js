@@ -21,6 +21,7 @@ import {
   enqueueExtraction
 } from "../services/statementExtraction.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
+import { assertCompanyRefs, ownedCompaniesSql, resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 
 const router = express.Router();
@@ -607,6 +608,8 @@ router.post(
           message: "company_id, company_name and bank_ledger are required"
         });
       }
+      // Multipart body — parsed by multer after the app-level company guard ran.
+      if (!(await assertCompanyRefs(req, res, { ids: [company_id], names: [company_name] }))) return;
       if (!bank_name) {
         return res.status(400).json({
           success: false,
@@ -942,6 +945,13 @@ router.get("/suggest-party-ledger", async (req, res) => {
       });
     }
 
+    // company_name alone would also match another tenant's same-named
+    // company, so pin the suggestions to the caller's own company id.
+    const ownedCompanyId = await resolveOwnedCompanyByName(req, company_name);
+    if (!ownedCompanyId) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
     const trimmedNarration = narration && narration.trim() ? narration.trim() : null;
     const normalizedNarration = trimmedNarration ? trimmedNarration.toLowerCase() : null;
     const narrationPattern = trimmedNarration ? `%${trimmedNarration}%` : null;
@@ -956,6 +966,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
           voucher_date
         FROM app_test.vouchers
         WHERE company_name = $1
+          AND company_id = $4
           AND party_ledger_name IS NOT NULL
           AND narration ILIKE $2
           AND deleted_at IS NULL
@@ -968,6 +979,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
         SELECT party_ledger, narration, voucher_date
         FROM app_test.contra_vouchers
         WHERE company_name = $1
+          AND company_id = $4
           AND party_ledger IS NOT NULL
           AND status = 'SUCCESS'
         ${vouchersBranch}
@@ -988,7 +1000,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
       ORDER BY match_tier DESC, usage_count DESC, last_used DESC
       LIMIT 5
       `,
-      [company_name, narrationPattern, normalizedNarration]
+      [company_name, narrationPattern, normalizedNarration, ownedCompanyId]
     );
 
     if (!result.rows.length) {
@@ -1122,11 +1134,16 @@ router.get("/waiting-ledger", async (req, res) => {
 router.get("/all", async (req, res) => {
   try {
     const { company_id } = req.query;
+    // company_id used to be optional here, which returned every company's
+    // vouchers when omitted.
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
     const result = await db.query(
       `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
-       ${company_id ? "WHERE company_id = $1" : ""}
+       WHERE company_id = $1
        ORDER BY id DESC`,
-      company_id ? [company_id] : []
+      [company_id]
     );
     return res.status(200).json({ success: true, data: result.rows });
   } catch (err) {
@@ -1241,6 +1258,7 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
        status        = 'PENDING'
      WHERE id = $6
        AND status IN ('WAITING_LEDGER', 'FAILED')
+       AND company_id IN (${ownedCompaniesSql("$5")})
      RETURNING *`,
     [v.party_ledger, v.voucher_type.toLowerCase(),
      isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
@@ -1408,6 +1426,11 @@ router.put("/bulk-party-ledger", async (req, res) => {
 
 router.put("/:id/party-ledger", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const forcePushFlag = req.body.forcePush === true;
     const vouchers = [{
       id: Number(req.params.id),
@@ -1415,7 +1438,7 @@ router.put("/:id/party-ledger", async (req, res) => {
       voucher_type: req.body.voucher_type
     }];
 
-    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag, userId);
     return res.status(status).json(body);
 
   } catch (err) {
@@ -1450,6 +1473,7 @@ router.post("/:id/confirm-push", async (req, res) => {
            user_id = $2
        WHERE id = $1
          AND status IN ('WAITING_LEDGER', 'FAILED', 'DUPLICATE_FOUND')
+         AND company_id IN (${ownedCompaniesSql("$2")})
        RETURNING *`,
       [voucherId, userId]
     );
@@ -1481,7 +1505,23 @@ router.post("/:id/confirm-push", async (req, res) => {
 
 router.post("/:id/cancel-push", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const voucherId = Number(req.params.id);
+
+    // Ownership first — the queued job must not be removed for a voucher
+    // that belongs to another company.
+    const owned = await db.query(
+      `SELECT 1 FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [voucherId, userId]
+    );
+    if (owned.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Voucher not found" });
+    }
 
     const jobId = getVoucherJobId(voucherId);
     const existingJob = await voucherQueue.getJob(jobId);
@@ -1528,9 +1568,15 @@ router.post("/:id/cancel-push", async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const result = await db.query(
-      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`,
-      [req.params.id]
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [req.params.id, userId]
     );
 
     if (result.rows.length === 0) {

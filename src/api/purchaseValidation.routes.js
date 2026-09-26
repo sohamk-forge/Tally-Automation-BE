@@ -6,6 +6,7 @@ import FormData from "form-data";
 import fs from "fs";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 const router = express.Router();
 
@@ -38,7 +39,7 @@ Buckets:
   - matched_items  -> item IS in the DB with enough stock to cover what's required
 =========================================
 */
-async function validateItemsAgainstStock(company, extracted_items) {
+async function validateItemsAgainstStock(company, extracted_items, req) {
 
   if (!company) {
     return {
@@ -54,17 +55,9 @@ async function validateItemsAgainstStock(company, extracted_items) {
     };
   }
 
-  // Find company
-  const companyResult = await pool.query(
-    `
-    SELECT id
-    FROM ${DB_SCHEMA}.companies
-    WHERE TRIM(name) = TRIM($1)
-    `,
-    [company]
-  );
-
-  const companyId = companyResult.rows[0]?.id;
+  // Find company — among the caller's own companies only (a global name
+  // match could resolve to another tenant's same-named company).
+  const companyId = await resolveOwnedCompanyByName(req, company);
 
   if (!companyId) {
     return {
@@ -245,7 +238,7 @@ router.post(
       }));
 
       // Run shared validation logic
-      const result = await validateItemsAgainstStock(company, extracted_items);
+      const result = await validateItemsAgainstStock(company, extracted_items, req);
 
       return res.status(result.httpStatus).json({
         ...result.body,
@@ -282,7 +275,7 @@ router.post("/validate", async (req, res) => {
   try {
     const { company, extracted_items } = req.body;
 
-    const result = await validateItemsAgainstStock(company, extracted_items);
+    const result = await validateItemsAgainstStock(company, extracted_items, req);
 
     return res.status(result.httpStatus).json(result.body);
 

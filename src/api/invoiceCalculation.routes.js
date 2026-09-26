@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
 
@@ -134,9 +135,12 @@ router.post("/invoice/calculate", async (req, res) => {
       }
       companyName = (companyRow.rows[0].name || "").trim();
     } else if (companyNameParam) {
+      // Among the caller's own companies only — a global name match could
+      // resolve to another tenant's same-named company.
+      const ownedCompanyId = await resolveOwnedCompanyByName(req, companyNameParam);
       const companyRow = await pool.query(
-        `SELECT id, name FROM ${DB_SCHEMA}.companies WHERE lower(trim(name)) = lower(trim($1)) LIMIT 1`,
-        [companyNameParam]
+        `SELECT id, name FROM ${DB_SCHEMA}.companies WHERE id = $1`,
+        [ownedCompanyId]
       );
       if (!companyRow.rows.length) {
         return res.status(404).json({ status: "error", message: `Company '${companyNameParam}' not found` });

@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { ownedCompaniesSql } from "../middleware/companyAccess.middleware.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
 import { markChallansInvoiced } from "../services/challan.service.js";
 import { markQuotationsPushed } from "../services/quotation.service.js";
@@ -650,15 +651,17 @@ router.delete("/sales-invoice-delete", async (req, res) => {
       });
     }
 
-    // Check existing invoices
+    // Check existing invoices — only ones in the caller's own companies
     const existing = await pool.query(
       `
-      SELECT id 
+      SELECT id
       FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
+        AND company_id IN (${ownedCompaniesSql("$2")})
       `,
-      [invoice_ids]
+      [invoice_ids, userId]
     );
+    const ownedIds = existing.rows.map((r) => r.id);
 
     if (existing.rows.length === 0) {
       return res.status(404).json({
@@ -679,21 +682,21 @@ router.delete("/sales-invoice-delete", async (req, res) => {
       }
     }
 
-    // Bulk delete
+    // Bulk delete — restricted to the ids verified above
     await pool.query(
       `
       DELETE FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
       `,
-      [invoice_ids]
+      [ownedIds]
     );
 
-    console.log(`Deleted invoices: ${invoice_ids.join(", ")}`);
+    console.log(`Deleted invoices: ${ownedIds.join(", ")}`);
 
     return res.status(200).json({
       status: "success",
       message: "Invoices deleted successfully",
-      deleted_invoice_ids: invoice_ids.map(Number)
+      deleted_invoice_ids: ownedIds.map(Number)
     });
 
   } catch (err) {
@@ -1093,8 +1096,9 @@ router.post("/sales-invoices/:id/resolve-state-mismatch", async (req, res) => {
     }
 
     const invoiceResult = await pool.query(
-      `SELECT id, raw_json, error_message, sync_status FROM app_test.sales_invoice_extractions WHERE id = $1`,
-      [id]
+      `SELECT id, raw_json, error_message, sync_status FROM app_test.sales_invoice_extractions
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [id, userId]
     );
 
     const row = invoiceResult.rows[0];

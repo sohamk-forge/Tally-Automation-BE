@@ -6,8 +6,12 @@
 
 import express from "express";
 import { checkReturnStatus, getLatestReturnStatus } from "../services/gstReturnStatus.service.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
+
+// Every :companyId in this router must belong to the caller.
+router.param("companyId", companyParamGuard);
 
 /* =========================================
    CHECK RETURN STATUS (hits WhiteBooks, stores a new row)

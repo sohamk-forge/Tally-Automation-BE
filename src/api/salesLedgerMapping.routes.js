@@ -2,7 +2,12 @@ import express from "express";
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
+
 const router = express.Router();
+
+// Every :companyId in this router must belong to the caller.
+router.param("companyId", companyParamGuard);
 
 /*
 ====================================

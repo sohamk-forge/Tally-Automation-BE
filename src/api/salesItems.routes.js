@@ -3,6 +3,7 @@ import express from "express";
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 const router = express.Router();
 
 /* ===================================================
@@ -43,6 +44,25 @@ router.get(
 
       }
 
+      // company_name alone matches every tenant with that name — scope to
+      // the caller's own company id (legacy rows without company_id still
+      // match by name).
+      const companyId =
+        await resolveOwnedCompanyByName(req, company);
+
+      if (!companyId) {
+
+        return res.status(404).json({
+
+          status: "error",
+
+          message:
+            "Company not found"
+
+        });
+
+      }
+
       const result =
 
         await pool.query(
@@ -68,12 +88,15 @@ router.get(
 
         FROM ${DB_SCHEMA}.sales_items
 
-          WHERE company_name = $1
+          WHERE (
+            company_id = $2
+            OR (company_id IS NULL AND company_name = $1)
+          )
 
           ORDER BY id DESC
           `,
 
-          [company]
+          [company, companyId]
 
         );
 

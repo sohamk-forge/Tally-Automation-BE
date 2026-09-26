@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 const router = express.Router();
 
 /* ===================================================
@@ -178,7 +179,10 @@ router.get("/monthly-sales-trend", async (req, res) => {
       });
     }
 
-    const companyInfo = await getCompanyInfo(companyId, companyName);
+    // A name is resolved among the caller's own companies only — the old
+    // global name lookup could pick another tenant's same-named company.
+    const ownedCompanyId = companyId || (await resolveOwnedCompanyByName(req, companyName));
+    const companyInfo = ownedCompanyId ? await getCompanyInfo(ownedCompanyId, null) : null;
 
     if (!companyInfo) {
       return res.status(404).json({
