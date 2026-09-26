@@ -22,7 +22,7 @@
             getCompanyDetailsXML,
             getCompanyGSTDetailsXML,
             getGodownsXML,
-            getSalesGroupXML, getPurchaseGroupXML,
+            getSalesGroupXML, getPurchaseGroupXML,getSalesInvoiceDetailsXML ,
         
     } from "../services/xmlBuilder.js";
     import { parseXML } from "../services/parser.js";
@@ -1063,6 +1063,280 @@ router.get("/voucher-sync", async (req, res) => {
   }
 });
 
+/* ===================================================
+  SALES INVOICE DELIVERY / DISPATCH DETAILS SYNC
+  ---------------------------------------------------
+  Sales-only. Populates app_test.vouchers.delivery_notes (jsonb) with
+  the printed-invoice header block: Reference No. & Date, Other
+  References, Mode/Terms of Payment, Buyer's Order No. & Date, Delivery
+  Note & Delivery Note Date, Dispatch Doc No., Dispatched Through,
+  Destination, Terms of Delivery.
+
+  DEPENDS ON /voucher-sync HAVING ALREADY RUN for the same
+  company/fromDate/toDate: this route only UPDATEs rows that
+  /voucher-sync already inserted (matched on company_id + voucher_number
+  + voucher_date, the same key voucher-sync upserts on), it never
+  inserts new voucher rows itself. In the sync worker's step sequence
+  this must run AFTER voucher-sync — same ordering dependency as
+  stock-group-gst-sync running before stock-group-summary-sync.
+
+  Non-Sales vouchers are skipped even if Tally somehow returns one,
+  since $VoucherTypeName = "Sales" is also enforced server-side in the
+  XML's SalesInvoiceDeliveryOnly formula (getSalesInvoiceDetailsXML).
+=================================================== */
+router.get("/sales-invoice-details-sync", async (req, res) => {
+  const company = req.query.company;
+  const fromDate = req.query.fromDate;
+  const toDate = req.query.toDate;
+
+  if (!company || !fromDate || !toDate) {
+    return res.status(400).json({
+      status: "error",
+      message: "company, fromDate and toDate required",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    // ---------------------------------------------------------
+    // USER
+    // ---------------------------------------------------------
+
+    const userId = await requireUser(req, res);
+
+    if (!userId) {
+      return;
+    }
+
+    // ---------------------------------------------------------
+    // TRANSACTION
+    // ---------------------------------------------------------
+
+    await client.query("BEGIN");
+
+    // ---------------------------------------------------------
+    // COMPANY
+    // ---------------------------------------------------------
+
+    const companyId = await getCompanyId(
+      userId,
+      company,
+      client,
+      req.query.companyId
+    );
+
+    if (!companyId) {
+      throw new Error("Company not found");
+    }
+
+    const owns = await userOwnsCompany(
+      userId,
+      companyId,
+      client
+    );
+
+    if (!owns) {
+      await client.query("ROLLBACK");
+
+      return res.status(403).json({
+        status: "error",
+        message: "This company is not paired with your account.",
+      });
+    }
+
+    // ---------------------------------------------------------
+    // BUILD TALLY XML
+    // ---------------------------------------------------------
+
+    const xml = getSalesInvoiceDetailsXML(
+      company,
+      fromDate,
+      toDate
+    );
+
+    console.log(
+      "📤 SALES INVOICE DETAILS XML REQUEST:"
+    );
+
+    console.log(xml);
+
+    // ---------------------------------------------------------
+    // SEND TO TALLY THROUGH CONNECTOR
+    // ---------------------------------------------------------
+
+    const responseXML = await sendToTallyViaConnector(
+      companyId,
+      xml,
+      "sync",
+      userId
+    );
+
+    // ---------------------------------------------------------
+    // PARSE XML
+    // ---------------------------------------------------------
+
+    const parsed = await parseXML(responseXML);
+
+    // ---------------------------------------------------------
+    // GET VOUCHERS
+    // ---------------------------------------------------------
+
+    const collection =
+      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
+
+    const list = Array.isArray(collection)
+      ? collection
+      : [collection];
+
+    console.log(
+      `📦 Sales vouchers received from Tally: ${list.length}`
+    );
+
+    // ---------------------------------------------------------
+    // COUNTERS
+    // ---------------------------------------------------------
+
+    let updated = 0;
+    let notFound = 0;
+    let skipped = 0;
+
+    // ---------------------------------------------------------
+    // PROCESS EACH SALES VOUCHER
+    // ---------------------------------------------------------
+
+       // Small helper: Tally sub-lists can come back as a single object or
+    // an array depending on how many entries exist — always normalize.
+    const firstOf = (v) => (Array.isArray(v) ? v[0] : v || null);
+
+   for (const voucher of list) {
+  const voucherNumber = clean(voucher?.VOUCHERNUMBER);
+  const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+  const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
+
+  if (!voucherNumber || !voucherDate) {
+    skipped++;
+    continue;
+  }
+
+  if (voucherTypeName && voucherTypeName.trim().toLowerCase() !== "sales") {
+    skipped++;
+    continue;
+  }
+
+  // NATIVEMETHOD returns flat scalar fields directly on the voucher —
+  // no INVOICEDELNOTES.LIST / INVOICEORDERLIST.LIST nesting to unwrap.
+ const deliveryNotes = {
+  reference_no: clean(voucher?.REFERENCE),
+  reference_date: clean(voucher?.REFERENCEDATE),
+  other_references: clean(voucher?.OTHERREFERENCE),
+
+  // Was reading BASICPAYMENTTERMS / PAYMENTMODE - neither exists as a
+  // real Tally method, so this always came back blank. BASICDUEDATEOFPYMT
+  // is the field that actually holds the printed "Mode/Terms of Payment"
+  // value (e.g. "Cash"), confirmed against your test XML's live output.
+  mode_terms_of_payment: clean(voucher?.BASICDUEDATEOFPYMT),
+
+  buyers_order_no: clean(voucher?.BASICPURCHASEORDERNO),
+  buyers_order_date: clean(voucher?.BASICORDERDATE),
+  order_reference: clean(voucher?.BASICORDERREF),
+
+  delivery_note: clean(voucher?.BASICSHIPDELIVERYNOTE),
+  delivery_note_date: clean(voucher?.BASICSHIPPINGDATE),
+
+  dispatch_doc_no: clean(voucher?.BASICSHIPDOCUMENTNO),
+  dispatched_through: clean(voucher?.BASICSHIPPEDBY),
+  vessel_no: clean(voucher?.BASICSHIPVESSELNO),
+  vessel_date: clean(voucher?.BASICSHIPVESSELDATE),
+
+  destination: clean(voucher?.BASICSHIPDESTINATION),
+  final_destination: clean(voucher?.BASICFINALDESTINATION),
+
+  terms_of_delivery: clean(voucher?.BASICSHIPDELIVERYTERMS)
+};
+  const result = await client.query(
+    `
+    UPDATE app_test.vouchers
+    SET
+      delivery_notes = $1::jsonb,
+      updated_at = NOW()
+    WHERE company_id = $2
+      AND voucher_number = $3
+      AND voucher_date = $4
+      AND voucher_type = 'Sales'
+    `,
+    [JSON.stringify(deliveryNotes), companyId, voucherNumber, voucherDate]
+  );
+
+  if (result.rowCount > 0) {
+    updated++;
+  } else {
+    notFound++;
+    console.log(`⚠️ Voucher not found in DB: ${voucherNumber} / ${voucherDate}`);
+  }
+}
+    // ---------------------------------------------------------
+    // COMMIT
+    // ---------------------------------------------------------
+
+    await client.query("COMMIT");
+
+    // ---------------------------------------------------------
+    // RESPONSE
+    // ---------------------------------------------------------
+
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+
+      message:
+        "Sales invoice delivery details synced successfully",
+
+      company,
+      fromDate,
+      toDate,
+
+      summary: {
+        total: list.length,
+        updated,
+        notFound,
+        skipped,
+      },
+    });
+
+  } catch (err) {
+
+    // ---------------------------------------------------------
+    // ROLLBACK
+    // ---------------------------------------------------------
+
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error(
+        "❌ ROLLBACK ERROR:",
+        rollbackError.message
+      );
+    }
+
+    console.log(
+      "❌ SALES INVOICE DELIVERY DETAILS SYNC ERROR:",
+      err.message
+    );
+
+    console.error(err);
+
+    return res.status(500).json({
+      status: "error",
+      message: err.message,
+    });
+
+  } finally {
+
+    client.release();
+
+  }
+});
 /* ===================================================
   PARENT GROUPS SYNC
 =================================================== */
