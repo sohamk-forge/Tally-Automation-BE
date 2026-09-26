@@ -81,6 +81,14 @@ table.info-table td.value {
   text-align: left;
 }
 
+/* Delivery/dispatch details grid on the Sales Invoice - reuses info-table's
+   look, but values here (order refs, dispatch text, destinations) can be
+   longer than the voucher-no/date row, so allow wrapping instead of the
+   nowrap used above. */
+table.delivery-details-table td {
+  white-space: normal;
+}
+
   /* ---- Consignee / Buyer block ---- */
   .party-block { display: flex; border-bottom: 1px solid #000; }
   .party-block .half { flex: 1; padding: 6px 8px; }
@@ -175,6 +183,65 @@ function invoiceFooterHtml(company) {
 
 function wrap(bodyHtml) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8" />${SHARED_STYLE}</head><body><div class="sheet">${bodyHtml}</div></body></html>`;
+}
+
+/**
+ * Renders the dispatch/delivery details grid that sits between the
+ * buyer/consignee block and the item table on a Sales Invoice — mirrors
+ * the standard Tally layout: Delivery Note / Mode-Terms of Payment,
+ * Reference No. & Date. / Other References, Buyer's Order No. / Dated,
+ * Dispatch Doc No. / Delivery Note Date, Dispatched through / Destination,
+ * Terms of Delivery (full width).
+ *
+ * `d` is the deliveryDetails object built by voucherPdf.service.js's
+ * buildDeliveryDetails() — always present with every key as at least an
+ * empty string, even for rows synced before sales-invoice-details-sync
+ * ran, so this renders a blank-but-correctly-shaped grid rather than
+ * being skipped.
+ */
+function buildDeliveryDetailsHtml(d) {
+  if (!d) return "";
+  return `
+<table class="info-table delivery-details-table">
+  <colgroup>
+    <col style="width:24%"><col style="width:26%">
+    <col style="width:24%"><col style="width:26%">
+  </colgroup>
+  <tr>
+    <td class="label">Delivery Note :</td>
+    <td class="value">${esc(d.deliveryNote)}</td>
+    <td class="label">Mode/Terms of Payment :</td>
+    <td class="value">${esc(d.modeTermsOfPayment)}</td>
+  </tr>
+  <tr>
+    <td class="label">Reference No. &amp; Date. :</td>
+    <td class="value">${esc(d.referenceDisplay)}</td>
+    <td class="label">Other References :</td>
+    <td class="value">${esc(d.otherReferences)}</td>
+  </tr>
+  <tr>
+    <td class="label">Buyer's Order No. :</td>
+    <td class="value">${esc(d.buyersOrderNo)}</td>
+    <td class="label">Dated :</td>
+    <td class="value">${esc(d.buyersOrderDate)}</td>
+  </tr>
+  <tr>
+    <td class="label">Dispatch Doc No. :</td>
+    <td class="value">${esc(d.dispatchDocNo)}</td>
+    <td class="label">Delivery Note Date :</td>
+    <td class="value">${esc(d.deliveryNoteDate)}</td>
+  </tr>
+  <tr>
+    <td class="label">Dispatched through :</td>
+    <td class="value">${esc(d.dispatchedThrough)}</td>
+    <td class="label">Destination :</td>
+    <td class="value">${esc(d.destination)}</td>
+  </tr>
+  <tr>
+    <td class="label">Terms of Delivery :</td>
+    <td class="value" colspan="3">${esc(d.termsOfDelivery)}</td>
+  </tr>
+</table>`;
 }
 
 // ---------- round off row builder shared by purchase + sales ----------
@@ -786,6 +853,7 @@ const roundOffRow = buildRoundOffRowHtml(actualRoundOff);
         <div>Place of Supply : ${esc(v.placeOfSupply)}</div>
       </div>
     </div>
+    ${buildDeliveryDetailsHtml(v.deliveryDetails)}
     <table class="data-table">
       ${ITEMS_TABLE_COLGROUP}
       <tr>

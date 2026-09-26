@@ -1677,4 +1677,70 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
  </BODY>
 </ENVELOPE>
   `;
-};
+};export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>SalesInvoiceDetails</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVFROMDATE TYPE="Date">${fromDate}</SVFROMDATE>
+        <SVTODATE TYPE="Date">${toDate}</SVTODATE>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="SalesInvoiceDetails" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
+            <TYPE>Voucher</TYPE>
+            <FILTER>SalesInvoiceDeliveryOnly</FILTER>
+
+            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+            <NATIVEMETHOD>Date</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+
+            <NATIVEMETHOD>Reference</NATIVEMETHOD>
+            <NATIVEMETHOD>ReferenceDate</NATIVEMETHOD>
+            <NATIVEMETHOD>OtherReference</NATIVEMETHOD>
+
+            <!-- Confirmed live against a real Tally instance: Mode/Terms
+                 of Payment on the printed invoice comes from
+                 BasicDueDateOfPymt (e.g. "Cash"), NOT BasicPaymentTerms
+                 or PaymentMode - neither of those is a real Tally voucher
+                 method, so they always returned blank. -->
+            <NATIVEMETHOD>BasicDueDateOfPymt</NATIVEMETHOD>
+
+            <NATIVEMETHOD>BasicPurchaseOrderNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicOrderDate</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicOrderRef</NATIVEMETHOD>
+
+            <NATIVEMETHOD>BasicShipDeliveryNote</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShippingDate</NATIVEMETHOD>
+
+            <NATIVEMETHOD>BasicShipDocumentNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShippedBy</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipVesselNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipVesselDate</NATIVEMETHOD>
+
+            <NATIVEMETHOD>BasicShipDestination</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicFinalDestination</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipDeliveryTerms</NATIVEMETHOD>
+          </COLLECTION>
+
+          <SYSTEM TYPE="Formula" NAME="SalesInvoiceDeliveryOnly">
+            $VoucherTypeName = "Sales"
+          </SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+    <DATA></DATA>
+  </BODY>
+</ENVELOPE>
+`;
+}

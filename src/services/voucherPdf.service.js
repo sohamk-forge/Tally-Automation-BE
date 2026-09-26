@@ -4,7 +4,8 @@
  * Pure data-shaping logic: takes a raw row from app_test.vouchers
  * (columns: id, company_name, voucher_date, voucher_type, voucher_number,
  * party_ledger_name, narration, debit_amount, credit_amount, balance,
- * parent_group, guid, master_id, alter_id, company_id, ledger_entries jsonb)
+ * parent_group, guid, master_id, alter_id, company_id, ledger_entries jsonb,
+ * delivery_notes jsonb)
  * and returns the view-model each PDF template needs.
  *
  * ledger_entries jsonb is the raw Tally export array, e.g.:
@@ -13,6 +14,14 @@
  *   { LEDGERNAME, AMOUNT, "INVENTORYALLOCATIONS.LIST": { STOCKITEMNAME, RATE, AMOUNT, ACTUALQTY, BILLEDQTY, ... } },
  *   ...
  * ]
+ *
+ * delivery_notes jsonb (Sales vouchers only, written by
+ * sales-invoice-details-sync) holds the printed-invoice dispatch/delivery
+ * header block: reference_no, reference_date, other_references,
+ * mode_terms_of_payment, buyers_order_no, buyers_order_date,
+ * order_reference, delivery_note, delivery_note_date, dispatch_doc_no,
+ * dispatched_through, vessel_no, vessel_date, destination,
+ * final_destination, terms_of_delivery.
  *
  * HSN/SAC codes are NOT read from ledger_entries. They are looked up from
  * the `stock_group_summary` table by stock item name, via the `hsnMap`
@@ -43,6 +52,57 @@ function formatDate(dateValue) {
   const dd = String(d.getUTCDate()).padStart(2, "0");
   const yy = String(d.getUTCFullYear()).slice(2);
   return `${dd}-${months[d.getUTCMonth()]}-${yy}`;
+}
+
+/**
+ * Formats Tally's raw YYYYMMDD date strings (as stored in delivery_notes,
+ * e.g. "20260418") into "18-Apr-26". Distinct from formatDate() above,
+ * which expects a real Date-parseable value (used for voucher_date).
+ * Returns the raw/blank string for anything unparseable rather than
+ * throwing, since most delivery_notes fields are optional and often
+ * missing or blank.
+ */
+function formatTallyDateStr(value) {
+  const s = String(value || "").trim();
+  const m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return s; // blank, or not a plain YYYYMMDD string
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const [, year, month, day] = m;
+  const monthIdx = Number(month) - 1;
+  if (monthIdx < 0 || monthIdx > 11) return s;
+  return `${day}-${months[monthIdx]}-${year.slice(2)}`;
+}
+
+/**
+ * Shapes the raw delivery_notes jsonb column into the flat, pre-formatted
+ * fields the Sales Invoice template's dispatch/delivery block reads.
+ * Always returns every key (empty string if missing) so the template can
+ * render the fixed Tally-style grid without null checks, even for rows
+ * synced before this column existed or before sales-invoice-details-sync
+ * has run for that voucher.
+ */
+function buildDeliveryDetails(deliveryNotes) {
+  const d = deliveryNotes || {};
+  const referenceNo = d.reference_no || "";
+  const referenceDate = formatTallyDateStr(d.reference_date);
+
+  return {
+    // Printed as one combined cell in Tally, e.g. "TESTGST006 dt. 14-Sep-26".
+    referenceDisplay: referenceNo
+      ? `${referenceNo}${referenceDate ? ` dt. ${referenceDate}` : ""}`
+      : "",
+    otherReferences: d.other_references || "",
+    modeTermsOfPayment: d.mode_terms_of_payment || "",
+    buyersOrderNo: d.buyers_order_no || "",
+    buyersOrderDate: formatTallyDateStr(d.buyers_order_date),
+    dispatchDocNo: d.dispatch_doc_no || "",
+    dispatchedThrough: d.dispatched_through || "",
+    deliveryNote: d.delivery_note || "",
+    deliveryNoteDate: formatTallyDateStr(d.delivery_note_date),
+    destination: d.destination || "",
+    finalDestination: d.final_destination || "",
+    termsOfDelivery: d.terms_of_delivery || "",
+  };
 }
 
 /** Maps voucher_type text to the EJS/HTML template key. Keyword match, not
@@ -333,6 +393,13 @@ export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
     const additionalCharges = extractAdditionalCharges(row.ledger_entries, row.party_ledger_name);
     const roundOff = extractRoundOff(row.ledger_entries);
 
+    // Only Sales rows ever get delivery_notes written (sales-invoice-
+    // details-sync filters to voucher_type = 'Sales'), but building this
+    // unconditionally means buildDeliveryDetails always returns a safe
+    // all-empty-string shape for purchase rows or un-synced sales rows,
+    // so the template never needs a null check.
+    const deliveryDetails = buildDeliveryDetails(row.delivery_notes);
+
     if (items.length === 0) {
       // Fallback: no itemized lines available, show one summary line.
       // HSN still comes from hsnMap if the narration/party happens to match
@@ -370,6 +437,7 @@ const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
       cgst,
       sgst,
       igst,
+      deliveryDetails,
     };
   }
 

@@ -218,6 +218,8 @@ import gstAuthRoutes from "./api/gstAuth.routes.js";
 import emailVerificationRoutes from "./api/emailVerification.routes.js";
 
 import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
+
+import ledgerPdfRoutes from "./api/ledgerPdf.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -603,6 +605,12 @@ app.use("/api/v1/site", ...requireSessionOrApiKey(), siteRoutes);
 app.use("/api/users", ...requireSessionOrApiKey(), userRoutes);
 
 app.use("/api/gst/auth", ...requireSessionOrApiKey(), gstAuthRoutes);
+
+app.use(
+  "/api/v1/ledger-pdf",
+  ...requireSessionOrApiKey(),
+  ledgerPdfRoutes
+);
 /* =================================
    INVITE APIs
 ================================= */
