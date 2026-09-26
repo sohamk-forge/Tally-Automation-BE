@@ -406,7 +406,7 @@ export async function processSpareStatementJob(job) {
    the rows themselves) so it can also run as startup recovery with no
    job context at all.
    ===================================================================== */
-async function pushMatchedLinesToInvoices(companyId) {
+export async function pushMatchedLinesToInvoices(companyId) {
   const linesResult = await pool.query(
     `
     SELECT * FROM ${DB_SCHEMA}.purchase_po_lines
@@ -417,6 +417,21 @@ async function pushMatchedLinesToInvoices(companyId) {
   );
 
   if (!linesResult.rows.length) return [];
+
+  // Every Purchase Excel invoice is posted to the ledger the company picked
+  // (Purchase Accounts group). With none picked, hold the matched lines
+  // instead of pushing invoices that would fail in Tally — they go out as
+  // soon as a ledger is saved (see PUT /bulk-purchase-upload/purchase-ledger).
+  const ledgerResult = await pool.query(
+    `SELECT purchase_excel_ledger FROM ${DB_SCHEMA}.company_ledger_mappings WHERE company_id = $1`,
+    [companyId]
+  );
+  const purchaseLedger = ledgerResult.rows[0]?.purchase_excel_ledger?.trim();
+
+  if (!purchaseLedger) {
+    console.warn(`[BULK-PURCHASE] Holding ${linesResult.rows.length} matched line(s) for company ${companyId} — no Purchase Excel ledger selected yet`);
+    return [];
+  }
 
   const companyResult = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
   const companyName = companyResult.rows[0]?.name || "";
@@ -505,6 +520,7 @@ async function pushMatchedLinesToInvoices(companyId) {
       grand_total: roundedGrandTotal,
       round_off: roundOff,
       narration,
+      purchase_ledger: purchaseLedger,
       po_numbers: poNumbers,
       odn_numbers: odnNumbers,
       godown_name: first.godown_name || ""

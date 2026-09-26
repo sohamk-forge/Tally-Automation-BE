@@ -2,7 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 import { getCompanyMemberRole, checkSeatAvailable } from "../utils/companyMembers.js";
-import { PAGE_KEYS, EDITABLE_ROLES, getRolePermissionMatrix, getEnabledPagesForRole } from "../utils/pagePermissions.js";
+import { PAGE_KEYS, EDITABLE_PAGE_KEYS, ADMIN_ONLY_PAGE_KEYS, EDITABLE_ROLES, getRolePermissionMatrix, getEnabledPagesForRole } from "../utils/pagePermissions.js";
 import { getEnabledFeatureKeys } from "../utils/featureFlags.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -60,7 +60,7 @@ router.get("/", async (req, res) => {
        INNER JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
            ON c.id = cpt.company_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE`,
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL`,
       [userId]
     );
 
@@ -83,7 +83,7 @@ router.get("/", async (req, res) => {
            ON m.company_name = c.name
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL
        ORDER BY c.id DESC
        LIMIT $2 OFFSET $3`,
       [userId, limit, offset]
@@ -143,7 +143,7 @@ router.get("/:id", async (req, res) => {
           AND m.user_id = cpt.user_id
        WHERE c.id = $1
          AND cpt.user_id = $2
-         AND cpt.is_used = TRUE`,
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL`,
       [id, userId]
     );
 
@@ -198,7 +198,7 @@ router.get("/all/list", async (req, res) => {
            ON m.company_name = c.name
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
-         AND cpt.is_used = TRUE
+         AND cpt.is_used = TRUE AND c.archived_at IS NULL
        ORDER BY c.id DESC`,
       [userId]
     );
@@ -258,7 +258,8 @@ router.get("/:id/my-role", async (req, res) => {
    ROLE PAGE PERMISSIONS — admin-only. Controls which pages Accountant and
    Staff can see, per company. Admin is intentionally not represented here
    at all (always full access) and "team" (Team & Access) is intentionally
-   not in PAGE_KEYS (always admin-only) — neither is ever toggle-able.
+   not in PAGE_KEYS (always admin-only). "dashboard" is likewise admin-only
+   (ADMIN_ONLY_PAGE_KEYS) — none of these is ever toggle-able.
 ========================================= */
 router.get("/:id/role-permissions", async (req, res) => {
   try {
@@ -274,7 +275,7 @@ router.get("/:id/role-permissions", async (req, res) => {
     }
 
     const matrix = await getRolePermissionMatrix(companyId);
-    return res.json({ status: "success", data: { pages: PAGE_KEYS, matrix } });
+    return res.json({ status: "success", data: { pages: EDITABLE_PAGE_KEYS, matrix } });
   } catch (err) {
     console.log("ROLE PERMISSIONS GET ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
@@ -294,7 +295,10 @@ router.patch("/:id/role-permissions", async (req, res) => {
     if (!EDITABLE_ROLES.includes(role)) {
       return res.status(400).json({ status: "error", message: `role must be one of: ${EDITABLE_ROLES.join(", ")}` });
     }
-    if (!PAGE_KEYS.includes(pageKey)) {
+    if (ADMIN_ONLY_PAGE_KEYS.includes(pageKey)) {
+      return res.status(400).json({ status: "error", message: `${pageKey} is admin-only and cannot be granted to another role` });
+    }
+    if (!EDITABLE_PAGE_KEYS.includes(pageKey)) {
       return res.status(400).json({ status: "error", message: "Unknown pageKey" });
     }
     if (typeof enabled !== "boolean") {
@@ -317,7 +321,7 @@ router.patch("/:id/role-permissions", async (req, res) => {
     );
 
     const matrix = await getRolePermissionMatrix(companyId);
-    return res.json({ status: "success", data: { pages: PAGE_KEYS, matrix } });
+    return res.json({ status: "success", data: { pages: EDITABLE_PAGE_KEYS, matrix } });
   } catch (err) {
     console.log("ROLE PERMISSIONS PATCH ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
@@ -392,6 +396,14 @@ router.patch("/:id/members/:memberId", async (req, res) => {
     const callerRole = await getCompanyMemberRole(userId, companyId);
     if (callerRole !== "admin") {
       return res.status(403).json({ status: "error", message: "Only an admin can change a member's role" });
+    }
+
+    // The admin seat is single-seat, so an admin demoting themselves leaves
+    // the company with no admin (and revokes their own connector keys below),
+    // locking everyone out of Team & Access and the connector. Same rule as
+    // the remove-member route below.
+    if (String(memberId) === String(userId)) {
+      return res.status(400).json({ status: "error", message: "An admin cannot change their own role" });
     }
 
     const seatCheck = await checkSeatAvailable(companyId, role, memberId);

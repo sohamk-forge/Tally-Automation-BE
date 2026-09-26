@@ -6,12 +6,15 @@ const router = express.Router();
 
 router.get("/closing-balance", async (req, res) => {
   try {
-    const { company } = req.query;
+    const company = req.query.company;
+    // Prefer company_id: several companies rows can share one name (one per
+    // user pairing), so a name lookup can return another row's balance.
+    const companyId = req.query.company_id ? Number(req.query.company_id) : null;
 
-    if (!company) {
+    if (!companyId && !company) {
       return res.status(400).json({
         success: false,
-        message: "company query parameter is required"
+        message: "company_id or company query parameter is required"
       });
     }
 
@@ -23,17 +26,17 @@ router.get("/closing-balance", async (req, res) => {
     const result = await pool.query(
       `SELECT closing_balance, opening_balance, updated_at
          FROM ${DB_SCHEMA}.group_balances
-        WHERE LOWER(company_name) = LOWER($1)
+        WHERE ${companyId ? "company_id = $1" : "LOWER(company_name) = LOWER($1)"}
           AND LOWER(REPLACE(group_name, ' ', '-')) = 'stock-in-hand'
         ORDER BY updated_at DESC
         LIMIT 1`,
-      [company]
+      [companyId || company]
     );
 
     if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: `No "Stock-in-Hand" group balance found for "${company}". Run /payable-debtors sync first.`
+        message: `No "Stock-in-Hand" group balance found for "${companyId || company}". Run /payable-debtors sync first.`
       });
     }
 
@@ -41,6 +44,7 @@ router.get("/closing-balance", async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      company_id: companyId,
       company,
       stock_value: Math.abs(Number(closing_balance)),
       opening_stock_value: Math.abs(Number(opening_balance)),

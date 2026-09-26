@@ -44,7 +44,10 @@ async function getCompanyInfo(companyId, companyName) {
   }
 
   const startYear = Number(row.financial_year_start);
-  const endYear = startYear + 1;
+  // Some company books span more than one FY (e.g. start 2025, end 2027);
+  // never end earlier than start + 1.
+  const storedEnd = Number(row.financial_year_end);
+  const endYear = Number.isFinite(storedEnd) && storedEnd > startYear + 1 ? storedEnd : startYear + 1;
 
   return {
     id: row.id,
@@ -60,12 +63,16 @@ async function getCompanyInfo(companyId, companyName) {
 =================================================== */
 async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
   const result = await pool.query(
-    `SELECT id, voucher_date, voucher_type, voucher_number,
-            party_ledger_name, ledger_entries, debit_amount, credit_amount
+    // Only sales vouchers are used, and ledger_entries (a large JSON blob) is
+    // only needed when both debit and credit are 0.
+    `SELECT voucher_date, voucher_type, debit_amount, credit_amount,
+            CASE WHEN COALESCE(debit_amount, 0) = 0 AND COALESCE(credit_amount, 0) = 0
+                 THEN ledger_entries END AS ledger_entries
        FROM ${DB_SCHEMA}.vouchers
       WHERE company_id = $1
         AND DATE(voucher_date) >= $2
-        AND DATE(voucher_date) < $3`,
+        AND DATE(voucher_date) < $3
+        AND deleted_at IS NULL`,
     [companyId, yearStart, yearEnd]
   );
 

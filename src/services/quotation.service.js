@@ -662,3 +662,27 @@ export async function updateQuotationStatus(quotationId, companyId, status) {
 
   return result.rows[0] || null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: markQuotationsPushed
+// Called once a Sales Invoice is successfully created/queued against one or
+// more approved quotations, so they stop showing up in "Bills to be Made".
+// Matches by quotation_number (that's all the invoice payload carries),
+// scoped to the company so numbers can't collide across tenants. Only FINAL
+// (approved) quotations transition — mirrors challan.service.js#markChallansInvoiced.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function markQuotationsPushed(companyId, quotationNumbers) {
+  const numbers = [...new Set((quotationNumbers || []).map((n) => String(n || "").trim()).filter(Boolean))];
+  if (!numbers.length) return 0;
+
+  const result = await pool.query(
+    `UPDATE ${DB_SCHEMA}.quotations
+     SET status = 'PUSHED_TO_TALLY', pushed_to_tally_at = NOW(), updated_at = NOW()
+     WHERE company_id = $1 AND quotation_number = ANY($2) AND status = 'FINAL'
+     RETURNING id`,
+    [companyId, numbers]
+  );
+
+  return result.rowCount;
+}

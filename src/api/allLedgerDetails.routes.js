@@ -27,10 +27,24 @@ router.get("/", async (req, res) => {
 
     }
 
+    // Only the columns the ledger list page (Ledger.jsx) actually renders —
+    // SELECT * was shipping every column (address, guid, master_id, alter_id,
+    // timestamps, ...) for every ledger on every load/poll.
     const result = await pool.query(
 
       `
-      SELECT *
+      SELECT
+        ledger_name,
+        parent_group,
+        gst_number,
+        state,
+        opening_balance,
+        closing_balance,
+        address,
+        primary_phone_number,
+        email,
+        pan_number,
+        gst_registration_type
 
       FROM ${DB_SCHEMA}.all_ledger_details
 

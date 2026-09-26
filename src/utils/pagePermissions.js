@@ -25,6 +25,17 @@ export const PAGE_KEYS = [
 
 export const EDITABLE_ROLES = ["accountant", "staff"];
 
+// Pages only an admin can ever see. They stay in PAGE_KEYS (so admin's
+// enabledPages still includes them) but are never part of the editable
+// matrix, and are never returned for accountant/staff — even if an old
+// override row for them exists in company_role_permissions.
+export const ADMIN_ONLY_PAGE_KEYS = ["dashboard"];
+
+// The pages the Team & Access matrix is allowed to grant/revoke.
+export const EDITABLE_PAGE_KEYS = PAGE_KEYS.filter(
+  (k) => !ADMIN_ONLY_PAGE_KEYS.includes(k)
+);
+
 // Returns { accountant: { pageKey: bool, ... }, staff: { ... } } — every
 // page defaults to enabled unless an explicit override row says otherwise.
 export async function getRolePermissionMatrix(companyId) {
@@ -39,11 +50,11 @@ export async function getRolePermissionMatrix(companyId) {
 
   const matrix = {};
   for (const r of EDITABLE_ROLES) {
-    matrix[r] = Object.fromEntries(PAGE_KEYS.map((k) => [k, true]));
+    matrix[r] = Object.fromEntries(EDITABLE_PAGE_KEYS.map((k) => [k, true]));
   }
 
   for (const row of result.rows) {
-    if (matrix[row.role]) {
+    if (matrix[row.role] && EDITABLE_PAGE_KEYS.includes(row.page_key)) {
       matrix[row.role][row.page_key] = row.enabled;
     }
   }
@@ -72,5 +83,5 @@ export async function getEnabledPagesForRole(companyId, role) {
     result.rows.filter((r) => r.enabled === false).map((r) => r.page_key)
   );
 
-  return PAGE_KEYS.filter((k) => !disabled.has(k));
+  return EDITABLE_PAGE_KEYS.filter((k) => !disabled.has(k));
 }

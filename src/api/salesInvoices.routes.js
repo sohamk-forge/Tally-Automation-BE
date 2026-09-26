@@ -4,6 +4,7 @@ import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
 import { markChallansInvoiced } from "../services/challan.service.js";
+import { markQuotationsPushed } from "../services/quotation.service.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 
 const router = express.Router();
@@ -485,6 +486,17 @@ router.post("/sales-invoices", async (req, res) => {
       } catch (markErr) {
         // Non-fatal — the invoice itself already succeeded and is queued.
         console.error("Failed to mark challans as invoiced:", markErr.message);
+      }
+
+      // The same "number" list may instead be an approved quotation's
+      // quotation_number (Bills to be Made also queues FINAL quotations) —
+      // this only matches rows in the quotations table, so it's a no-op
+      // whenever the numbers above were real delivery challans.
+      try {
+        const pushed = await markQuotationsPushed(companyId, deliveryChallanNumbers);
+        console.log(`Marked ${pushed} quotation(s) as pushed to Tally:`, deliveryChallanNumbers);
+      } catch (markErr) {
+        console.error("Failed to mark quotations as pushed to Tally:", markErr.message);
       }
     }
 

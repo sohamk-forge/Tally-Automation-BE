@@ -79,6 +79,7 @@ router.get("/bank-interest-summary", async (req, res) => {
             OR LOWER(narration) LIKE '%int.coll%'
             OR LOWER(narration) LIKE '%o/d int%'
           )
+          AND deleted_at IS NULL
         ORDER BY voucher_date
         `,
         [companyId, fromDate, toDate, bank.ledger_name]
