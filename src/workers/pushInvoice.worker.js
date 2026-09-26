@@ -9,6 +9,7 @@ import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
+import { resolveMappedLedger } from "../services/vendorLedgerMapping.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -75,18 +76,14 @@ async function stockItemExists(companyId, stockItemName) {
   return { exists: Boolean(matchedName), matchedName: matchedName || null };
 }
 
-// Vendor/party ledgers frequently don't match the Purchase Report's raw
-// vendor name at all — real-world Tally practice appends a disambiguating
-// suffix (e.g. "VE Commercial Vehicles Ltd." on the report vs. the actual
-// ledger "VE Commercial Vehicles Ltd. (Sundary cr.)") whenever the same
-// name is used on both the sales and purchase side. A generic Levenshitein
-// fuzzy match (findBestItemMatch's 0.9 threshold) doesn't clear that gap —
-// the suffix is real added text, not a typo — so this checks specifically
-// for "the ledger name STARTS WITH the vendor name", restricted to Sundry
-// Creditors so a same-named Sundry Debtors ledger (the sales-side entry
-// for the same vendor) is never matched onto a purchase voucher.
+// Party ledger = the vendor's saved mapping (vendor_ledger_mappings), else
+// an exact ledger-name match. No guessing: a vendor whose Tally ledger has
+// a different name stops at "Ledger Missing" until someone maps it once.
 async function partyLedgerExists(companyId, vendorName) {
   if (!vendorName) return { exists: false, matchedName: null };
+
+  const mappedLedger = await resolveMappedLedger(companyId, vendorName);
+  if (mappedLedger) return { exists: true, matchedName: mappedLedger };
 
   const normalized = vendorName.trim().toLowerCase();
 
@@ -104,25 +101,6 @@ async function partyLedgerExists(companyId, vendorName) {
     [companyId, normalized]
   );
   if (exact.rows.length > 0) return { exists: true, matchedName: null };
-
-  const prefixMatch = await pool.query(
-    `
-    SELECT ledger_name
-    FROM ${DB_SCHEMA}.all_ledger_details
-    WHERE company_id = $1
-      AND parent_group ILIKE '%creditor%'
-      AND LOWER(TRIM(ledger_name)) LIKE $2
-    ORDER BY LENGTH(ledger_name) ASC
-    LIMIT 1
-    `,
-    // Only accept "<vendor> (suffix)" — a bare startsWith turned a vendor
-    // typed as "Sai" into an unrelated ledger like "SAI COMPUTECH (25-26)".
-    // LIKE wildcards in the name itself are escaped.
-    [companyId, `${normalized.replace(/[\\%_]/g, "\\$&")} (%`]
-  );
-  if (prefixMatch.rows.length > 0) {
-    return { exists: true, matchedName: prefixMatch.rows[0].ledger_name };
-  }
 
   return { exists: false, matchedName: null };
 }

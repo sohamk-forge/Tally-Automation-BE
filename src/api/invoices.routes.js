@@ -6,6 +6,7 @@ import { validateCompanyId } from "../utils/companyAccess.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
+import { toVendorKey, findCompanyLedger } from "../services/vendorLedgerMapping.service.js";
 
 const router = express.Router();
 
@@ -486,7 +487,12 @@ router.get("/invoices/missing-summary", async (req, res) => {
       }
 
       for (const l of parsed.missing_ledgers || []) {
-        addTo(ledgerMap, l.ledger || l.name || l, row.id);
+        const name = l.ledger || l.name || l;
+        addTo(ledgerMap, name, row.id);
+        if (l.field === "party_ledger") {
+          const entry = ledgerMap.get(String(name).trim().toLowerCase());
+          if (entry) entry.is_party = true;
+        }
       }
       for (const itemName of parsed.missing_stock_items || []) {
         addTo(itemMap, itemName, row.id, parsed.missing_stock_item_details?.[itemName]);
@@ -544,6 +550,15 @@ router.get("/invoices/missing-summary", async (req, res) => {
       const pushedLedgerNames = new Set(pushedLedgersResult.rows.map((r) => r.name));
       for (const entry of missingLedgerNames) {
         entry.created = pushedLedgerNames.has(entry.name.trim().toLowerCase());
+      }
+
+      const mappingsResult = await pool.query(
+        `SELECT vendor_key, ledger_name FROM ${DB_SCHEMA}.vendor_ledger_mappings WHERE company_id = $1`,
+        [companyId]
+      );
+      const mappedByKey = new Map(mappingsResult.rows.map((r) => [r.vendor_key, r.ledger_name]));
+      for (const entry of missingLedgerNames) {
+        if (entry.is_party) entry.mapped_ledger = mappedByKey.get(toVendorKey(entry.name)) || null;
       }
     }
 
@@ -777,6 +792,163 @@ router.post("/invoices/resolve-missing-ledger", async (req, res) => {
     });
   } catch (err) {
     console.error("POST invoices/resolve-missing-ledger error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   VENDOR → PARTY LEDGER MAPPINGS
+   A Purchase Report vendor name mapped once to the company's Tally
+   ledger for it. pushInvoice.worker.js checks this before any
+   name matching, so later uploads for the same vendor never stop at
+   "Ledger Missing".
+========================================= */
+async function resolveMappingRequest(req, res, companyName) {
+  const userId = req.session
+    ? await getLocalUserId(req.session.getUserId())
+    : req.connectorMachine?.userId;
+
+  if (!userId) {
+    res.status(401).json({ status: "error", message: "Unauthenticated" });
+    return null;
+  }
+  if (!String(companyName || "").trim()) {
+    res.status(400).json({ status: "error", message: "company is required" });
+    return null;
+  }
+
+  const companyId = await resolveCompanyIdByName(userId, companyName);
+  if (!companyId) {
+    res.status(400).json({ status: "error", message: `Company '${companyName}' not found` });
+    return null;
+  }
+  return { userId, companyId };
+}
+
+router.get("/invoices/vendor-ledger-mappings", async (req, res) => {
+  try {
+    const ctx = await resolveMappingRequest(req, res, req.query.company);
+    if (!ctx) return;
+
+    const mappings = await pool.query(
+      `SELECT vendor_name, ledger_name, updated_at FROM ${DB_SCHEMA}.vendor_ledger_mappings WHERE company_id = $1 ORDER BY vendor_name`,
+      [ctx.companyId]
+    );
+
+    return res.status(200).json({ status: "success", mappings: mappings.rows });
+  } catch (err) {
+    console.error("GET invoices/vendor-ledger-mappings error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+router.post("/invoices/vendor-ledger-mapping", async (req, res) => {
+  try {
+    const { company, vendor_name, ledger_name } = req.body;
+    const ctx = await resolveMappingRequest(req, res, company);
+    if (!ctx) return;
+
+    const vendorName = String(vendor_name || "").trim();
+    const vendorKey = toVendorKey(vendorName);
+    if (!vendorKey || !String(ledger_name || "").trim()) {
+      return res.status(400).json({ status: "error", message: "vendor_name and ledger_name are required" });
+    }
+
+    const ledger = await findCompanyLedger(ctx.companyId, ledger_name);
+    if (!ledger) {
+      return res.status(400).json({
+        status: "error",
+        message: `"${ledger_name}" is not a ledger in this company's Tally. Create it (or sync) first.`
+      });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO ${DB_SCHEMA}.vendor_ledger_mappings (company_id, vendor_key, vendor_name, ledger_name, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, NOW(), NOW())
+      ON CONFLICT (company_id, vendor_key) DO UPDATE SET
+        vendor_name = EXCLUDED.vendor_name,
+        ledger_name = EXCLUDED.ledger_name,
+        updated_at = NOW()
+      `,
+      [ctx.companyId, vendorKey, vendorName, ledger]
+    );
+
+    // Only invoices that never reached Tally because this vendor's ledger
+    // was missing — decided here from the stored validation result, not
+    // from ids sent by the browser.
+    const blocked = await pool.query(
+      `
+      SELECT id, error_message
+      FROM ${DB_SCHEMA}.invoice_extractions
+      WHERE company_id = $1
+        AND sync_status IN ('ledger_missing', 'ledger_and_stock_missing')
+      `,
+      [ctx.companyId]
+    );
+    const invoiceIds = blocked.rows
+      .filter((row) => {
+        try {
+          const parsed = JSON.parse(row.error_message);
+          return (parsed.missing_ledgers || []).some(
+            (l) => l.field === "party_ledger" && toVendorKey(l.ledger) === vendorKey
+          );
+        } catch {
+          return false;
+        }
+      })
+      .map((row) => row.id);
+
+    let requeued = 0;
+    let connectorOffline = false;
+    if (invoiceIds.length > 0) {
+      connectorOffline = !(await resolveConnectorForCompany(ctx.companyId, ctx.userId));
+      if (!connectorOffline) {
+        for (const id of invoiceIds) {
+          await pool.query(
+            `UPDATE ${DB_SCHEMA}.invoice_extractions SET sync_status = 'pending', error_message = NULL, updated_at = NOW() WHERE id = $1`,
+            [id]
+          );
+          await safeEnqueuePurchase(id, ctx.userId);
+          requeued++;
+        }
+      }
+    }
+
+    const message = connectorOffline
+      ? `Mapping saved: "${vendorName}" → "${ledger}". Tally connector is offline — use Retry once it is running to push the ${invoiceIds.length} waiting invoice(s).`
+      : `Mapping saved: "${vendorName}" → "${ledger}". ${requeued} invoice(s) re-queued; future uploads will use this ledger automatically.`;
+
+    return res.status(200).json({
+      status: "success",
+      message,
+      ledger_name: ledger,
+      requeued,
+      waiting: connectorOffline ? invoiceIds.length : 0
+    });
+  } catch (err) {
+    console.error("POST invoices/vendor-ledger-mapping error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+router.delete("/invoices/vendor-ledger-mapping", async (req, res) => {
+  try {
+    const { company, vendor_name } = req.body;
+    const ctx = await resolveMappingRequest(req, res, company);
+    if (!ctx) return;
+
+    const result = await pool.query(
+      `DELETE FROM ${DB_SCHEMA}.vendor_ledger_mappings WHERE company_id = $1 AND vendor_key = $2`,
+      [ctx.companyId, toVendorKey(vendor_name)]
+    );
+
+    return res.status(200).json({
+      status: "success",
+      message: result.rowCount ? "Mapping removed." : "No mapping found for that vendor."
+    });
+  } catch (err) {
+    console.error("DELETE invoices/vendor-ledger-mapping error:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
