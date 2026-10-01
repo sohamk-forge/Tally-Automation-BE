@@ -1040,16 +1040,25 @@ router.get("/suggest-party-ledger", async (req, res) => {
 
 router.get("/suggest-ledger-by-group-key", async (req, res) => {
   try {
-    const { company_name, group_key } = req.query;
+    const { company_id, company_name, group_key } = req.query;
 
-    if (!company_name || !group_key) {
+    if ((!company_id && !company_name) || !group_key) {
       return res.status(400).json({
         success: false,
-        message: "company_name and group_key are required"
+        message: "company_id (or company_name) and group_key are required"
       });
     }
 
-    const suggestionMap = await suggestLedgersForGroupKeys(company_name, [group_key]);
+    // Embeddings are keyed on company_id; a name is only resolved among the
+    // caller's own companies so it can't reach a same-named company's history.
+    const ownedCompanyId = company_id
+      ? Number(company_id)
+      : await resolveOwnedCompanyByName(req, company_name);
+    if (!Number.isInteger(ownedCompanyId) || ownedCompanyId <= 0) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
+    const suggestionMap = await suggestLedgersForGroupKeys(ownedCompanyId, [group_key]);
     const suggestion = suggestionMap.get(group_key) || null;
 
     return res.status(200).json({
@@ -1099,12 +1108,11 @@ router.get("/waiting-ledger", async (req, res) => {
     );
 
     const rows = result.rows;
-    const companyName = rows[0]?.company_name;
 
     let suggestionMap = new Map();
-    if (companyName) {
+    if (rows.length) {
       const groupKeys = rows.map((r) => r.group_key);
-      suggestionMap = await suggestLedgersForGroupKeys(companyName, groupKeys);
+      suggestionMap = await suggestLedgersForGroupKeys(company_id, groupKeys);
     }
 
     const data = rows.map((r) => {

@@ -7,6 +7,7 @@ import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.que
 import { markChallansInvoiced } from "../services/challan.service.js";
 import { markQuotationsPushed } from "../services/quotation.service.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const router = express.Router();
 
@@ -113,10 +114,11 @@ router.post("/sales-invoices", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;
@@ -166,8 +168,8 @@ router.post("/sales-invoices", async (req, res) => {
     // exists yet — this used to be hardcoded unconditionally, which was
     // wrong for any company not based in Maharashtra.
     const companyDetailsResult = await pool.query(
-      `SELECT gstin, state FROM app_test.company_details WHERE trim(company_name) = trim($1) LIMIT 1`,
-      [company]
+      `SELECT gstin, state FROM app_test.company_details WHERE company_id = $1 LIMIT 1`,
+      [companyId]
     );
     let companyStateCode = null;
     let companyStateName = "";
@@ -902,10 +904,11 @@ router.post("/sales-invoices/resolve-missing-item", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;
@@ -1019,10 +1022,11 @@ router.post("/sales-invoices/retry-batch", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;

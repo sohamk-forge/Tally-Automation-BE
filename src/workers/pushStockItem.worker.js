@@ -118,7 +118,7 @@ const worker = new Worker(
         console.log(`🔄 Parent group not found, syncing...`);
 
         const syncResponse = await fetch(
-          `${BASE_URL}/api/sync/stock-group-summary-sync?company=${encodeURIComponent(row.company_name)}`
+          `${BASE_URL}/api/sync/stock-group-summary-sync?company=${encodeURIComponent(row.company_name)}&companyId=${encodeURIComponent(row.company_id)}`
         );
 
         if (!syncResponse.ok) {

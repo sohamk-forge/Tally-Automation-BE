@@ -278,6 +278,7 @@ export async function processConnectorJobResult(client, job) {
   if (finalStatus === "success" && voucherResult.rows[0]) {
     const voucher = voucherResult.rows[0];
     const embedResult = await storeLedgerEmbedding({
+      companyId: voucher.company_id,
       companyName: voucher.company_name,
       groupKey: voucher.group_key,
       ledgerName: voucher.party_ledger

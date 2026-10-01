@@ -3,7 +3,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
+import { assertCompanyAccess } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -48,7 +48,7 @@ router.post(
       ============================== */
 
       if (
-        !data.company ||
+        !data.company_id ||
         !data.item_name ||
         data.minimum_alert_quantity == null
       ) {
@@ -58,7 +58,7 @@ router.post(
           status: "error",
 
           message:
-            "company, item_name and minimum_alert_quantity are required"
+            "company_id, item_name and minimum_alert_quantity are required"
 
         });
 
@@ -68,16 +68,24 @@ router.post(
          COMPANY
       ============================== */
 
-      // Resolved among the caller's own companies only — a global name
-      // match could pick another tenant's company with the same name.
-      const companyId = await resolveOwnedCompanyByName(req, data.company);
+      const companyId = String(data.company_id).trim();
 
-      if (!companyId) {
+      // Ownership check — the caller must have access to this company id.
+      if (!(await assertCompanyAccess(req, res, companyId))) return;
+
+      const companyResult = await pool.query(
+        `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1 LIMIT 1`,
+        [companyId]
+      );
+
+      if (!companyResult.rows.length) {
         return res.status(404).json({
           status: "error",
-          message: `Company not found: ${data.company}`
+          message: `Company not found: ${companyId}`
         });
       }
+
+      const companyName = companyResult.rows[0].name;
 
       // const hasAccess = await checkCompanyAccess(userId, companyId);
       // if (!hasAccess) {
@@ -112,7 +120,7 @@ router.post(
           `,
 
           [
-            data.company,
+            companyName,
             data.item_name,
             companyId
           ]
@@ -226,7 +234,7 @@ router.post(
 
             companyId,
 
-            data.company?.trim(),
+            companyName,
 
             data.item_name?.trim(),
 

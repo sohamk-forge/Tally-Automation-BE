@@ -497,8 +497,8 @@ const worker = new Worker(
     // invoiceCalculation.routes.js / stockGroupSummary.js / salesInvoices.routes.js.
     // Falls back to "27" (Maharashtra) only if no company_details row exists yet.
     const companyDetailsResult = await pool.query(
-      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE TRIM(company_name) = TRIM($1) LIMIT 1`,
-      [company]
+      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE company_id = $1 LIMIT 1`,
+      [companyId]
     );
     let companyStateCode = null;
     let companyStateName = "";

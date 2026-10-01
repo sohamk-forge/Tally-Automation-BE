@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
 
@@ -21,20 +22,21 @@ const router = express.Router();
    have already been truncated upstream, and a truncated name silently
    returns "no stock group summary found" instead of an obvious error.
 
-   When company_id is supplied we resolve it to the canonical name from the
-   companies table, then query stock_group_summary by that name (that table
-   stores company_name, not company_id).
+   Every query below is keyed on company_id. company_name is only accepted
+   as a legacy input and is resolved to the caller's own company id first,
+   because several companies rows can share one name (one per user pairing).
 ========================================= */
 
 router.get("/stock/group-summary", async (req, res) => {
   try {
     const companyIdParam = (req.query.company_id || "").toString().trim();
     let companyName = (req.query.company_name || "").trim();
+    let companyId;
     let resolvedBy;
 
     if (companyIdParam) {
 
-      const companyId = Number(companyIdParam);
+      companyId = Number(companyIdParam);
 
       if (!Number.isInteger(companyId) || companyId <= 0) {
         return res.status(400).json({
@@ -59,6 +61,15 @@ router.get("/stock/group-summary", async (req, res) => {
       resolvedBy = "company_id";
 
     } else if (companyName) {
+
+      companyId = await resolveOwnedCompanyByName(req, companyName);
+
+      if (!companyId) {
+        return res.status(404).json({
+          status: "error",
+          message: "Company not found",
+        });
+      }
 
       resolvedBy = "company_name";
 
@@ -86,8 +97,8 @@ router.get("/stock/group-summary", async (req, res) => {
     // Determine company's own state from DB (company_details)
     // ---------------------------------------
     const companyResult = await pool.query(
-      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE TRIM(company_name) = TRIM($1)`,
-      [companyName]
+      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE company_id = $1`,
+      [companyId]
     );
 
     let companyGSTIN = null;
@@ -123,10 +134,10 @@ router.get("/stock/group-summary", async (req, res) => {
         quantity, stock_value, gst_rate, cgst_rate, sgst_rate, igst_rate,
         rate, created_at
       FROM ${DB_SCHEMA}.stock_group_summary
-      WHERE TRIM(company_name) = TRIM($1)
+      WHERE company_id = $1
       ORDER BY id DESC
       `,
-      [companyName]
+      [companyId]
     );
 
     if (!result.rows.length) {

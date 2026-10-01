@@ -12,6 +12,7 @@ import { bulkPurchaseQueue, BULK_PURCHASE_JOB_OPTIONS, getPurchaseReportJobId, g
 import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { requireFeature } from "../utils/featureFlags.js";
 import { computeBilledAmount, pushMatchedLinesToInvoices } from "../workers/bulkPurchase.worker.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const FEATURE_KEY = "bulk_purchase_reconciliation";
 
@@ -37,7 +38,7 @@ const upload = multer({
 
 // Scoped to this acting user's own pairing, not a bare global name match —
 // same fix/rationale as bulkSalesUpload.routes.js and invoices.routes.js.
-async function resolveCompanyId(userId, companyName) {
+async function resolveCompanyId(userId, companyName, companyId = null) {
   const result = await pool.query(
     `
     SELECT c.id
@@ -45,10 +46,11 @@ async function resolveCompanyId(userId, companyName) {
     JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
     WHERE cpt.user_id = $1
       AND cpt.is_used = TRUE
-      AND lower(trim(c.name)) = lower(trim($2))
+      AND ${companyMatchSql("$2", "$3")}
+    ORDER BY c.id DESC
     LIMIT 1
     `,
-    [userId, companyName]
+    [userId, companyName, companyId]
   );
 
   return result.rows[0]?.id || null;
@@ -158,7 +160,7 @@ router.post(
         return res.status(400).json({ status: "error", message: "Excel file is required" });
       }
 
-      const companyId = await resolveCompanyId(userId, company);
+      const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
       if (!companyId) {
         fs.unlink(req.file.path, () => {});
         return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
@@ -244,7 +246,7 @@ router.post(
         return res.status(400).json({ status: "error", message: "Excel file is required" });
       }
 
-      const companyId = await resolveCompanyId(userId, company);
+      const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
       if (!companyId) {
         fs.unlink(req.file.path, () => {});
         return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
@@ -290,7 +292,7 @@ router.get("/bulk-purchase-upload/purchase-ledgers", verifySession(), async (req
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -322,7 +324,7 @@ router.put("/bulk-purchase-upload/purchase-ledger", verifySession(), async (req,
       return res.status(400).json({ status: "error", message: "company and ledger are required" });
     }
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -352,7 +354,7 @@ router.get("/bulk-purchase-upload/:batchId/status", verifySession(), async (req,
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -393,7 +395,7 @@ router.get("/bulk-purchase-upload/months", verifySession(), async (req, res) => 
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -443,7 +445,7 @@ router.get("/bulk-purchase-upload/months/:month/report", verifySession(), async 
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -518,7 +520,7 @@ router.get("/bulk-purchase-upload/pending-report", verifySession(), async (req, 
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -582,7 +584,7 @@ router.post("/bulk-purchase-upload/pending/resolve", verifySession(), async (req
     const company = req.body.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -867,7 +869,7 @@ router.get("/bulk-purchase-upload/reconciliation-summary", verifySession(), asyn
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -905,7 +907,7 @@ router.get("/bulk-purchase-upload/reconciliation-table", verifySession(), async 
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
@@ -930,7 +932,7 @@ router.get("/bulk-purchase-upload/reconciliation-report", verifySession(), async
     const company = req.query.company?.trim();
     if (!company) return res.status(400).json({ status: "error", message: "company query param is required" });
 
-    const companyId = await resolveCompanyId(userId, company);
+    const companyId = await resolveCompanyId(userId, company, requestedCompanyId(req));
     if (!companyId) return res.status(400).json({ status: "error", message: `Company not found: ${company}` });
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;

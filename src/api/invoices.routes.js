@@ -7,6 +7,7 @@ import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { toVendorKey, findCompanyLedger } from "../services/vendorLedgerMapping.service.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const router = express.Router();
 
@@ -34,7 +35,7 @@ async function rejectIfConnectorOffline(res, companyId, userId) {
 // Shared by the three routes below — same user-scoped company-by-name
 // lookup used throughout this codebase (bulkSalesUpload.routes.js,
 // salesInvoices.routes.js's retry-batch/resolve-missing-item, etc).
-async function resolveCompanyIdByName(userId, companyName) {
+async function resolveCompanyIdByName(userId, companyName, companyId = null) {
   const result = await pool.query(
     `
     SELECT c.id
@@ -42,10 +43,11 @@ async function resolveCompanyIdByName(userId, companyName) {
     JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
     WHERE cpt.user_id = $1
       AND cpt.is_used = TRUE
-      AND lower(trim(c.name)) = lower(trim($2))
+      AND ${companyMatchSql("$2", "$3")}
+    ORDER BY c.id DESC
     LIMIT 1
     `,
-    [userId, companyName]
+    [userId, companyName, companyId]
   );
   return result.rows[0]?.id || null;
 }
@@ -111,10 +113,11 @@ router.post("/invoices", async (req, res) => {
       JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company.trim()]
+      [userId, company.trim(), requestedCompanyId(req)]
     );
 
     if (!companyResult.rows.length) {
@@ -287,7 +290,7 @@ router.delete("/invoices", async (req, res) => {
       return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
     }
 
-    const companyId = await resolveCompanyIdByName(userId, company);
+    const companyId = await resolveCompanyIdByName(userId, company, requestedCompanyId(req));
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
@@ -348,7 +351,7 @@ router.put("/invoices/:id", async (req, res) => {
       return res.status(400).json({ status: "error", message: "invoice_data is required" });
     }
 
-    const companyId = await resolveCompanyIdByName(userId, company);
+    const companyId = await resolveCompanyIdByName(userId, company, requestedCompanyId(req));
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
@@ -601,7 +604,7 @@ router.post("/invoices/retry-batch", async (req, res) => {
       return res.status(400).json({ status: "error", message: "All invoice ids must be valid numbers" });
     }
 
-    const companyId = await resolveCompanyIdByName(userId, company);
+    const companyId = await resolveCompanyIdByName(userId, company, requestedCompanyId(req));
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
@@ -667,7 +670,7 @@ router.post("/invoices/resolve-missing-item", async (req, res) => {
       return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
     }
 
-    const companyId = await resolveCompanyIdByName(userId, company);
+    const companyId = await resolveCompanyIdByName(userId, company, requestedCompanyId(req));
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
@@ -756,7 +759,7 @@ router.post("/invoices/resolve-missing-ledger", async (req, res) => {
       return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
     }
 
-    const companyId = await resolveCompanyIdByName(userId, company);
+    const companyId = await resolveCompanyIdByName(userId, company, requestedCompanyId(req));
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
     }
@@ -817,7 +820,7 @@ async function resolveMappingRequest(req, res, companyName) {
     return null;
   }
 
-  const companyId = await resolveCompanyIdByName(userId, companyName);
+  const companyId = await resolveCompanyIdByName(userId, companyName, requestedCompanyId(req));
   if (!companyId) {
     res.status(400).json({ status: "error", message: `Company '${companyName}' not found` });
     return null;

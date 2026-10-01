@@ -191,8 +191,8 @@ router.post("/invoice/calculate", async (req, res) => {
        Same source + "27" fallback as stockGroupSummary.js.
     --------------------------------------- */
     const companyDetailsResult = await pool.query(
-      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE trim(company_name) = trim($1) LIMIT 1`,
-      [companyName]
+      `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE company_id = $1 LIMIT 1`,
+      [companyId]
     );
 
     let companyGSTIN = null;

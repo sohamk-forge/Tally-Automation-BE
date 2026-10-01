@@ -140,6 +140,7 @@ async function getCompanyId(userId, company, client = null, requestedCompanyId =
     WHERE cpt.user_id = $1
       AND cpt.is_used = TRUE
       AND c.name = $2
+    ORDER BY c.id DESC
     LIMIT 1
     `,
     [userId, company]
@@ -1925,20 +1926,27 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     for (const item of list) {
       const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
 
+      // Keyed on company_id: same-named companies (one per user pairing)
+      // must not share rows. Legacy rows with no company_id are matched by
+      // name once and adopted by the UPDATE below.
       const existing = await client.query(
-        `SELECT id FROM app_test.stock_group_summary WHERE company_name = $1 AND item_name = $2`,
-        [company, itemName]
+        `SELECT id FROM app_test.stock_group_summary
+         WHERE item_name = $2
+           AND (company_id = $1 OR (company_id IS NULL AND company_name = $3))
+         ORDER BY (company_id IS NULL), id
+         LIMIT 1`,
+        [companyId, itemName, company]
       );
 
       if (existing.rows.length > 0) {
         await client.query(
           `
           UPDATE app_test.stock_group_summary
-          SET company_id=$1, group_name=$2, hsn_code=$3, quantity=$4, stock_value=$5,
-              unit=$6, gst_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10, gst_applicable=$11, updated_at=NOW()
-          WHERE company_name=$12 AND item_name=$13
+          SET company_id=$1, company_name=$2, group_name=$3, hsn_code=$4, quantity=$5, stock_value=$6,
+              unit=$7, gst_rate=$8, cgst_rate=$9, sgst_rate=$10, igst_rate=$11, gst_applicable=$12, updated_at=NOW()
+          WHERE id=$13
           `,
-          [companyId, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable, company, itemName]
+          [companyId, company, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable, existing.rows[0].id]
         );
         updated++;
         continue;
@@ -2099,7 +2107,7 @@ router.post("/manual", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    const { company, fromYear, toYear } = req.body;
+    const { company, fromYear, toYear, companyId: requestedCompanyId } = req.body;
 
     if (!company || !fromYear || !toYear) {
       return res.status(400).json({ status: "error", message: "Company, fromYear and toYear are required" });
@@ -2116,9 +2124,11 @@ router.post("/manual", async (req, res) => {
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
         AND c.name = $2
+        AND ($3::int IS NULL OR c.id = $3::int)
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, trimmedCompany]
+      [userId, trimmedCompany, requestedCompanyId || null]
     );
 
     if (!existingCompany.rows.length) {
@@ -2749,9 +2759,15 @@ router.get("/job-status", async (req, res) => {
           jl.completed_at, jl.error_message,
           c.id as company_id, c.name as company_name
       FROM app_test.job_logs jl
-      JOIN app_test.companies c ON c.name = jl.payload->>'company'
-      WHERE c.id = $1
-        AND jl.user_id = $2
+      JOIN app_test.companies c ON c.id = $1::int
+      WHERE jl.user_id = $2
+        -- /manual and /manual-auto record the id in the payload. The name is
+        -- only a fallback for older rows that predate it, since same-named
+        -- companies would otherwise show each other's jobs.
+        AND (
+          jl.payload->>'companyId' = $1::text
+          OR (jl.payload->>'companyId' IS NULL AND jl.payload->>'company' = c.name)
+        )
       ORDER BY jl.id DESC
       LIMIT 1
       `,

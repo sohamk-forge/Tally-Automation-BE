@@ -8,8 +8,8 @@ ones" flow using pgvector.
   - embedGroupKeysBatch()          -> spawns ledger_embedding_cli.py
                                        ONCE for a list of group_keys,
                                        returns vectors in the same order.
-  - storeLedgerEmbedding()         -> inserts a (company_name, group_key,
-                                       ledger_name, embedding) row. Called
+  - storeLedgerEmbedding()         -> inserts a (company_id, company_name,
+                                       group_key, ledger_name, embedding) row. Called
                                        from pushVoucher.worker.js right
                                        after a voucher is confirmed
                                        SUCCESS in Tally.
@@ -79,16 +79,17 @@ embedding failure must never fail/rollback the voucher push itself.
 ====================================
 */
 
-export async function storeLedgerEmbedding({ companyName, groupKey, ledgerName }) {
+export async function storeLedgerEmbedding({ companyId, companyName, groupKey, ledgerName }) {
+  if (!companyId) return { stored: false, reason: "missing company_id" };
   if (!groupKey || !groupKey.trim()) return { stored: false, reason: "empty group_key" };
   if (!ledgerName || !ledgerName.trim()) return { stored: false, reason: "empty ledger_name" };
 
   try {
     const [vector] = await embedGroupKeysBatch([groupKey]);
     await db.query(
-      `INSERT INTO app_test.ledger_embeddings (company_name, group_key, ledger_name, embedding)
-       VALUES ($1, $2, $3, $4)`,
-      [companyName, groupKey, ledgerName, JSON.stringify(vector)]
+      `INSERT INTO app_test.ledger_embeddings (company_id, company_name, group_key, ledger_name, embedding)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [companyId, companyName, groupKey, ledgerName, JSON.stringify(vector)]
     );
     return { stored: true };
   } catch (err) {
@@ -102,7 +103,8 @@ export async function storeLedgerEmbedding({ companyName, groupKey, ledgerName }
 READ PATH — BATCHED — given a company and a de-duplicated list of
 group_keys, embed all of them in ONE python call, then run one
 cosine-similarity lookup per distinct group_key against
-app_test.ledger_embeddings, scoped to company_name.
+app_test.ledger_embeddings, scoped to company_id (company_name is not
+unique — one companies row exists per user pairing).
 
 Returns a Map keyed by group_key:
   { suggested: true,  ledger_name: "...", similarity: 0.87 }
@@ -111,7 +113,7 @@ Returns a Map keyed by group_key:
 ====================================
 */
 
-export async function suggestLedgersForGroupKeys(companyName, groupKeys) {
+export async function suggestLedgersForGroupKeys(companyId, groupKeys) {
   const distinctKeys = [...new Set(groupKeys.filter((k) => k && k.trim()))];
   const suggestionMap = new Map();
 
@@ -126,11 +128,11 @@ export async function suggestLedgersForGroupKeys(companyName, groupKeys) {
        CROSS JOIN LATERAL (
          SELECT le.ledger_name, 1 - (le.embedding <=> ke.embedding) AS similarity
          FROM app_test.ledger_embeddings le
-         WHERE le.company_name = $1
+         WHERE le.company_id = $1
          ORDER BY le.embedding <=> ke.embedding
          LIMIT 1
        ) best`,
-      [companyName, distinctKeys]
+      [companyId, distinctKeys]
     );
 
     for (const row of result.rows) {

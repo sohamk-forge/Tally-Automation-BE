@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../db/index.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -7,26 +8,32 @@ const router = express.Router();
 // Prefers company_id: several companies rows can share one name (one per user
 // pairing), so a name lookup can return another row's balance.
 router.get("/closing-balance", async (req, res) => {
-  const companyId = req.query.company_id ? Number(req.query.company_id) : null;
+  let companyId = req.query.company_id ? Number(req.query.company_id) : null;
   const company = req.query.company;
   if (!companyId && !company) {
     return res.status(400).json({ success: false, message: "company_id or company query parameter required" });
   }
 
+  // A name is only a legacy input: resolve it to the caller's own company id.
+  if (!companyId) companyId = await resolveOwnedCompanyByName(req, company);
+  if (!companyId) {
+    return res.status(404).json({ success: false, message: "Company not found" });
+  }
+
   const result = await pool.query(
     `SELECT closing_balance
      FROM ${DB_SCHEMA}.group_balances
-     WHERE ${companyId ? "company_id = $1" : "LOWER(company_name) = LOWER($1)"}
+     WHERE company_id = $1
        AND LOWER(group_name) = 'purchase accounts'
      ORDER BY updated_at DESC NULLS LAST
      LIMIT 1`,
-    [companyId || company]
+    [companyId]
   );
 
   if (!result.rows.length) {
     return res.status(404).json({
       success: false,
-      message: `No "Purchase Accounts" group found for "${companyId || company}"`
+      message: `No "Purchase Accounts" group found for "${companyId}"`
     });
   }
 

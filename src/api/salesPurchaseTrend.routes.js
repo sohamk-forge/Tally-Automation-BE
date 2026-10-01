@@ -5,26 +5,15 @@ import { DB_SCHEMA } from "../config/db.js";
 import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 const router = express.Router();
 
-async function getCompanyInfo(companyId, companyName) {
-  let result;
-
-  if (companyName) {
-    result = await pool.query(
-      `SELECT id, name, financial_year_start, financial_year_end
-       FROM ${DB_SCHEMA}.companies
-       WHERE LOWER(name) = LOWER($1)
-       ORDER BY (SELECT COUNT(*) FROM ${DB_SCHEMA}.vouchers v WHERE v.company_id = companies.id) DESC, id DESC
-       LIMIT 1`,
-      [companyName]
-    );
-  } else {
-    result = await pool.query(
-      `SELECT id, name, financial_year_start, financial_year_end
-       FROM ${DB_SCHEMA}.companies
-       WHERE id = $1`,
-      [companyId]
-    );
-  }
+// Id-only: names aren't unique, so callers resolve a name to the caller's own
+// company id (resolveOwnedCompanyByName) before getting here.
+async function getCompanyInfo(companyId) {
+  const result = await pool.query(
+    `SELECT id, name, financial_year_start, financial_year_end
+     FROM ${DB_SCHEMA}.companies
+     WHERE id = $1`,
+    [companyId]
+  );
 
   const row = result.rows[0];
   if (!row) return null;
@@ -155,7 +144,7 @@ router.get("/sales-purchase", async (req, res) => {
     // A name is resolved among the caller's own companies only — the old
     // global name lookup could pick another tenant's same-named company.
     const ownedCompanyId = companyId || (await resolveOwnedCompanyByName(req, companyName));
-    const companyInfo = ownedCompanyId ? await getCompanyInfo(ownedCompanyId, null) : null;
+    const companyInfo = ownedCompanyId ? await getCompanyInfo(ownedCompanyId) : null;
 
     if (!companyInfo) {
       return res.status(404).json({

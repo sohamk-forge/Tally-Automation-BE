@@ -10,6 +10,7 @@ const CACHE_TTL = 60;
  * Generic Hybrid Engine for ALL Tally balances
  */
 export async function getHybridBalance({
+  companyId,           // closing balances are stored per company_id (names aren't unique)
   company,
   type,                // sales / purchase / stock
   cacheKey,
@@ -17,6 +18,8 @@ export async function getHybridBalance({
   balanceField = "CLOSINGBALANCE",
   transform = (v) => v
 }) {
+  if (!companyId) throw new Error("getHybridBalance: companyId is required");
+
   try {
 
     /* ===================== 1. CACHE ===================== */
@@ -33,9 +36,9 @@ export async function getHybridBalance({
     const dbResult = await pool.query(
       `SELECT closing_balance, updated_at
        FROM ${DB_SCHEMA}.account_closing_balances
-       WHERE company_name = $1 AND balance_type = $2
+       WHERE company_id = $1 AND balance_type = $2
        LIMIT 1`,
-      [company, type]
+      [companyId, type]
     );
 
     const dbData = dbResult.rows[0];
@@ -95,13 +98,14 @@ export async function getHybridBalance({
     /* ===================== 4. UPSERT DB ===================== */
     await pool.query(
       `INSERT INTO ${DB_SCHEMA}.account_closing_balances
-       (company_name, balance_type, closing_balance, updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (company_name, balance_type)
+       (company_id, company_name, balance_type, closing_balance, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (company_id, balance_type)
        DO UPDATE SET
+         company_name = EXCLUDED.company_name,
          closing_balance = EXCLUDED.closing_balance,
          updated_at = NOW()`,
-      [company, type, total]
+      [companyId, company, type, total]
     );
 
     /* ===================== 5. CACHE ===================== */
