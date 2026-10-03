@@ -398,7 +398,11 @@ router.put("/invoices/:id", async (req, res) => {
       igst_amount: igst_amount ?? prevRawJson.igst_amount ?? 0,
       taxable_amount: taxable_amount ?? prevRawJson.taxable_amount,
       grand_total: grand_total ?? prevRawJson.grand_total,
-      round_off: round_off ?? prevRawJson.round_off ?? 0
+      round_off: round_off ?? prevRawJson.round_off ?? 0,
+      // A user saving the invoice from the edit modal has reviewed the
+      // Purchase Excel hold reasons — clear them so pushInvoice.worker.js
+      // only re-checks the edited figures (zero lines / round off > ₹1).
+      review_reasons: []
     };
 
     await pool.query(

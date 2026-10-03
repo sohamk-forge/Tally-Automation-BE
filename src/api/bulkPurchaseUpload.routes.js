@@ -11,7 +11,8 @@ import { DB_SCHEMA } from "../config/db.js";
 import { bulkPurchaseQueue, BULK_PURCHASE_JOB_OPTIONS, getPurchaseReportJobId, getSpareStatementJobId } from "../queues/bulkPurchase.queue.js";
 import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
 import { requireFeature } from "../utils/featureFlags.js";
-import { computeBilledAmount, pushMatchedLinesToInvoices } from "../workers/bulkPurchase.worker.js";
+import { pushMatchedLinesToInvoices } from "../workers/bulkPurchase.worker.js";
+import { computeBilledLine } from "../services/purchaseExcelBilling.js";
 import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const FEATURE_KEY = "bulk_purchase_reconciliation";
@@ -457,6 +458,7 @@ router.get("/bulk-purchase-upload/months/:month/report", verifySession(), async 
       SELECT
         p.po_no, p.po_line_item, p.po_date, p.vendor_name, p.material_code, p.material_description,
         p.hsn_code, p.quantity, p.unit, p.amount, p.taxable_amount, p.tax_amount, p.tax_description,
+        p.gr_quantity, p.gr_amount, p.vendor_invoice_qty, p.vendor_invoice_net_val,
         p.invoice_no, p.invoice_date, p.match_status,
         ie.sync_status AS push_status, ie.error_message
       FROM ${DB_SCHEMA}.purchase_po_lines p
@@ -467,7 +469,11 @@ router.get("/bulk-purchase-upload/months/:month/report", verifySession(), async 
       [companyId, month]
     );
 
-    const rows = result.rows.map((r) => ({
+    const rows = result.rows.map((r) => {
+      // What was (or will be) pushed to Tally, next to the PO-side figures
+      // — see services/purchaseExcelBilling.js.
+      const billed = computeBilledLine(r);
+      return {
       "PO No.": r.po_no,
       "PO Line": r.po_line_item,
       "PO Date": r.po_date,
@@ -475,12 +481,16 @@ router.get("/bulk-purchase-upload/months/:month/report", verifySession(), async 
       "Material Code": r.material_code,
       "Description": r.material_description,
       "HSN Code": r.hsn_code,
-      "Quantity": r.quantity,
+      "PO Quantity": r.quantity,
+      "Billed Qty": billed.billedQty,
       "Unit": r.unit,
       "Amount": r.amount,
       "Taxable Amount": r.taxable_amount,
       "Tax Amount": r.tax_amount,
       "Tax Type": r.tax_description,
+      "Billed Taxable": billed.billedTaxable,
+      "Billed Tax": billed.billedTax,
+      "Billed Total": billed.billedAmount,
       "Invoice No.": r.invoice_no || "",
       "Invoice Date": r.invoice_date || "",
       "Status": r.match_status === "pending_dispatch"
@@ -488,8 +498,10 @@ router.get("/bulk-purchase-upload/months/:month/report", verifySession(), async 
         : r.push_status === "success" ? "Pushed to Tally"
         : r.push_status ? "Needs Review"
         : r.match_status,
-      "Issue": r.error_message ? (() => { try { return JSON.parse(r.error_message).message; } catch { return r.error_message; } })() : ""
-    }));
+      "Issue": r.error_message ? (() => { try { return JSON.parse(r.error_message).message; } catch { return r.error_message; } })()
+        : billed.reviewReasons.join("; ")
+      };
+    });
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
@@ -735,7 +747,8 @@ async function loadReconciliationTable(companyId, month) {
   const odns = rows.map((r) => r.odn);
   const linesResult = await pool.query(
     `
-    SELECT odn, amount, taxable_amount, tax_amount, gr_amount
+    SELECT odn, amount, taxable_amount, tax_amount, tax_description, gr_amount, gr_quantity,
+      vendor_invoice_qty, vendor_invoice_net_val, material_description, material_code
     FROM ${DB_SCHEMA}.purchase_po_lines
     WHERE company_id = $1 AND month_label = $2 AND odn = ANY($3) AND match_status IN ('matched', 'pushed')
     `,
@@ -743,7 +756,7 @@ async function loadReconciliationTable(companyId, month) {
   );
   const billedTotalByOdn = new Map();
   for (const line of linesResult.rows) {
-    const { billedAmount } = computeBilledAmount(line);
+    const { billedAmount } = computeBilledLine(line);
     billedTotalByOdn.set(line.odn, (billedTotalByOdn.get(line.odn) || 0) + billedAmount);
   }
 
@@ -788,7 +801,8 @@ async function loadReconciliationTable(companyId, month) {
 async function loadAmountMismatches(companyId, month) {
   const linesResult = await pool.query(
     `
-    SELECT po_no, odn, vendor_name, invoice_no, amount, taxable_amount, tax_amount, gr_amount
+    SELECT po_no, odn, vendor_name, invoice_no, amount, taxable_amount, tax_amount, tax_description,
+      gr_amount, gr_quantity, vendor_invoice_qty, vendor_invoice_net_val, material_description, material_code
     FROM ${DB_SCHEMA}.purchase_po_lines
     WHERE company_id = $1
       AND ($2::text IS NULL OR month_label = $2)
@@ -800,7 +814,7 @@ async function loadAmountMismatches(companyId, month) {
 
   const byOdn = new Map();
   for (const row of linesResult.rows) {
-    const { billedAmount } = computeBilledAmount(row);
+    const { billedAmount } = computeBilledLine(row);
     let entry = byOdn.get(row.odn);
     if (!entry) {
       entry = { odn: row.odn, vendorName: row.vendor_name, poNos: new Set(), invoiceNos: new Set(), billedTotal: 0 };

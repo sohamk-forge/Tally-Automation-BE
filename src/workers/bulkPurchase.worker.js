@@ -7,7 +7,10 @@ import XLSX from "xlsx";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { BULK_PURCHASE_QUEUE_NAME } from "../queues/bulkPurchase.queue.js";
-import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
+import { pushMatchedLinesToInvoices } from "../services/purchaseExcelPush.service.js";
+
+// Re-exported so existing importers (bulkPurchaseUpload.routes.js) keep working.
+export { pushMatchedLinesToInvoices };
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -68,25 +71,22 @@ function toIsoDate(value) {
   return str;
 }
 
+// Amount/quantity columns are matched on the exact header only — no
+// prefix fallback like getValue() — so a blank cell can never be filled
+// from a neighbouring column whose header merely starts the same way.
+function getExactValue(row, possibleKeys) {
+  for (const key of possibleKeys) {
+    const value = row[String(key).toLowerCase()];
+    if (value !== undefined && String(value).trim() !== "") return value;
+  }
+  return "";
+}
+
+// Text cells carry Indian digit grouping ("1,269.56", "-7,39,849") —
+// Number() alone turns those into NaN, i.e. a silent 0.
 function safeNumber(value) {
-  const num = Number(value);
+  const num = Number(String(value ?? "").replace(/,/g, "").trim());
   return isNaN(num) ? 0 : num;
-}
-
-function roundTo2(value) {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
-// Tally "Round Off" convention: paise <= 0.50 rounds down (subtract),
-// paise > 0.50 rounds up (add) — so the invoice total pushed to Tally is
-// always a whole rupee, with the difference posted to the company's
-// mapped rounded_off_ledger (generator.py already builds that ledger
-// entry from grand_total vs. the line/tax totals; this just makes sure
-// grand_total itself is always a clean rupee figure to begin with).
-function roundToNearestRupee(amount) {
-  const rupees = Math.floor(amount);
-  const paise = roundTo2(amount - rupees);
-  return paise <= 0.5 ? rupees : rupees + 1;
 }
 
 function normalizeRowKeys(row) {
@@ -95,27 +95,6 @@ function normalizeRowKeys(row) {
     normalized[String(k).trim().toLowerCase()] = row[k];
   });
   return normalized;
-}
-
-// Total Taxable Amount / Tax Amount / Amount on a purchase_po_lines row
-// sometimes repeat the full PO-level total on every partial-delivery row
-// instead of being split per delivery (confirmed on real data). GR Amount
-// is already correctly split per delivery in the source sheet, so use it
-// as the source of truth for this row's taxable amount and scale tax/
-// amount by the same factor to stay internally consistent. Fall back to
-// the sheet totals as-is when GR Amount is a data gap (0/null on an
-// otherwise-eligible row, same gap already handled for gr_quantity).
-// Shared by the push path (pushMatchedLinesToInvoices) and the
-// reconciliation amount-mismatch check, so both agree on "the real
-// billed amount" for a given row.
-export function computeBilledAmount(row) {
-  const sheetTaxable = Number(row.taxable_amount || 0);
-  const grAmount = Number(row.gr_amount) || 0;
-  const factor = grAmount > 0 && sheetTaxable > 0 ? grAmount / sheetTaxable : 1;
-  const billedTaxable = grAmount > 0 ? grAmount : sheetTaxable;
-  const billedTax = Number(row.tax_amount || 0) * factor;
-  const billedAmount = Number(row.amount || 0) * factor;
-  return { billedTaxable, billedTax, billedAmount };
 }
 
 export function parsePurchaseReportWorkbook(filePath) {
@@ -137,20 +116,20 @@ export function parsePurchaseReportWorkbook(filePath) {
         vendorName: String(getValue(row, ["vendor name"])).trim(),
         material: String(getValue(row, ["material"])).trim(),
         description: String(getValue(row, ["material descirption", "material description"])).trim(),
-        qty: safeNumber(getValue(row, ["quantity"])),
-        // What this specific delivery actually billed — distinct from qty
-        // (the full PO-ordered amount) once a PO is fulfilled across
-        // multiple partial deliveries. See pushMatchedLinesToInvoices().
-        grQty: safeNumber(getValue(row, ["gr qty."])),
-        // The correctly-split per-delivery amount — Total Taxable Amount
-        // sometimes repeats the full PO-level total on every partial
-        // delivery row instead of being split. See pushMatchedLinesToInvoices().
-        grAmount: safeNumber(getValue(row, ["gr amount"])),
+        // PO-ordered quantity — stored for reconciliation only, never
+        // pushed. See services/purchaseExcelBilling.js.
+        qty: safeNumber(getExactValue(row, ["quantity"])),
+        // What the vendor's invoice actually billed for this line — the
+        // quantity/value that get pushed (fallback: GR Qty. / GR Amount).
+        vendorInvoiceQty: safeNumber(getExactValue(row, ["vendor invoice qty.", "vendor invoice qty"])),
+        vendorInvoiceNetVal: safeNumber(getExactValue(row, ["vecv invoice net val", "vecv invoice net value"])),
+        grQty: safeNumber(getExactValue(row, ["gr qty.", "gr qty"])),
+        grAmount: safeNumber(getExactValue(row, ["gr amount"])),
         unit: String(getValue(row, ["order unit"])).trim(),
         hsn: String(getValue(row, ["hsn code"])).trim(),
-        amount: safeNumber(getValue(row, ["amount"])),
-        taxable: safeNumber(getValue(row, ["total taxable amount"])),
-        tax: safeNumber(getValue(row, ["tax amount"])),
+        amount: safeNumber(getExactValue(row, ["amount"])),
+        taxable: safeNumber(getExactValue(row, ["total taxable amount"])),
+        tax: safeNumber(getExactValue(row, ["tax amount"])),
         taxDesc: String(getValue(row, ["tax description"])).trim(),
         godown: String(getValue(row, ["storage bin", "dealer plant decsrip"])).trim(),
         invoiceNo: String(getValue(row, ["vendor invoice no."])).trim(),
@@ -184,35 +163,6 @@ export function parseSpareStatementWorkbook(filePath) {
 }
 
 /* =====================================================================
-   TAX SPLIT — the Purchase Report states the tax type per line, so this
-   is a lookup, not a GSTIN/state derivation like the sales worker needs.
-   ===================================================================== */
-function isIgst(taxDescription) {
-  return /igst/i.test(taxDescription || "");
-}
-
-// Purchase Report's own "Tax Description" already states the rate per
-// line, e.g. "IGST Input 18%" or "CGST & SGST Input 18%" — parsed out so
-// each line item carries its own gst_rate, the same field NewItemModal's
-// "Create Item in Tally" autofill (Tally-Automation-FE) reads to pre-fill
-// GST Rate Details. Without this the modal had nothing to autofill from.
-function parseGstRatePercent(taxDescription) {
-  const match = String(taxDescription || "").match(/(\d+(?:\.\d+)?)\s*%/);
-  return match ? Number(match[1]) : null;
-}
-
-// Fallback for lines where Tax Description didn't carry a literal "%"
-// (blank, or a code like "V1" with no rate in the text) — back the rate
-// out of the line's own taxable/tax amounts instead of leaving it null,
-// same purpose as parseGstRatePercent above.
-function deriveGstRateFromAmounts(taxableAmount, taxAmount) {
-  const taxable = Number(taxableAmount || 0);
-  const tax = Number(taxAmount || 0);
-  if (taxable <= 0 || tax <= 0) return null;
-  return roundTo2((tax / taxable) * 100);
-}
-
-/* =====================================================================
    PER-ROW UPSERT INTO purchase_po_lines
    ===================================================================== */
 async function upsertPoLine(companyId, userId, batchId, month, row, resolvedInvoiceNo, resolvedInvoiceDate) {
@@ -226,6 +176,7 @@ async function upsertPoLine(companyId, userId, batchId, month, row, resolvedInvo
       material_code, material_description, hsn_code, quantity, gr_quantity, gr_amount, unit,
       amount, taxable_amount, tax_amount, tax_description, godown_name,
       invoice_no, invoice_date, match_status, source_batch_id, month_label,
+      vendor_invoice_qty, vendor_invoice_net_val,
       created_at, updated_at
     )
     VALUES (
@@ -234,6 +185,7 @@ async function upsertPoLine(companyId, userId, batchId, month, row, resolvedInvo
       $10,$11,$12,$13,$14,$15,$16,
       $17,$18,$19,$20,$21,
       $22,$23,$24,$25,$26,
+      $27,$28,
       NOW(),NOW()
     )
     ON CONFLICT (company_id, po_no, po_line_item, odn) DO UPDATE SET
@@ -249,6 +201,8 @@ async function upsertPoLine(companyId, userId, batchId, month, row, resolvedInvo
       quantity = EXCLUDED.quantity,
       gr_quantity = EXCLUDED.gr_quantity,
       gr_amount = EXCLUDED.gr_amount,
+      vendor_invoice_qty = EXCLUDED.vendor_invoice_qty,
+      vendor_invoice_net_val = EXCLUDED.vendor_invoice_net_val,
       unit = EXCLUDED.unit,
       amount = EXCLUDED.amount,
       taxable_amount = EXCLUDED.taxable_amount,
@@ -278,7 +232,8 @@ async function upsertPoLine(companyId, userId, batchId, month, row, resolvedInvo
       row.odn || null, row.idn || null, row.vendorCode || null, row.vendorName || null,
       row.material || null, row.description || null, row.hsn || null, row.qty, row.grQty, row.grAmount, row.unit || null,
       row.amount, row.taxable, row.tax, row.taxDesc || null, row.godown || null,
-      resolvedInvoiceNo || null, resolvedInvoiceDate || null, matchStatus, String(batchId), month || null
+      resolvedInvoiceNo || null, resolvedInvoiceDate || null, matchStatus, String(batchId), month || null,
+      row.vendorInvoiceQty, row.vendorInvoiceNetVal
     ]
   );
 }
@@ -397,173 +352,6 @@ export async function processSpareStatementJob(job) {
     backlogMatched: backfillResult.rowCount,
     invoices: pushed
   };
-}
-
-/* =====================================================================
-   SHARED: group every 'matched' purchase_po_lines row by invoice_no,
-   upsert into invoice_extractions, hand off to the existing push
-   pipeline, mark 'pushed'. Self-contained (derives userId per group from
-   the rows themselves) so it can also run as startup recovery with no
-   job context at all.
-   ===================================================================== */
-export async function pushMatchedLinesToInvoices(companyId) {
-  const linesResult = await pool.query(
-    `
-    SELECT * FROM ${DB_SCHEMA}.purchase_po_lines
-    WHERE company_id = $1 AND match_status = 'matched'
-    ORDER BY invoice_no, po_no, po_line_item
-    `,
-    [companyId]
-  );
-
-  if (!linesResult.rows.length) return [];
-
-  // Every Purchase Excel invoice is posted to the ledger the company picked
-  // (Purchase Accounts group). With none picked, hold the matched lines
-  // instead of pushing invoices that would fail in Tally — they go out as
-  // soon as a ledger is saved (see PUT /bulk-purchase-upload/purchase-ledger).
-  const ledgerResult = await pool.query(
-    `SELECT purchase_excel_ledger FROM ${DB_SCHEMA}.company_ledger_mappings WHERE company_id = $1`,
-    [companyId]
-  );
-  const purchaseLedger = ledgerResult.rows[0]?.purchase_excel_ledger?.trim();
-
-  if (!purchaseLedger) {
-    console.warn(`[BULK-PURCHASE] Holding ${linesResult.rows.length} matched line(s) for company ${companyId} — no Purchase Excel ledger selected yet`);
-    return [];
-  }
-
-  const companyResult = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
-  const companyName = companyResult.rows[0]?.name || "";
-
-  const gstinResult = await pool.query(
-    `SELECT vendor_code, gstin FROM ${DB_SCHEMA}.vendor_gstin_mappings WHERE company_id = $1`,
-    [companyId]
-  );
-  const gstinByVendorCode = {};
-  gstinResult.rows.forEach((r) => { gstinByVendorCode[r.vendor_code] = r.gstin; });
-
-  const byInvoice = {};
-  linesResult.rows.forEach((line) => {
-    (byInvoice[line.invoice_no] = byInvoice[line.invoice_no] || []).push(line);
-  });
-
-  const pushedInvoices = [];
-
-  for (const [invoiceNo, lines] of Object.entries(byInvoice)) {
-    const first = lines[0];
-    const userId = first.user_id;
-
-    if (!userId) {
-      console.warn(`[BULK-PURCHASE] Skipping invoice ${invoiceNo} for company ${companyId} — no user_id on file`);
-      continue;
-    }
-
-    const billedLines = lines.map((l) => ({ l, ...computeBilledAmount(l) }));
-
-    const grandTotal = billedLines.reduce((sum, b) => sum + b.billedAmount, 0);
-    const taxableTotal = billedLines.reduce((sum, b) => sum + b.billedTaxable, 0);
-    const taxTotal = billedLines.reduce((sum, b) => sum + b.billedTax, 0);
-    const igstLine = isIgst(first.tax_description);
-
-    // Round the invoice total to a whole rupee before it ever reaches
-    // Tally — the paise difference gets posted to the company's mapped
-    // Round Off ledger (generator.py already builds that XML entry).
-    const rawGrandTotal = roundTo2(grandTotal);
-    const roundedGrandTotal = roundToNearestRupee(rawGrandTotal);
-    const roundOff = roundTo2(roundedGrandTotal - rawGrandTotal);
-
-    const poNumbers = [...new Set(lines.map((l) => l.po_no))];
-    // A voucher can span several PO lines, each with its own ODN (SAP
-    // assigns one ODN per delivery, not per invoice) — collect every
-    // distinct one, same pattern as poNumbers above.
-    const odnNumbers = [...new Set(lines.map((l) => l.odn).filter(Boolean))];
-    const vendorGstin = gstinByVendorCode[first.vendor_code] || "";
-
-    const lineItems = billedLines.map(({ l, billedTaxable, billedTax }) => {
-      // l.quantity is the full PO-ordered amount — wrong to push as-is once
-      // a PO is fulfilled across multiple partial deliveries (each ODN its
-      // own delivery), since every partial delivery would then show the
-      // FULL PO quantity instead of what was actually billed on that one
-      // invoice. gr_quantity is the real per-delivery quantity; fall back
-      // to quantity only when gr_quantity is a genuine data gap (0/null on
-      // an otherwise-eligible row — confirmed to happen in real exports),
-      // since a real invoice line is never actually zero quantity.
-      const billedQty = Number(l.gr_quantity) > 0 ? Number(l.gr_quantity) : Number(l.quantity || 0);
-      return {
-        item_name: l.material_description,
-        qty: billedQty,
-        unit: l.unit || "",
-        unit_of_measure: l.unit || "",
-        hsn_code: l.hsn_code || "",
-        rate: billedQty ? roundTo2(billedTaxable / billedQty) : 0,
-        amount: roundTo2(billedTaxable),
-        godown_name: l.godown_name || "",
-        gst_rate: parseGstRatePercent(l.tax_description) ?? deriveGstRateFromAmounts(billedTaxable, billedTax)
-      };
-    });
-
-    const narration = `Being purchase from ${first.vendor_name} vide invoice ${invoiceNo} dated ${first.invoice_date || ""} (PO: ${poNumbers.join(", ")}) (ODN: ${odnNumbers.join(", ")})`;
-
-    const invoiceData = {
-      vendor_name: first.vendor_name,
-      gstin: vendorGstin,
-      invoice_no: invoiceNo,
-      invoice_date: first.invoice_date,
-      line_items: lineItems,
-      cgst_amount: igstLine ? 0 : roundTo2(taxTotal / 2),
-      sgst_amount: igstLine ? 0 : roundTo2(taxTotal / 2),
-      igst_amount: igstLine ? roundTo2(taxTotal) : 0,
-      tds_amount: 0,
-      cess_amount: 0,
-      taxable_amount: roundTo2(taxableTotal),
-      grand_total: roundedGrandTotal,
-      round_off: roundOff,
-      narration,
-      purchase_ledger: purchaseLedger,
-      po_numbers: poNumbers,
-      odn_numbers: odnNumbers,
-      godown_name: first.godown_name || ""
-    };
-
-    const insertResult = await pool.query(
-      `
-      INSERT INTO ${DB_SCHEMA}.invoice_extractions
-        (company_id, company_name, vendor_name, gstin, invoice_no, invoice_date, raw_json, sync_status, user_id, created_at, updated_at)
-      VALUES
-        ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW(),NOW())
-      ON CONFLICT (company_id, invoice_no) DO UPDATE SET
-        company_name = EXCLUDED.company_name,
-        vendor_name = EXCLUDED.vendor_name,
-        gstin = EXCLUDED.gstin,
-        invoice_date = EXCLUDED.invoice_date,
-        raw_json = EXCLUDED.raw_json,
-        sync_status = 'pending',
-        error_message = NULL,
-        user_id = EXCLUDED.user_id,
-        updated_at = NOW()
-      RETURNING id
-      `,
-      [companyId, companyName, first.vendor_name, vendorGstin, invoiceNo, first.invoice_date, JSON.stringify(invoiceData), userId]
-    );
-
-    const invoiceId = insertResult.rows[0].id;
-
-    await safeEnqueuePurchase(invoiceId, userId);
-
-    await pool.query(
-      `
-      UPDATE ${DB_SCHEMA}.purchase_po_lines
-      SET match_status = 'pushed', invoice_extraction_id = $1, updated_at = NOW()
-      WHERE company_id = $2 AND invoice_no = $3 AND match_status = 'matched'
-      `,
-      [invoiceId, companyId, invoiceNo]
-    );
-
-    pushedInvoices.push({ invoiceNo, invoiceId, lineCount: lines.length });
-  }
-
-  return pushedInvoices;
 }
 
 /* =====================================================================
