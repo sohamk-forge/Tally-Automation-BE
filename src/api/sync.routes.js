@@ -31,6 +31,7 @@
     } from "../utils/createAuditLog.js";
   import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
     import { safeEnqueueSync } from "../queues/sync.queue.js";
+    import { SYNC_STEP_COUNT } from "../config/syncSteps.js";
 
 
 
@@ -2871,6 +2872,59 @@ router.get("/job-status", async (req, res) => {
     ALTER TABLE app_test.job_logs ADD COLUMN user_id INTEGER;
   and backfill historical rows before enforcing NOT NULL.
 =================================================== */
+/* ===================================================
+  SYNC JOB VIEW
+  Shared by GET /status/:jobId and GET /active so both report a sync job
+  (steps, stuck flag, message) identically.
+=================================================== */
+function formatSyncJob(job) {
+  // raw_response is written incrementally by sync.worker.js's
+  // updateJobProgress() after every step (not just once at the end), so
+  // this is real live progress. Parse defensively — an old pre-fix row, or
+  // one caught mid-write, could be null/malformed.
+  let steps = [];
+  if (job.raw_response) {
+    try {
+      steps = JSON.parse(job.raw_response);
+    } catch {
+      steps = [];
+    }
+  }
+
+  // "Stuck" is relative to status: a pending job older than 5 minutes
+  // hasn't even been picked up by the worker yet (same 5-minute threshold
+  // markStalePendingSyncAsFailed() uses to eventually fail it); a running
+  // job with no step progress after 5 minutes is presumably wedged
+  // mid-step. Computed off real timestamps so the frontend never has to do
+  // its own clock-skew-prone staleness math.
+  const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+  const now = Date.now();
+
+  const isStuck =
+    (job.status === "pending" && now - new Date(job.created_at).getTime() > STALE_THRESHOLD_MS) ||
+    (job.status === "running" && job.started_at && now - new Date(job.started_at).getTime() > STALE_THRESHOLD_MS && steps.length === 0);
+
+  return {
+    jobId: job.id,
+    syncStatus: job.status,
+    company: job.payload?.company,
+    companyId: job.payload?.companyId ?? null,
+    fromYear: job.payload?.fromYear,
+    toYear: job.payload?.toYear,
+    startedAt: job.started_at,
+    completedAt: job.completed_at,
+    error: job.error_message,
+    steps,
+    totalSteps: SYNC_STEP_COUNT,
+    isStuck,
+    message:
+      job.status === "completed" ? "Synchronization completed successfully." :
+      job.status === "running" ? "Synchronization is in progress." :
+      job.status === "failed" ? "Synchronization failed." :
+      "Synchronization is pending."
+  };
+}
+
 router.get("/status/:jobId", async (req, res) => {
   try {
     const userId = await requireUser(req, res);
@@ -2898,56 +2952,61 @@ router.get("/status/:jobId", async (req, res) => {
       return res.status(404).json({ status: "error", message: "Job not found" });
     }
 
-    // raw_response is now written incrementally by sync.worker.js's
-    // updateJobProgress() after every step (not just once at the end), so
-    // this is real live progress, not a stale end-of-job dump. Parse
-    // defensively — an old pre-fix row, or one caught mid-write, could be
-    // null/malformed.
-    let steps = [];
-    if (job.raw_response) {
-      try {
-        steps = JSON.parse(job.raw_response);
-      } catch {
-        steps = [];
-      }
+    return res.status(200).json({ status: "success", data: formatSyncJob(job) });
+
+  } catch (err) {
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* ===================================================
+  ACTIVE SYNC — "is a sync running for me right now?"
+  A sync can be started with no browser involved: the connector device
+  calls /manual itself when a machine is paired or a company is connected.
+  The frontend can't be told, so it asks. Returns the newest manual_sync
+  job that is pending/running, or finished within the last 2 minutes (so
+  the final tick/cross is still shown), or null.
+
+  Matches the caller's own jobs, plus — when companyId is given and the
+  caller has access to it — jobs for that company started by a teammate.
+  companyId is optional: during first-time pairing the company doesn't
+  exist in the browser yet.
+=================================================== */
+router.get("/active", async (req, res) => {
+  try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    const requestedCompanyId = Number(req.query.companyId) || null;
+    let companyFilterId = null;
+
+    if (requestedCompanyId && (await userOwnsCompany(userId, requestedCompanyId))) {
+      companyFilterId = requestedCompanyId;
     }
 
-    // "Stuck" is relative to status: a pending job older than 5 minutes
-    // hasn't even been picked up by the worker yet (matches the same
-    // 5-minute threshold markStalePendingSyncAsFailed() uses to eventually
-    // fail it); a running job with no step progress written in the last 5
-    // minutes is presumably wedged mid-step rather than genuinely
-    // progressing. Only compute this off real timestamps so the frontend
-    // never has to do its own clock-skew-prone staleness math.
-    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
-    const now = Date.now();
-
-    const isStuck =
-      (job.status === "pending" && now - new Date(job.created_at).getTime() > STALE_THRESHOLD_MS) ||
-      (job.status === "running" && job.started_at && now - new Date(job.started_at).getTime() > STALE_THRESHOLD_MS && steps.length === 0);
+    const result = await pool.query(
+      `
+      SELECT id, status, payload, error_message, started_at, completed_at,
+             created_at, raw_response
+      FROM app_test.job_logs
+      WHERE job_type = 'manual_sync'
+        AND (user_id = $1 OR ($2::text IS NOT NULL AND payload->>'companyId' = $2::text))
+        AND (
+          status IN ('pending', 'running')
+          OR completed_at > NOW() - INTERVAL '2 minutes'
+        )
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [userId, companyFilterId === null ? null : String(companyFilterId)]
+    );
 
     return res.status(200).json({
       status: "success",
-      data: {
-        jobId: job.id,
-        syncStatus: job.status,
-        company: job.payload?.company,
-        fromYear: job.payload?.fromYear,
-        toYear: job.payload?.toYear,
-        startedAt: job.started_at,
-        completedAt: job.completed_at,
-        error: job.error_message,
-        steps,
-        isStuck,
-        message:
-          job.status === "completed" ? "Synchronization completed successfully." :
-          job.status === "running" ? "Synchronization is in progress." :
-          job.status === "failed" ? "Synchronization failed." :
-          "Synchronization is pending."
-      }
+      data: result.rows.length ? formatSyncJob(result.rows[0]) : null
     });
-
   } catch (err) {
+    console.log("ACTIVE SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
