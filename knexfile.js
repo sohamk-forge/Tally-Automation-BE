@@ -15,7 +15,7 @@ export default {
         "127.0.0.1",
 
       port:
-        process.env.DB_PORT || 5432,
+        process.env.DB_PORT || 5431,
 
       user:
         process.env.DB_USER ||
