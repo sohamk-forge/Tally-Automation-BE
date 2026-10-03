@@ -2,7 +2,7 @@
     import pool from "../db/index.js";
     import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
-    import { isTallyConnectorLive, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
+    import { isTallyConnectorLive, getConnectorOfflineMessage, findLiveConnectorKey, getTallyStatusForKey } from "../services/connectorOwner.service.js";
     import axios from "axios";
     import {
       getCompaniesXML,
@@ -399,19 +399,44 @@ function logUpsertSummary() {
 /* ===================================================
   HEALTH API
 =================================================== */
+// Real answer, not a stub: is the connector device online, and does Tally
+// answer on its machine? ?company_id=<id> scopes it to that company's connector.
 router.get("/health", async (req, res) => {
   try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    const companyId = Number(req.query.company_id) || null;
+    const live = await findLiveConnectorKey(userId, companyId);
+
+    if (!live) {
+      return res.status(200).json({
+        status: "success",
+        message: "Connector is offline",
+        services: { api: "running", connector: "offline", tally: "unknown" },
+        timestamp: new Date()
+      });
+    }
+
+    const { tally_connected, tally_checked_at } = await getTallyStatusForKey(live.api_key_id);
+    const tally = tally_connected === true ? "connected" : tally_connected === false ? "disconnected" : "unknown";
+
     return res.status(200).json({
       status: "success",
-      message: "Sync service healthy",
-      services: { api: "running", tally: "connected" },
+      message:
+        tally === "connected" ? "Tally is connected" :
+        tally === "disconnected" ? "Connector is online but Tally is not running" :
+        "Connector is online; Tally status unknown",
+      services: { api: "running", connector: "online", tally },
+      machine_id: live.machine_id,
+      tally_checked_at,
       timestamp: new Date()
     });
   } catch (err) {
     return res.status(503).json({
       status: "error",
-      message: "Tally is not reachable",
-      services: { api: "running", tally: "disconnected" },
+      message: "Could not determine connector status",
+      services: { api: "running", connector: "unknown", tally: "unknown" },
       error: err.message,
       timestamp: new Date()
     });
