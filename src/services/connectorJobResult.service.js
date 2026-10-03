@@ -68,6 +68,72 @@ function isPossibleDuplicateVoucher(responseXml) {
   return created === 0 && altered === 0 && errors === 0 && exceptions > 0 && !lineError;
 }
 
+// Tally rejects a voucher that names a master it doesn't have with a
+// LINEERROR like "Stock Item 'X' does not exist!" / "Ledger 'X' does not
+// exist!". That isn't a generic failure — it's the same "missing master"
+// case the purchase worker's own validation reports (our cached stock /
+// ledger lists can be stale), so it is reported in the same shape and
+// lands in the Missing screen, where the item/ledger can be created and
+// the invoice retried.
+function decodeXmlText(text) {
+  return String(text || "")
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+async function classifyMissingMasterFromTally(client, responseXml, invoiceId) {
+  const lineError = (responseXml || "").match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/)?.[1];
+  if (!lineError) return null;
+
+  const message = decodeXmlText(lineError);
+  // Greedy capture: item names can themselves contain apostrophes
+  // (e.g. "4'TH GEAR COUNTER SHAFT").
+  const stockItem = message.match(/^Stock Item '(.*)' does not exist/i)?.[1];
+  const ledger = message.match(/^Ledger '(.*)' does not exist/i)?.[1];
+  if (!stockItem && !ledger) return null;
+
+  const invoiceResult = await client.query(
+    `SELECT raw_json FROM app_test.invoice_extractions WHERE id = $1`,
+    [invoiceId]
+  );
+  const raw = invoiceResult.rows[0]?.raw_json;
+  const invoice = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+
+  if (stockItem) {
+    const line = (invoice.line_items || []).find(
+      (item) => String(item.item_name || item.name || "").trim() === stockItem.trim()
+    );
+    const unit = String(line?.unit || "").trim();
+
+    return {
+      syncStatus: "stock_missing",
+      errorMessage: JSON.stringify({
+        message: `Tally: ${message}`,
+        missing_ledgers: [],
+        missing_stock_items: [stockItem],
+        missing_stock_item_details: unit ? { [stockItem]: { unit_of_measure: unit } } : {}
+      })
+    };
+  }
+
+  const partyName = String(invoice.vendor_name || invoice.customer_name || "").trim();
+  return {
+    syncStatus: "ledger_missing",
+    errorMessage: JSON.stringify({
+      message: `Tally: ${message}`,
+      missing_ledgers: [
+        { field: ledger.trim() === partyName ? "party_ledger" : "tally_ledger", ledger }
+      ],
+      missing_stock_items: [],
+      missing_stock_item_details: {}
+    })
+  };
+}
+
 export async function processConnectorJobResult(client, job) {
   try {
     const { id, job_type, status, response_xml, result, payload } = job;
@@ -135,6 +201,14 @@ export async function processConnectorJobResult(client, job) {
           finalStatus = "possible_duplicate";
           errorMessage =
             "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
+        }
+
+        if (finalStatus === "failed") {
+          const missing = await classifyMissingMasterFromTally(client, response_xml, payload.invoice_id);
+          if (missing) {
+            finalStatus = missing.syncStatus;
+            errorMessage = missing.errorMessage;
+          }
         }
 
         await client.query(
