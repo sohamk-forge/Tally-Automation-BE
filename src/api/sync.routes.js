@@ -2433,6 +2433,57 @@ router.get("/units-sync", async (req, res) => {
 });
 
 /* ===================================================
+  LEDGER PRIMARY GROUP HELPERS
+  Tally only gives a ledger its immediate PARENT group. A ledger under a
+  user-created sub-group ("ABC" under Sundry Creditors) must still land on
+  the Creditors tab, so we walk the group hierarchy upward and stop at the
+  first group the Ledger page classifies by — or, failing that, at the
+  top-level (Primary) group.
+=================================================== */
+const CLASSIFYING_GROUPS = ["Sundry Debtors", "Sundry Creditors", "Bank Accounts", "Bank OD A/c"];
+
+// Tally prefixes reserved names with a &#4; control char in some exports.
+const cleanGroupName = (value) => {
+  const cleaned = clean(value);
+  if (!cleaned) return null;
+  return cleaned.replace(/&#4;/g, "").replace(/[\x00-\x1F]/g, "").trim() || null;
+};
+
+// Map of lower-cased group name -> { name, parent } for the whole company.
+async function fetchGroupHierarchy(companyId, company, userId) {
+  const responseXML = await sendToTallyViaConnector(companyId, getParentGroupsXML(company), "sync", userId);
+  const parsed = await parseXML(responseXML);
+  const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
+  const list = Array.isArray(collection) ? collection : collection ? [collection] : [];
+
+  const hierarchy = new Map();
+  for (const group of list) {
+    const rawName = group?.NAME || group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
+    const name = cleanGroupName(Array.isArray(rawName) ? rawName[0] : rawName);
+    if (!name) continue;
+    hierarchy.set(name.toLowerCase(), { name, parent: cleanGroupName(group?.PARENT) });
+  }
+  return hierarchy;
+}
+
+function resolvePrimaryGroup(parentGroup, hierarchy) {
+  let current = cleanGroupName(parentGroup);
+  if (!current) return null;
+
+  // Depth cap guards against a malformed (cyclic) hierarchy.
+  for (let depth = 0; depth < 50; depth++) {
+    const classifying = CLASSIFYING_GROUPS.find((g) => g.toLowerCase() === current.toLowerCase());
+    if (classifying) return classifying;
+
+    const node = hierarchy.get(current.toLowerCase());
+    if (!node) return current;
+    if (!node.parent || node.parent.toLowerCase() === "primary") return node.name;
+    current = node.parent;
+  }
+  return current;
+}
+
+/* ===================================================
   ALL LEDGERS SYNC
 =================================================== */
 router.get("/all-ledgers-sync", async (req, res) => {
@@ -2463,7 +2514,16 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
     const list = Array.isArray(collection) ? collection : [collection];
 
-    let inserted = 0, updated = 0, ignored = 0;
+    // A failed group fetch must not fail the ledger sync — primary_group is
+    // then left untouched and the UI falls back to parent_group.
+    let groupHierarchy = null;
+    try {
+      groupHierarchy = await fetchGroupHierarchy(companyId, company, userId);
+    } catch (groupErr) {
+      console.log("⚠️ ALL LEDGERS SYNC: group hierarchy fetch failed, primary_group not refreshed:", groupErr.message);
+    }
+
+    let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
     const updatedLedgers = [];
 
@@ -2528,6 +2588,23 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
       const result = await upsertRecord("app_test.all_ledger_details", guid, masterId, alterId, data, columns, client);
 
+      // Written outside upsertRecord on purpose: moving group ABC to a new
+      // parent changes the GROUP's alter_id, not the ledger's, so the upsert
+      // would skip this row as "alter_id_not_newer" and keep a stale value.
+      if (groupHierarchy) {
+        const primaryGroup = resolvePrimaryGroup(parentGroup, groupHierarchy);
+        if (primaryGroup) {
+          const pgResult = await client.query(
+            `UPDATE app_test.all_ledger_details
+                SET primary_group = $1
+              WHERE company_id = $2 AND ledger_name = $3
+                AND primary_group IS DISTINCT FROM $1`,
+            [primaryGroup, companyId, ledgerName]
+          );
+          if (pgResult.rowCount > 0) primaryGroupUpdated++;
+        }
+      }
+
       if (result.action === "inserted") {
         inserted++;
         insertedLedgers.push({ name: ledgerName, guid, parent_group: parentGroup, gst_number: gstNumber, has_address: !!address, has_phone: !!(phone || mobile) });
@@ -2546,7 +2623,7 @@ router.get("/all-ledgers-sync", async (req, res) => {
       source: "tally",
       message: "All ledger details synced successfully",
       company,
-      summary: { total_found: list.length, inserted, updated, ignored },
+      summary: { total_found: list.length, inserted, updated, ignored, primary_group_updated: primaryGroupUpdated, group_hierarchy_loaded: !!groupHierarchy },
       samples: { inserted: insertedLedgers.slice(0, 5), updated: updatedLedgers.slice(0, 5) },
       data_summary: {
         with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,

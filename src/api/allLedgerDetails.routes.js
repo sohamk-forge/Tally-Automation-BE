@@ -36,6 +36,7 @@ router.get("/", async (req, res) => {
       SELECT
         ledger_name,
         parent_group,
+        primary_group,
         gst_number,
         state,
         opening_balance,
