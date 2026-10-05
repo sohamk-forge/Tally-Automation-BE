@@ -75,7 +75,7 @@ async function validateItemsAgainstStock(company, extracted_items, req) {
       group_name,
       hsn_code
     FROM ${DB_SCHEMA}.stock_group_summary
-    WHERE company_id = $1
+    WHERE company_id = $1 AND deleted_at IS NULL
     `,
     [companyId]
   );

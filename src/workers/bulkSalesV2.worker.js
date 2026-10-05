@@ -13,6 +13,9 @@ import {
   safeEnqueueSales
 } from "../queues/sales.queue.js";
 
+import { roundToNearestRupee } from "../services/purchaseExcelBilling.js";
+import { SAP_UPLOAD_SOURCE } from "../services/salesSapBilling.js";
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   password: process.env.REDIS_PASSWORD || undefined,
@@ -602,13 +605,18 @@ const worker = new Worker(
         invoice.tds_amount
       );
 
-      if (invoice.has_excel_total) {
-        invoice.round_off = roundTo2(invoice.excel_total - baseTotal);
-        invoice.grand_total = roundTo2(invoice.excel_total);
-      } else {
-        invoice.round_off = 0;
-        invoice.grand_total = baseTotal;
-      }
+      // Same rule as Purchase Excel (purchaseExcelBilling.js): the total is
+      // always taxable + tax (− TDS), never the sheet's own invoice-value
+      // column, rounded to the whole rupee the Tally way (≤ 0.50 down,
+      // > 0.50 up) after TDS — so the voucher/party amount has no paise and
+      // round off is always ≤ ₹0.50. Previously grand_total was copied from
+      // excel_total, so round off was always 0 and vouchers carried paise
+      // (e.g. ₹1,749.94). excel_total is still stored for reference only.
+      invoice.grand_total = roundToNearestRupee(baseTotal);
+      invoice.round_off = roundTo2(invoice.grand_total - baseTotal);
+      // Tags SAP-upload invoices for the pre-push review check in
+      // pushSalesInvoice.worker.js (checkSapSalesInvoice).
+      invoice.source = SAP_UPLOAD_SOURCE;
 
       console.log("FINAL GST CHECK (V2)", {
         format,

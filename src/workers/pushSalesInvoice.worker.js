@@ -13,6 +13,8 @@ import { getSalesVoucherExistsXML } from "../services/xmlBuilder.js";
 import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
 import { parseXML } from "../services/parser.js";
 import { resolveStateName, normalizeStateName } from "../utils/gstState.js";
+import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
+import { SAP_UPLOAD_SOURCE, checkSapSalesInvoice } from "../services/salesSapBilling.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -51,11 +53,12 @@ async function ledgerExists(companyId, ledgerName) {
     `
     SELECT 1
     FROM ${DB_SCHEMA}.all_ledger_details
-    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND deleted_at IS NULL
     UNION
     SELECT 1
-    FROM ${DB_SCHEMA}.push_ledger
+    FROM ${DB_SCHEMA}.push_ledger pl
     WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND status = 'success'
+      AND ${pushedLedgerStillInTally(DB_SCHEMA, "pl")}
     LIMIT 1
     `,
     [companyId, ledgerName]
@@ -83,11 +86,12 @@ async function stockItemExists(companyId, stockItemName) {
     `
     SELECT 1
     FROM ${DB_SCHEMA}.stock_group_summary
-    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g')
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND deleted_at IS NULL
     UNION
     SELECT 1
-    FROM ${DB_SCHEMA}.push_stock_item
+    FROM ${DB_SCHEMA}.push_stock_item psi
     WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND status = 'success'
+      AND ${pushedStockItemStillInTally(DB_SCHEMA, "psi")}
     LIMIT 1
     `,
     [companyId, stockItemName]
@@ -101,9 +105,10 @@ async function stockItemExists(companyId, stockItemName) {
   // a duplicate stock item. Only auto-accepted above a high threshold.
   const allNames = await pool.query(
     `
-    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1
+    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1 AND deleted_at IS NULL
     UNION
-    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item WHERE company_id = $1 AND status = 'success'
+    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item psi WHERE company_id = $1 AND status = 'success'
+      AND ${pushedStockItemStillInTally(DB_SCHEMA, "psi")}
     `,
     [companyId]
   );
@@ -392,6 +397,23 @@ const worker = new Worker(
       const invoice = typeof row.raw_json === "string"
         ? JSON.parse(row.raw_json)
         : row.raw_json;
+
+      // SAP-format uploads only: same Needs Review hold as Purchase Excel
+      // (a 0 line, or a round off over ₹1) instead of pushing a voucher
+      // Tally would accept with a wrong total. Computed live from the
+      // invoice's current data, so editing and re-saving it clears the hold.
+      if (invoice?.source === SAP_UPLOAD_SOURCE) {
+        const problems = checkSapSalesInvoice(invoice);
+        if (problems.length) {
+          const message = `Needs review: ${problems.join("; ")}`;
+          console.warn("⚠️ SAP sales invoice held for review", { ...logCtx, problems });
+          await pool.query(
+            `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify({ message, review_reasons: problems }), salesId]
+          );
+          return { salesId, status: "failed", error: message };
+        }
+      }
 
       // The mapping's sales_ledger is authoritative, but it can legitimately
       // be blank for a company that never set one (Sales Settings didn't
@@ -777,16 +799,28 @@ self-heal that.
 ====================================
 */
 
+// 'pending' also means "handed to the connector, waiting for Tally" (set
+// right after createConnectorJob above) — those rows still have a live
+// connector_jobs entry and their result will arrive via
+// processConnectorJobResult. Only rows with NO in-flight connector job were
+// actually orphaned by the restart; failing the others threw away pushes
+// that were merely waiting on a slow/offline connector.
 async function markStalePendingSalesAsFailed() {
   const result = await pool.query(
-    `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+    `UPDATE ${DB_SCHEMA}.sales_invoice_extractions s
      SET
        sync_status = 'failed',
        error_message = 'Upload interrupted / worker restarted',
        updated_at = NOW()
-     WHERE sync_status = 'pending'
-       AND updated_at < NOW() - INTERVAL '5 minutes'
-     RETURNING id`
+     WHERE s.sync_status = 'pending'
+       AND s.updated_at < NOW() - INTERVAL '5 minutes'
+       AND NOT EXISTS (
+         SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
+         WHERE cj.job_type = 'sales_invoice'
+           AND cj.payload->>'invoice_id' = s.id::text
+           AND cj.status IN ('pending', 'processing')
+       )
+     RETURNING s.id`
   );
   console.log(`Marked ${result.rowCount} stale pending sales invoices as failed`);
 }

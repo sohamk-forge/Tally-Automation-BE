@@ -1,5 +1,6 @@
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { pushedLedgerStillInTally } from "../utils/masterSoftDelete.js";
 
 export function toVendorKey(vendorName) {
   return String(vendorName || "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -16,9 +17,10 @@ export async function findCompanyLedger(companyId, ledgerName) {
     `
     SELECT TRIM(ledger_name) AS ledger_name
     FROM (
-      SELECT ledger_name FROM ${DB_SCHEMA}.all_ledger_details WHERE company_id = $1
+      SELECT ledger_name FROM ${DB_SCHEMA}.all_ledger_details WHERE company_id = $1 AND deleted_at IS NULL
       UNION ALL
-      SELECT ledger_name FROM ${DB_SCHEMA}.push_ledger WHERE company_id = $1 AND status = 'success'
+      SELECT ledger_name FROM ${DB_SCHEMA}.push_ledger pl WHERE company_id = $1 AND status = 'success'
+        AND ${pushedLedgerStillInTally(DB_SCHEMA, "pl")}
     ) l
     WHERE LOWER(TRIM(ledger_name)) = LOWER($2)
     LIMIT 1

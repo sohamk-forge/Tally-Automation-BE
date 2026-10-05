@@ -81,6 +81,7 @@ async function listPurchaseLedgers(companyId) {
       SELECT ledger_name
       FROM ${DB_SCHEMA}.all_ledger_details
       WHERE company_id = $1
+        AND deleted_at IS NULL
         AND LOWER(TRIM(parent_group)) = 'purchase accounts'
     ) l
     WHERE ledger_name IS NOT NULL AND TRIM(ledger_name) <> ''

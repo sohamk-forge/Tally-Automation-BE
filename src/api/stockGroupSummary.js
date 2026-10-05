@@ -134,7 +134,7 @@ router.get("/stock/group-summary", async (req, res) => {
         quantity, stock_value, gst_rate, cgst_rate, sgst_rate, igst_rate,
         rate, created_at
       FROM ${DB_SCHEMA}.stock_group_summary
-      WHERE company_id = $1
+      WHERE company_id = $1 AND deleted_at IS NULL
       ORDER BY id DESC
       `,
       [companyId]

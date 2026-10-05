@@ -85,7 +85,11 @@ function decodeXmlText(text) {
     .trim();
 }
 
-async function classifyMissingMasterFromTally(client, responseXml, invoiceId) {
+// Used by both purchase_invoice and sales_invoice — sales hits this when the
+// synced ledger cache (all_ledger_details) still lists a customer that the
+// target Tally company no longer has, so pre-push validation passes and only
+// Tally itself catches it. `table` is a fixed literal from the callers below.
+async function classifyMissingMasterFromTally(client, responseXml, invoiceId, table = "invoice_extractions") {
   const lineError = (responseXml || "").match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/)?.[1];
   if (!lineError) return null;
 
@@ -97,7 +101,7 @@ async function classifyMissingMasterFromTally(client, responseXml, invoiceId) {
   if (!stockItem && !ledger) return null;
 
   const invoiceResult = await client.query(
-    `SELECT raw_json FROM app_test.invoice_extractions WHERE id = $1`,
+    `SELECT raw_json FROM app_test.${table} WHERE id = $1`,
     [invoiceId]
   );
   const raw = invoiceResult.rows[0]?.raw_json;
@@ -105,9 +109,15 @@ async function classifyMissingMasterFromTally(client, responseXml, invoiceId) {
 
   if (stockItem) {
     const line = (invoice.line_items || []).find(
-      (item) => String(item.item_name || item.name || "").trim() === stockItem.trim()
+      (item) => String(item.item_name || item.stock_name || item.name || "").trim() === stockItem.trim()
     );
-    const unit = String(line?.unit || "").trim();
+    // Purchase lines carry `unit`; sales lines carry unit_of_measure /
+    // type_of_supply (same shape validateSalesInvoice() stores).
+    const unit = String(line?.unit || line?.unit_of_measure || "").trim();
+    const typeOfSupply = String(line?.type_of_supply || "").trim();
+    const details = unit || typeOfSupply
+      ? { [stockItem]: { unit_of_measure: unit, ...(typeOfSupply ? { type_of_supply: typeOfSupply } : {}) } }
+      : {};
 
     return {
       syncStatus: "stock_missing",
@@ -115,12 +125,12 @@ async function classifyMissingMasterFromTally(client, responseXml, invoiceId) {
         message: `Tally: ${message}`,
         missing_ledgers: [],
         missing_stock_items: [stockItem],
-        missing_stock_item_details: unit ? { [stockItem]: { unit_of_measure: unit } } : {}
+        missing_stock_item_details: details
       })
     };
   }
 
-  const partyName = String(invoice.vendor_name || invoice.customer_name || "").trim();
+  const partyName = String(invoice.vendor_name || invoice.party_ledger || invoice.customer_name || "").trim();
   return {
     syncStatus: "ledger_missing",
     errorMessage: JSON.stringify({
@@ -175,6 +185,19 @@ export async function processConnectorJobResult(client, job) {
           finalStatus = "possible_duplicate";
           errorMessage =
             "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
+        }
+
+        if (finalStatus === "failed") {
+          const missing = await classifyMissingMasterFromTally(
+            client,
+            response_xml,
+            payload.invoice_id,
+            "sales_invoice_extractions"
+          );
+          if (missing) {
+            finalStatus = missing.syncStatus;
+            errorMessage = missing.errorMessage;
+          }
         }
 
         await client.query(

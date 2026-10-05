@@ -210,6 +210,7 @@ router.get("/purchase-ledgers/:companyId", async (req, res) => {
       SELECT ledger_name
       FROM ${DB_SCHEMA}.all_ledger_details
       WHERE company_id = $1
+        AND deleted_at IS NULL
         AND LOWER(TRIM(parent_group)) = LOWER(TRIM($2))
       ORDER BY ledger_name
       `,

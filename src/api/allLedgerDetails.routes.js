@@ -49,7 +49,7 @@ router.get("/", async (req, res) => {
 
       FROM ${DB_SCHEMA}.all_ledger_details
 
-      WHERE company_id = $1
+      WHERE company_id = $1 AND deleted_at IS NULL
 
       ORDER BY ledger_name ASC
       `,

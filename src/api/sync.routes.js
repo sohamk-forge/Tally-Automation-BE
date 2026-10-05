@@ -250,6 +250,11 @@ const generateFallbackGuid = (company, uniqueValue, type) => {
 // only ever diffs/touches rows matching this pattern.
 const REAL_TALLY_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$/i;
 
+// The Tally company part of a real GUID (its first 36 chars), or null for a
+// fallback/missing GUID.
+const tallyCompanyGuidPrefix = (guid) =>
+  guid && REAL_TALLY_GUID_PATTERN.test(guid) ? String(guid).slice(0, 36).toLowerCase() : null;
+
 /* ===================================================
   UPSERT FUNCTION (PRODUCTION-SAFE)
 =================================================== */
@@ -296,6 +301,23 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
           `SELECT id, guid, master_id, alter_id FROM ${tableName} WHERE master_id = $1`,
           [masterId]
         );
+
+    // MASTERIDs are only unique within ONE Tally company. A real Tally GUID
+    // is "<company GUID>-<master id hex>", so a row whose GUID carries a
+    // different company prefix is a different master that merely shares the
+    // number (e.g. data synced from an earlier Tally company of the same
+    // name). Matching it used to make the upsert treat the new master as an
+    // older version of the old one and skip it ("alter_id_not_newer"), so
+    // the new ledger was never stored at all.
+    const incomingPrefix = tallyCompanyGuidPrefix(finalGuid);
+    if (incomingPrefix) {
+      existing = {
+        rows: existing.rows.filter((row) => {
+          const rowPrefix = tallyCompanyGuidPrefix(row.guid);
+          return !rowPrefix || rowPrefix === incomingPrefix;
+        })
+      };
+    }
   }
 
   if (existing.rows.length === 0 && (hasCompanyIdColumn ? companyId : true)) {
@@ -386,6 +408,69 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   );
 
   return { action: "updated", oldAlterId: dbAlterId, newAlterId, guidChanged };
+}
+
+// Master-level counterpart of the voucher soft-delete below: the ledger and
+// stock-item syncs fetch Tally's FULL list (no date/alter-id filter), so a
+// row this company has in the DB but Tally didn't just send was deleted
+// (or renamed away) in Tally. Mark it deleted_at rather than DELETE, and
+// clear the mark on anything that reappeared. `syncedNames` holds clean()ed,
+// lowercased names; the DB side gets the same whitespace normalisation.
+// Never runs on an empty list, so a bad/empty Tally response can't be read
+// as "everything was deleted". tableName/nameColumn are fixed literals from
+// the two callers, still checked against allowedTables.
+//
+// `syncedGuids` (ledgers only — stock_group_summary has no guid column):
+// lowercased real Tally GUIDs from this sync. When given, a row with a real
+// GUID is matched by GUID, not name — so a same-named master left over from
+// an earlier Tally company (different GUID prefix) is retired instead of
+// showing up as a duplicate. Rows with a fallback/missing GUID still match
+// by name.
+async function syncMasterSoftDelete(client, tableName, nameColumn, companyId, syncedNames, syncedGuids = null) {
+  if (!allowedTables.includes(tableName)) {
+    throw new Error(`Invalid table name: ${tableName}`);
+  }
+  if (!companyId || syncedNames.size === 0) {
+    return { softDeleted: 0, restored: 0 };
+  }
+
+  const names = [...syncedNames];
+  const guids = syncedGuids && syncedGuids.size > 0 ? [...syncedGuids] : null;
+  const normalized = `regexp_replace(LOWER(TRIM(${nameColumn})), '\\s+', ' ', 'g')`;
+  const realGuid = `COALESCE(guid, '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$'`;
+  // "Tally still has this row" — by GUID when we have GUIDs, else by name.
+  const stillInTally = guids
+    ? `(LOWER(guid) = ANY($3::text[]) OR (NOT (${realGuid}) AND ${normalized} = ANY($2::text[])))`
+    : `(${normalized} = ANY($2::text[]))`;
+  const params = guids ? [companyId, names, guids] : [companyId, names];
+
+  const restoredResult = await client.query(
+    `UPDATE ${tableName}
+        SET deleted_at = NULL, updated_at = NOW()
+      WHERE company_id = $1
+        AND deleted_at IS NOT NULL
+        AND ${stillInTally}`,
+    params
+  );
+
+  const deletedResult = await client.query(
+    `UPDATE ${tableName}
+        SET deleted_at = NOW()
+      WHERE company_id = $1
+        AND deleted_at IS NULL
+        AND NOT ${stillInTally}
+      RETURNING ${nameColumn}`,
+    params
+  );
+
+  if (deletedResult.rowCount > 0) {
+    console.log(
+      `🗑️ ${tableName}: soft-deleted ${deletedResult.rowCount} row(s) no longer in Tally for company ${companyId}`,
+      deletedResult.rows.slice(0, 20).map((r) => r[nameColumn])
+    );
+  }
+
+  return { softDeleted: deletedResult.rowCount, restored: restoredResult.rowCount };
 }
 
 function logUpsertSummary() {
@@ -1922,9 +2007,11 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     }
 
     let inserted = 0, updated = 0;
+    const syncedItemNames = new Set();
 
     for (const item of list) {
       const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
+      if (itemName) syncedItemNames.add(itemName.toLowerCase());
 
       // Keyed on company_id: same-named companies (one per user pairing)
       // must not share rows. Legacy rows with no company_id are matched by
@@ -1963,6 +2050,10 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       inserted++;
     }
 
+    const { softDeleted, restored } = await syncMasterSoftDelete(
+      client, "app_test.stock_group_summary", "item_name", companyId, syncedItemNames
+    );
+
     await client.query("COMMIT");
 
     return res.status(200).json({
@@ -1970,7 +2061,7 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       source: "tally",
       message: "Stock group summary synced successfully",
       company,
-      summary: { inserted, updated, total: list.length },
+      summary: { inserted, updated, soft_deleted: softDeleted, restored, total: list.length },
       data: list.map((item) => {
         const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
         return { group_name: groupName, item_name: itemName, hsn_code: hsnCode, quantity, stock_value: stockValue, unit, gst_rate: gstRate, cgst_rate: cgstRate, sgst_rate: sgstRate, igst_rate: igstRate, gst_applicable: gstApplicable };
@@ -2526,6 +2617,8 @@ router.get("/all-ledgers-sync", async (req, res) => {
     let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
     const updatedLedgers = [];
+    const syncedLedgerNames = new Set();
+    const syncedLedgerGuids = new Set();
 
     for (const ledger of list) {
       let rawLedgerName =
@@ -2536,9 +2629,11 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
       const ledgerName = clean(rawLedgerName);
       if (!ledgerName) { ignored++; continue; }
+      syncedLedgerNames.add(ledgerName.toLowerCase());
 
       const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, "ledger");
+      if (originalGuid && REAL_TALLY_GUID_PATTERN.test(guid)) syncedLedgerGuids.add(guid.toLowerCase());
       const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
 
@@ -2616,6 +2711,10 @@ router.get("/all-ledgers-sync", async (req, res) => {
       }
     }
 
+    const { softDeleted, restored } = await syncMasterSoftDelete(
+      client, "app_test.all_ledger_details", "ledger_name", companyId, syncedLedgerNames, syncedLedgerGuids
+    );
+
     await client.query("COMMIT");
 
     return res.status(200).json({
@@ -2623,7 +2722,7 @@ router.get("/all-ledgers-sync", async (req, res) => {
       source: "tally",
       message: "All ledger details synced successfully",
       company,
-      summary: { total_found: list.length, inserted, updated, ignored, primary_group_updated: primaryGroupUpdated, group_hierarchy_loaded: !!groupHierarchy },
+      summary: { total_found: list.length, inserted, updated, ignored, soft_deleted: softDeleted, restored, primary_group_updated: primaryGroupUpdated, group_hierarchy_loaded: !!groupHierarchy },
       samples: { inserted: insertedLedgers.slice(0, 5), updated: updatedLedgers.slice(0, 5) },
       data_summary: {
         with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,

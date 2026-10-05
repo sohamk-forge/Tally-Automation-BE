@@ -512,7 +512,7 @@ router.get("/invoices/missing-summary", async (req, res) => {
     if (missingItemNames.length) {
       const knownNamesResult = await pool.query(
         `
-        SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1
+        SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1 AND deleted_at IS NULL
         UNION
         SELECT item_name FROM ${DB_SCHEMA}.push_stock_item WHERE company_id = $1 AND status = 'success'
         `,
