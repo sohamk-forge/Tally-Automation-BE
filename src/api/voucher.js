@@ -8,15 +8,30 @@ DATE FORMATTING
 ====================================
 */
 
+// node-pg returns a Postgres DATE as a JS Date at LOCAL midnight (server is
+// Asia/Calcutta), so the calendar date must be read with local getters.
+// The UTC getters used before turned 2026-04-01 00:00 IST into 2026-03-31
+// 18:30 UTC — every voucher reached Tally one day early, and 1 April ones
+// were rejected as "earlier than Financial year beginning".
+function toYyyymmdd(date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}`;
+}
+
+// Same calendar date as YYYY-MM-DD (for SQL comparisons).
+export function toIsoDate(date) {
+  const s = toYyyymmdd(date);
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
 export function formatVoucherDate(rawDate, voucherId) {
   if (rawDate instanceof Date) {
     if (isNaN(rawDate.getTime())) {
       throw new Error(`Voucher ${voucherId}: voucher_date is an invalid Date object`);
     }
-    const yyyy = rawDate.getUTCFullYear();
-    const mm = String(rawDate.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(rawDate.getUTCDate()).padStart(2, "0");
-    return `${yyyy}${mm}${dd}`;
+    return toYyyymmdd(rawDate);
   }
   const str = String(rawDate || "").trim();
   if (/^\d{8}$/.test(str)) return str;
@@ -193,11 +208,19 @@ function looksLikeHdfc(allText) {
   const hits = [hasBankLtd, hasCustId, hasNomination, hasOdLimit].filter(Boolean).length;
   return hits >= 2;
 }
-export function detectBankFromSheet(sheet, xlsxUtils) {
+// headerRowIndex: row of the transaction table's column headers (from
+// findHeaderRowIndex). Only the account-details block ABOVE it is scanned:
+// transaction narrations carry counterparty IFSCs and bank names
+// ("NEFT-UTIB0002826-..."), so scanning into them flagged ICICI statements
+// that merely had an Axis counterparty as "AXIS BANK". 0/undefined = header
+// row unknown → fall back to the first 40 rows.
+export function detectBankFromSheet(sheet, xlsxUtils, headerRowIndex = 0) {
   if (!sheet["!ref"]) return { detected: null, evidence: null };
 
   const range = xlsxUtils.decode_range(sheet["!ref"]);
-  const scanRows = Math.min(range.e.r, 40);
+  const scanRows = headerRowIndex > range.s.r
+    ? headerRowIndex - 1
+    : Math.min(range.e.r, 40);
 
   let allText = "";
   for (let r = range.s.r; r <= scanRows; r++) {
@@ -215,9 +238,14 @@ export function detectBankFromSheet(sheet, xlsxUtils) {
   console.log("hasNomination:", /Nomination\s*:/i.test(allText));
   console.log("hasOdLimit:", /OD Limit\s*:/i.test(allText));
 
-  const ifscMatch = allText.match(/\b([A-Z]{4})0[A-Z0-9]{6}\b/);
-  if (ifscMatch && IFSC_PREFIX_TO_BANK[ifscMatch[1]]) {
-    return { detected: IFSC_PREFIX_TO_BANK[ifscMatch[1]], evidence: `IFSC ${ifscMatch[0]}` };
+  // An IFSC printed against an "IFSC"/"IFS Code" label is the account's
+  // own branch — trust it over any other IFSC-shaped string in the block.
+  const labelledIfsc = allText.match(/IFS(?:C)?\s*(?:Code)?\s*(?:No\.?)?\s*[:\-]?\s*\b([A-Z]{4})0[A-Z0-9]{6}\b/i);
+  const ifscMatch = labelledIfsc || allText.match(/\b([A-Z]{4})0[A-Z0-9]{6}\b/);
+  const ifscPrefix = ifscMatch?.[1]?.toUpperCase();
+  if (ifscPrefix && IFSC_PREFIX_TO_BANK[ifscPrefix]) {
+    const code = ifscMatch[0].match(/[A-Z]{4}0[A-Z0-9]{6}/i)[0].toUpperCase();
+    return { detected: IFSC_PREFIX_TO_BANK[ifscPrefix], evidence: `IFSC ${code}` };
   }
 
   if (looksLikeHdfc(allText)) {
@@ -236,8 +264,8 @@ export function detectBankFromSheet(sheet, xlsxUtils) {
 // Validates against bank NAME (the fixed dropdown value, e.g. "HDFC
 // Bank"), not bank_ledger. bank_ledger is a free-form Tally ledger
 // account name and is irrelevant to this check.
-export function validateBankMatchesLedger(sheet, bankName, xlsxUtils) {
-  const { detected, evidence } = detectBankFromSheet(sheet, xlsxUtils);
+export function validateBankMatchesLedger(sheet, bankName, xlsxUtils, headerRowIndex = 0) {
+  const { detected, evidence } = detectBankFromSheet(sheet, xlsxUtils, headerRowIndex);
 
   if (!detected) {
     return { ok: true, verified: false };

@@ -232,6 +232,8 @@ import emailVerificationRoutes from "./api/emailVerification.routes.js";
 import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
 
 import ledgerPdfRoutes from "./api/ledgerPdf.routes.js";
+
+import pdfServiceProxy from "./api/pdfServiceProxy.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -287,6 +289,23 @@ app.use(
 );
 
 app.use(supertokensMiddleware());
+
+// The connector posts Tally's raw export XML back as JSON here. A
+// full-year voucher export outgrew the 50mb global limit (~60 MB by
+// 2026-10-05), so the upload was rejected with 413 and the sync step
+// sat waiting 5 minutes for a result. Registered before the global
+// parser: body-parser skips bodies that are already parsed, so only
+// this one API-key-authenticated route gets the larger limit.
+app.use("/api/connector/jobs/result", express.json({ limit: "500mb" }));
+
+// Bank-statement PDF/OCR service (private LAN, port 9001). Must stay above
+// the body parsers so uploads stream through unread — see
+// pdfServiceProxy.routes.js.
+app.use(
+  "/api/pdf-service",
+  ...requireSessionAndCompany(),
+  pdfServiceProxy
+);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));

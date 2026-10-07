@@ -12,7 +12,7 @@ import {
   safeEnqueueVoucher
 } from "../queues/voucher.queue.js";
 
-import { formatVoucherDate, checkDuplicateFromDb } from "../api/voucher.js";
+import { formatVoucherDate, checkDuplicateFromDb, toIsoDate } from "../api/voucher.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 
 const connection = new IORedis({
@@ -256,7 +256,7 @@ const worker = new Worker(
       if (!voucher.force_push) {
         const voucherDateStr =
           voucher.voucher_date instanceof Date
-            ? voucher.voucher_date.toISOString().split("T")[0]
+            ? toIsoDate(voucher.voucher_date)
             : String(voucher.voucher_date).slice(0, 10);
 
         const dup = await checkDuplicateFromDb({

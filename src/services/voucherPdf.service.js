@@ -49,9 +49,11 @@ function formatDate(dateValue) {
   const d = new Date(dateValue);
   if (Number.isNaN(d.getTime())) return String(dateValue);
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const yy = String(d.getUTCFullYear()).slice(2);
-  return `${dd}-${months[d.getUTCMonth()]}-${yy}`;
+  // Local getters: node-pg hands DATE columns back as local (IST)
+  // midnight, which the UTC getters read as the previous day.
+  const dd = String(d.getDate()).padStart(2, "0");
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}-${months[d.getMonth()]}-${yy}`;
 }
 
 /**

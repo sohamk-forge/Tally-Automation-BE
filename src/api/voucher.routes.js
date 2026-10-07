@@ -58,7 +58,8 @@ function cleanString(val) {
 const HEADER_ALIASES = {
   date: [
     "date", "txn date", "transaction date", "tran date",
-    "transaction dt", "value date", "value dt"
+    "transaction dt", "value date", "value dt",
+    "txn posted date"   // ICICI (newer export) — fallback after Value Date
   ],
   narration: [
     "narration", "description", "particulars",
@@ -79,12 +80,16 @@ const HEADER_ALIASES = {
     "deposit amount(inr)", "deposit amount"
   ],
   balance: [
-    "closing balance", "balance", "balance(inr)", "bal"
+    "closing balance", "balance", "balance(inr)", "bal",
+    "available balance(inr)", "available balance"   // ICICI (newer export)
   ],
   // NEW: banks that report a single Amount column plus a separate
   // Dr/Cr type flag instead of splitting into two amount columns
   // (e.g. Kotak Mahindra's exports)
-  amount: ["amount", "transaction amount", "amount(inr)"],
+  amount: [
+    "amount", "transaction amount", "amount(inr)",
+    "transaction amount(inr)"   // ICICI (newer export), paired with "Cr/Dr"
+  ],
   drCr: ["dr / cr", "dr/cr", "cr/dr", "cr / dr", "type", "transaction type"]
 };
 
@@ -95,10 +100,15 @@ const HEADER_ROW_DETECTORS = [
   ...HEADER_ALIASES.date,
   ...HEADER_ALIASES.withdrawal,
   ...HEADER_ALIASES.deposit
-];
+].map(normalizeHeaderKey);
 
+// Case-, space- and punctuation-insensitive: banks vary only in those
+// across exports (ICICI "Withdrawal Amount (INR )" vs the alias
+// "withdrawal amount(inr)", Axis "DR|CR" vs "dr/cr"), and an exact-text
+// miss on the amount columns silently drops every row ("No valid
+// transaction rows found").
 function normalizeHeaderKey(key) {
-  return String(key || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 // Re-keys a sheet_to_json row (whose keys are the literal, possibly
@@ -154,8 +164,9 @@ function parseDate(raw) {
 
   const str = cleanString(String(raw));
 
-  // Numeric formats: DD/MM/YYYY, DD-MM-YYYY — optional trailing time
-  const numMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  // Numeric formats: DD/MM/YYYY, DD-MM-YYYY — optional trailing time,
+  // incl. 12-hour "10:15:32 AM" (cleanString may have clipped the "M")
+  const numMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M?)?)?$/i);
   if (numMatch) {
     let [, d, m, y] = numMatch;
     if (y.length === 2) y = "20" + y;
@@ -352,7 +363,8 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   // Validated against bank_name (the fixed dropdown value, e.g.
   // "HDFC Bank"), NOT bank_ledger (which is a free-form Tally ledger
   // account name and could be anything the user typed there).
-  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils);
+  const headerRowIndex = findHeaderRowIndex(sheet);
+  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils, headerRowIndex);
   if (!bankCheck.ok) {
     return {
       file_name: fileName,
@@ -366,7 +378,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     };
   }
 
-  const headerRowIndex = findHeaderRowIndex(sheet);
   // ...rest of the function stays exactly the same
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
@@ -445,7 +456,7 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     transactions.push({
       transaction_date: String(pickField(normRow, "date") ?? "").trim(),
       value_date: String(
-        normRow["value dt"] ?? normRow["value date"] ?? pickField(normRow, "date") ?? ""
+        normRow[normalizeHeaderKey("value dt")] ?? normRow[normalizeHeaderKey("value date")] ?? pickField(normRow, "date") ?? ""
       ).trim(),
       narration: narration || "",
       cheque_ref: chequeRef || "",
@@ -544,7 +555,11 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
       original_file_name: wasRenamed ? originalFileName : undefined,
       renamed: wasRenamed,
       success: false,
-      message: "No valid transaction rows found in the file"
+      // List the headers we actually saw so an unsupported layout can be
+      // added to HEADER_ALIASES without needing the customer's file.
+      message:
+        "No valid transaction rows found in the file. Columns found: " +
+        Object.keys(rawRows[0] || {}).filter((k) => !k.startsWith("__EMPTY")).join(", ")
     };
   }
 
