@@ -56,6 +56,8 @@ import "./workers/bulkSales.worker.js";
 
 import "./workers/pushVoucher.worker.js";
 
+import "./workers/journalVoucher.worker.js";
+
 import "./workers/bulkSalesV2.worker.js";
 
 import "./workers/bulkPurchase.worker.js";
@@ -174,6 +176,9 @@ import connectorAuthRoutes from "./api/connectorAuth.routes.js";
 
 import voucherRoutes
  from "./api/voucher.routes.js";
+
+import journalVoucherRoutes
+  from "./api/journalVoucher.routes.js";
 
 import salesAccountRoutes
  from "./api/salesAccount.routes.js";
@@ -390,6 +395,16 @@ app.use(
   "/api",
   ...requireSessionAndCompany(),
   ledgerVouchersRoutes
+);
+
+/* =================================
+   JOURNAL VOUCHER APIs
+================================= */
+
+app.use(
+  "/api",
+  ...requireSessionOrApiKey(),
+  journalVoucherRoutes
 );
 
 /* =================================
