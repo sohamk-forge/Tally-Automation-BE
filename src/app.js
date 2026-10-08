@@ -234,6 +234,8 @@ import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
 import ledgerPdfRoutes from "./api/ledgerPdf.routes.js";
 
 import pdfServiceProxy from "./api/pdfServiceProxy.routes.js";
+
+import banksRoutes from "./api/banks.routes.js";
 /* =================================
    MIDDLEWARE
 ================================= */
@@ -311,6 +313,12 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+/* =================================
+   BANK NAMES (Banking upload dropdown)
+================================= */
+
+app.use("/api/banks", ...requireSessionAndCompany(), banksRoutes);
 
 /* =================================
    LOGGER MIDDLEWARE
