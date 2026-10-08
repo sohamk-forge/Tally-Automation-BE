@@ -403,7 +403,7 @@ app.use(
 
 app.use(
   "/api",
-  ...requireSessionOrApiKey(),
+  ...requireSessionAndCompany(),
   journalVoucherRoutes
 );
 

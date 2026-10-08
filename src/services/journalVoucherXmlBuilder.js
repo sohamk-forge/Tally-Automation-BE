@@ -11,9 +11,23 @@ function escapeXml(value) {
     .replace(/'/g, "&apos;");
 }
 
+const pad = (n) => String(n).padStart(2, "0");
+
 function formatTallyDate(date) {
   if (!date) {
     throw new Error("Voucher date is required");
+  }
+
+  // pg returns DATE columns as a JS Date (local midnight) unless a type
+  // parser is registered — String(date) of that has no "-" to split on.
+  // Local getters (not toISOString) so a +05:30 server doesn't shift the
+  // voucher back a day.
+  if (date instanceof Date) {
+    if (Number.isNaN(date.getTime())) {
+      throw new Error("Invalid voucher date");
+    }
+
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
   }
 
   const value = String(date);
@@ -22,17 +36,13 @@ function formatTallyDate(date) {
     return value;
   }
 
-  const parts = value.split("-");
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
 
-  if (parts.length !== 3) {
-    throw new Error(
-      "Invalid voucher date. Use YYYY-MM-DD"
-    );
+  if (!match) {
+    throw new Error("Invalid voucher date. Use YYYY-MM-DD");
   }
 
-  const [year, month, day] = parts;
-
-  return `${year}${month}${day}`;
+  return `${match[1]}${match[2]}${match[3]}`;
 }
 
 export function createJournalVoucherXML({
@@ -48,86 +58,56 @@ export function createJournalVoucherXML({
   }
 
   if (!entries || !entries.length) {
-    throw new Error(
-      "At least one voucher entry is required"
-    );
+    throw new Error("At least one voucher entry is required");
   }
 
   const totalDebit = entries
     .filter(
       (entry) =>
-        String(entry.entry_type).toLowerCase() ===
-        "debit"
+        String(entry.entry_type).toLowerCase() === "debit"
     )
-    .reduce(
-      (sum, entry) =>
-        sum + Number(entry.amount),
-      0
-    );
+    .reduce((sum, entry) => sum + Number(entry.amount), 0);
 
   const totalCredit = entries
     .filter(
       (entry) =>
-        String(entry.entry_type).toLowerCase() ===
-        "credit"
+        String(entry.entry_type).toLowerCase() === "credit"
     )
-    .reduce(
-      (sum, entry) =>
-        sum + Number(entry.amount),
-      0
-    );
+    .reduce((sum, entry) => sum + Number(entry.amount), 0);
 
-  if (
-    Math.abs(totalDebit - totalCredit) >
-    0.01
-  ) {
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
     throw new Error(
       `Voucher is not balanced. Debit=${totalDebit}, Credit=${totalCredit}`
     );
   }
 
-  const tallyDate =
-    formatTallyDate(voucherDate);
+  const tallyDate = formatTallyDate(voucherDate);
 
   const ledgerEntries = entries
     .map((entry) => {
-      const type =
-        String(entry.entry_type).toLowerCase();
-
-      const amount = Number(entry.amount);
+      const type = String(entry.entry_type).toLowerCase();
 
       if (!entry.ledger_name) {
-        throw new Error(
-          "ledger_name is required"
-        );
+        throw new Error("ledger_name is required");
       }
 
       if (!["debit", "credit"].includes(type)) {
-        throw new Error(
-          "entry_type must be debit or credit"
-        );
+        throw new Error("entry_type must be debit or credit");
       }
 
-      const tallyAmount =
-        type === "debit"
-          ? amount
-          : -amount;
+      const isDebit = type === "debit";
+
+      // Tally's import convention: a DEBIT line is ISDEEMEDPOSITIVE=Yes with
+      // a NEGATIVE amount; a CREDIT line is No with a POSITIVE amount.
+      // (The reverse posts every Dr as a Cr.)
+      const amount = Number(entry.amount);
+      const signedAmount = isDebit ? -amount : amount;
 
       return `
         <ALLLEDGERENTRIES.LIST>
-          <LEDGERNAME>${escapeXml(
-            entry.ledger_name
-          )}</LEDGERNAME>
-
-          <ISDEEMEDPOSITIVE>${
-            type === "debit"
-              ? "No"
-              : "Yes"
-          }</ISDEEMEDPOSITIVE>
-
-          <AMOUNT>${tallyAmount.toFixed(
-            2
-          )}</AMOUNT>
+          <LEDGERNAME>${escapeXml(entry.ledger_name)}</LEDGERNAME>
+          <ISDEEMEDPOSITIVE>${isDebit ? "Yes" : "No"}</ISDEEMEDPOSITIVE>
+          <AMOUNT>${signedAmount.toFixed(2)}</AMOUNT>
         </ALLLEDGERENTRIES.LIST>
       `;
     })
@@ -150,9 +130,7 @@ export function createJournalVoucherXML({
         <REPORTNAME>Vouchers</REPORTNAME>
 
         <STATICVARIABLES>
-          <SVCURRENTCOMPANY>
-            ${escapeXml(company)}
-          </SVCURRENTCOMPANY>
+          <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
         </STATICVARIABLES>
 
       </REQUESTDESC>
@@ -161,29 +139,19 @@ export function createJournalVoucherXML({
 
         <TALLYMESSAGE>
 
-          <VOUCHER
-            VCHTYPE="${escapeXml(
-              voucherType
-            )}"
-            ACTION="Create">
+          <VOUCHER VCHTYPE="${escapeXml(voucherType)}" ACTION="Create">
 
             <DATE>${tallyDate}</DATE>
 
             ${
               voucherNumber
-                ? `<VOUCHERNUMBER>${escapeXml(
-                    voucherNumber
-                  )}</VOUCHERNUMBER>`
+                ? `<VOUCHERNUMBER>${escapeXml(voucherNumber)}</VOUCHERNUMBER>`
                 : ""
             }
 
-            <VOUCHERTYPENAME>
-              ${escapeXml(voucherType)}
-            </VOUCHERTYPENAME>
+            <VOUCHERTYPENAME>${escapeXml(voucherType)}</VOUCHERTYPENAME>
 
-            <NARRATION>
-              ${escapeXml(narration || "")}
-            </NARRATION>
+            <NARRATION>${escapeXml(narration || "")}</NARRATION>
 
             ${ledgerEntries}
 

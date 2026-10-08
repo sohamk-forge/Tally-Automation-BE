@@ -388,6 +388,34 @@ export async function processConnectorJobResult(client, job) {
   break;
 }
 
+      case "journal_voucher": {
+        const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
+
+        await client.query(
+          `
+          UPDATE app_test.push_journal_vouchers
+          SET
+            status = $1,
+            tally_response = $2,
+            error_message = $3,
+            updated_at = NOW()
+          WHERE id = $4
+          `,
+          [
+            finalStatus === "success" ? "success" : "failed",
+            response_xml || null,
+            // LINEERROR text arrives XML-escaped (&apos; etc.) — decode it
+            // so the user sees "Ledger 'Rent' does not exist!".
+            finalStatus === "success" ? null : decodeXmlText(errorMessage),
+            payload.voucher_id
+          ]
+        );
+
+        console.log(`✅ Journal voucher ${payload.voucher_id} marked ${finalStatus.toUpperCase()}`);
+
+        break;
+      }
+
       default:
         console.log(
           `ℹ️ CONNECTOR JOB RESULT: no handler for job_type "${job_type}", skipped business record sync`,

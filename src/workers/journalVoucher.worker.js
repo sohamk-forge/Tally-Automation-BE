@@ -1,4 +1,4 @@
-import { Worker } from "bullmq";
+import { Worker, UnrecoverableError } from "bullmq";
 import IORedis from "ioredis";
 
 import pool from "../db/index.js";
@@ -93,9 +93,32 @@ const worker = new Worker(
 
 
     if (!voucher) {
-      throw new Error(
+      throw new UnrecoverableError(
         `Voucher ${voucherId} not found`
       );
+    }
+
+
+    // --------------------------------
+    // ALREADY HANDED OFF / FINISHED
+    // --------------------------------
+
+    // A retry (or a duplicate enqueue) must never create a second connector
+    // job — that would post the same journal into Tally twice.
+    if (
+      voucher.connector_job_id ||
+      voucher.status === "success"
+    ) {
+      console.log(
+        `[JOURNAL] Voucher ${voucherId} already handed off (connector job ${voucher.connector_job_id}), skipping`
+      );
+
+      return {
+        voucherId,
+        status: voucher.status,
+        connectorJobId:
+          voucher.connector_job_id
+      };
     }
 
 
@@ -144,7 +167,7 @@ const worker = new Worker(
 
 
       if (!entries.length) {
-        throw new Error(
+        throw new UnrecoverableError(
           "Voucher has no entries"
         );
       }
@@ -154,26 +177,36 @@ const worker = new Worker(
       // CREATE XML
       // --------------------------------
 
-      const xml =
-        createJournalVoucherXML({
+      // A bad date / unbalanced voucher will fail identically on every
+      // attempt, so don't burn the retries (and backoff) on it.
+      let xml;
 
-          company:
-            voucher.company_name,
+      try {
+        xml =
+          createJournalVoucherXML({
 
-          voucherDate:
-            voucher.voucher_date,
+            company:
+              voucher.company_name,
 
-          voucherNumber:
-            voucher.voucher_number,
+            voucherDate:
+              voucher.voucher_date,
 
-          voucherType:
-            voucher.voucher_type,
+            voucherNumber:
+              voucher.voucher_number,
 
-          narration:
-            voucher.narration,
+            voucherType:
+              voucher.voucher_type,
 
-          entries
-        });
+            narration:
+              voucher.narration,
+
+            entries
+          });
+      } catch (xmlError) {
+        throw new UnrecoverableError(
+          xmlError.message
+        );
+      }
 
 
       console.log(
@@ -219,8 +252,10 @@ const worker = new Worker(
           userId:
             connector.user_id,
 
+          // Underscore, like every other job type — and the key
+          // connectorJobResult.service.js switches on to close the loop.
           jobType:
-            "journal-voucher",
+            "journal_voucher",
 
           requestXml:
             xml,
@@ -245,36 +280,51 @@ const worker = new Worker(
         });
 
 
-      // --------------------------------
-      // STATUS = PENDING
-      // --------------------------------
-
-      await pool.query(
-        `
-        UPDATE
-        ${DB_SCHEMA}.push_journal_vouchers
-
-        SET
-          status = 'pending',
-          error_message = NULL,
-          updated_at = NOW()
-
-        WHERE id = $1
-        `,
-        [voucherId]
-      );
-
-
       console.log(
         `[JOURNAL] Connector job created: ${connectorJob.id}`
       );
+
+
+      // --------------------------------
+      // STATUS = PENDING_CONNECTOR
+      // --------------------------------
+
+      // Distinct from 'pending' (queued, not yet picked up by this worker).
+      // The connector's result callback is what moves it to success/failed.
+      //
+      // The connector job already exists at this point, so a failure here
+      // must NOT throw: BullMQ would retry and create a second connector job
+      // (a duplicate journal in Tally). The result callback updates the
+      // voucher by id regardless of this write.
+      try {
+        await pool.query(
+          `
+          UPDATE
+          ${DB_SCHEMA}.push_journal_vouchers
+
+          SET
+            status = 'pending_connector',
+            connector_job_id = $2,
+            error_message = NULL,
+            updated_at = NOW()
+
+          WHERE id = $1
+          `,
+          [voucherId, connectorJob.id]
+        );
+      } catch (statusError) {
+        console.error(
+          `[JOURNAL] Connector job ${connectorJob.id} created for voucher ${voucherId}, but status update failed:`,
+          statusError.message
+        );
+      }
 
 
       return {
 
         voucherId,
 
-        status: "pending",
+        status: "pending_connector",
 
         connectorJobId:
           connectorJob.id
