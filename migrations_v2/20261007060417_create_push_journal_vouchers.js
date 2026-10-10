@@ -1,48 +1,78 @@
+
 export async function up(knex) {
   const schema = process.env.DB_SCHEMA || "app_test";
 
-  await knex.schema
-    .withSchema(schema)
-    .createTable("push_journal_vouchers", (table) => {
-      table.increments("id").primary();
+  await knex.schema.withSchema(schema).createTable("push_journal_vouchers", (table) => {
+    table.increments("id").primary();
 
-      table.integer("company_id").notNullable();
+    table.integer("company_id").notNullable();
+    table.string("company_name").notNullable();
+    table.date("voucher_date").notNullable();
+    table.string("voucher_number");
+    table.string("voucher_type").notNullable().defaultTo("Journal");
+    table.text("narration");
 
-      table.string("company_name").notNullable();
+    // pending -> processing -> pending_connector -> success | failed
+    table.string("status").notNullable().defaultTo("pending");
 
-      table.date("voucher_date").notNullable();
+    table.text("error_message");
+    table.text("tally_response");
+    table.integer("connector_job_id");
 
-      table.string("voucher_number");
+    // Local numeric users.id (NOT the SuperTokens UUID).
+    table.integer("created_by");
 
-      table.string("voucher_type").notNullable().defaultTo("Journal");
+    table.timestamps(true, true);
+  });
 
-      table.text("narration");
+  await knex.raw(`
+    CREATE INDEX idx_push_journal_vouchers_company
+    ON ${schema}.push_journal_vouchers (company_id)
+  `);
 
-      // pending -> processing -> pending_connector -> success | failed
-      table.string("status").notNullable().defaultTo("pending");
+  await knex.raw(`
+    CREATE INDEX idx_push_journal_vouchers_status
+    ON ${schema}.push_journal_vouchers (status)
+  `);
 
-      table.text("error_message");
+  await knex.raw(`
+    CREATE INDEX idx_push_journal_vouchers_date
+    ON ${schema}.push_journal_vouchers (voucher_date)
+  `);
 
-      // Raw Tally import response, kept for debugging rejected vouchers.
-      table.text("tally_response");
+  await knex.raw(`
+    CREATE INDEX idx_push_journal_vouchers_connector_job
+    ON ${schema}.push_journal_vouchers (connector_job_id)
+  `);
 
-      // Set once the worker has handed the voucher to the connector, so a
-      // BullMQ retry never creates a second connector job (= a duplicate
-      // journal in Tally).
-      table.integer("connector_job_id");
-
-      // Local numeric app_test.users.id (NOT the SuperTokens UUID).
-      table.integer("created_by");
-
-      table.timestamps(true, true);
-
-      table.index(["company_id"], "idx_push_journal_vouchers_company");
-      table.index(["status"], "idx_push_journal_vouchers_status");
-    });
+  // Foreign key uses the same schema.
+  await knex.schema.withSchema(schema).alterTable("push_journal_vouchers", (table) => {
+    table
+      .foreign("created_by")
+      .references("id")
+      .inTable(`${schema}.users`)
+      .onDelete("SET NULL");
+  });
 }
 
 export async function down(knex) {
   const schema = process.env.DB_SCHEMA || "app_test";
+
+  await knex.raw(`
+    DROP INDEX IF EXISTS ${schema}.idx_push_journal_vouchers_connector_job
+  `);
+
+  await knex.raw(`
+    DROP INDEX IF EXISTS ${schema}.idx_push_journal_vouchers_date
+  `);
+
+  await knex.raw(`
+    DROP INDEX IF EXISTS ${schema}.idx_push_journal_vouchers_status
+  `);
+
+  await knex.raw(`
+    DROP INDEX IF EXISTS ${schema}.idx_push_journal_vouchers_company
+  `);
 
   await knex.schema
     .withSchema(schema)
