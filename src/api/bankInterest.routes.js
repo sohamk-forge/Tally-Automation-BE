@@ -47,6 +47,8 @@ router.get("/bank-interest-summary", async (req, res) => {
       SELECT ledger_name, parent_group, closing_balance, od_limit
       FROM ${DB_SCHEMA}.bank_accounts
       WHERE company_id = $1
+        -- bank_accounts also holds Cash-in-Hand ledgers; they have no interest/OD limit.
+        AND parent_group IS DISTINCT FROM 'Cash-in-Hand'
       ORDER BY ledger_name
       `,
       [companyId]

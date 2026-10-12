@@ -10,9 +10,12 @@ import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../servi
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 import { resolveMappedLedger } from "../services/vendorLedgerMapping.service.js";
+import { checkPurchaseExcelInvoice } from "../services/purchaseExcelBilling.js";
+import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
+  password: process.env.REDIS_PASSWORD || undefined,
   port: Number(process.env.REDIS_PORT || 6379),
   maxRetriesPerRequest: null
 });
@@ -28,11 +31,12 @@ async function ledgerExists(companyId, ledgerName) {
     `
     SELECT 1
     FROM ${DB_SCHEMA}.all_ledger_details
-    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2))
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND deleted_at IS NULL
     UNION
     SELECT 1
-    FROM ${DB_SCHEMA}.push_ledger
+    FROM ${DB_SCHEMA}.push_ledger pl
     WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = LOWER(TRIM($2)) AND status = 'success'
+      AND ${pushedLedgerStillInTally(DB_SCHEMA, "pl")}
     LIMIT 1
     `,
     [companyId, ledgerName]
@@ -51,11 +55,12 @@ async function stockItemExists(companyId, stockItemName) {
     `
     SELECT 1
     FROM ${DB_SCHEMA}.stock_group_summary
-    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g')
+    WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND deleted_at IS NULL
     UNION
     SELECT 1
-    FROM ${DB_SCHEMA}.push_stock_item
+    FROM ${DB_SCHEMA}.push_stock_item psi
     WHERE company_id = $1 AND regexp_replace(LOWER(TRIM(item_name)), '\\s+', ' ', 'g') = regexp_replace(LOWER(TRIM($2)), '\\s+', ' ', 'g') AND status = 'success'
+      AND ${pushedStockItemStillInTally(DB_SCHEMA, "psi")}
     LIMIT 1
     `,
     [companyId, stockItemName]
@@ -65,9 +70,10 @@ async function stockItemExists(companyId, stockItemName) {
 
   const allNames = await pool.query(
     `
-    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1
+    SELECT item_name FROM ${DB_SCHEMA}.stock_group_summary WHERE company_id = $1 AND deleted_at IS NULL
     UNION
-    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item WHERE company_id = $1 AND status = 'success'
+    SELECT item_name FROM ${DB_SCHEMA}.push_stock_item psi WHERE company_id = $1 AND status = 'success'
+      AND ${pushedStockItemStillInTally(DB_SCHEMA, "psi")}
     `,
     [companyId]
   );
@@ -91,11 +97,12 @@ async function partyLedgerExists(companyId, vendorName) {
     `
     SELECT 1
     FROM ${DB_SCHEMA}.all_ledger_details
-    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = $2
+    WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = $2 AND deleted_at IS NULL
     UNION
     SELECT 1
-    FROM ${DB_SCHEMA}.push_ledger
+    FROM ${DB_SCHEMA}.push_ledger pl
     WHERE company_id = $1 AND LOWER(TRIM(ledger_name)) = $2 AND status = 'success'
+      AND ${pushedLedgerStillInTally(DB_SCHEMA, "pl")}
     LIMIT 1
     `,
     [companyId, normalized]
@@ -402,6 +409,24 @@ const worker = new Worker(
         );
 
         return { invoiceId, status: "failed", error: message };
+      }
+
+      // Purchase Excel invoices (the only ones carrying po_numbers) are
+      // held as Needs Review instead of pushed when a line has no billed
+      // qty/amount or the round off would exceed ₹1 — generator.py posts
+      // any total-vs-items gap to Round Off silently, which once sent a
+      // 4,099 voucher with a -22,775.50 round off. OCR invoices untouched.
+      if (Array.isArray(invoice.po_numbers)) {
+        const problems = checkPurchaseExcelInvoice(invoice);
+        if (problems.length) {
+          const message = `Needs review: ${problems.join("; ")}`;
+          console.warn(`⚠️ Purchase Excel invoice held for review: ${row.invoice_no}`, problems);
+          await pool.query(
+            `UPDATE app_test.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify({ message, review_reasons: problems }), invoiceId]
+          );
+          return { invoiceId, status: "failed", error: message };
+        }
       }
 
       const partyName = invoice.customer_name || invoice.vendor_name || "";

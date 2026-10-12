@@ -14,8 +14,12 @@ import {
   deleteCompanyLogo,
   getCompanyLogoMeta,
 } from "../services/companyLogo.service.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
+
+// Every :companyId in this router must belong to the caller.
+router.param("companyId", companyParamGuard);
 
 const upload = multer({
   storage: multer.memoryStorage(),

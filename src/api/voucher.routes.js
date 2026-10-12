@@ -3,6 +3,7 @@ import db from "../db/index.js";
 import multer from "multer";
 import xlsx from "xlsx";
 import path from "path";
+import { randomUUID } from "crypto";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -21,6 +22,7 @@ import {
   enqueueExtraction
 } from "../services/statementExtraction.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
+import { assertCompanyRefs, ownedCompaniesSql, resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 
 const router = express.Router();
@@ -57,7 +59,8 @@ function cleanString(val) {
 const HEADER_ALIASES = {
   date: [
     "date", "txn date", "transaction date", "tran date",
-    "transaction dt", "value date", "value dt"
+    "transaction dt", "value date", "value dt",
+    "txn posted date"   // ICICI (newer export) — fallback after Value Date
   ],
   narration: [
     "narration", "description", "particulars",
@@ -78,12 +81,16 @@ const HEADER_ALIASES = {
     "deposit amount(inr)", "deposit amount"
   ],
   balance: [
-    "closing balance", "balance", "balance(inr)", "bal"
+    "closing balance", "balance", "balance(inr)", "bal",
+    "available balance(inr)", "available balance"   // ICICI (newer export)
   ],
   // NEW: banks that report a single Amount column plus a separate
   // Dr/Cr type flag instead of splitting into two amount columns
   // (e.g. Kotak Mahindra's exports)
-  amount: ["amount", "transaction amount", "amount(inr)"],
+  amount: [
+    "amount", "transaction amount", "amount(inr)",
+    "transaction amount(inr)"   // ICICI (newer export), paired with "Cr/Dr"
+  ],
   drCr: ["dr / cr", "dr/cr", "cr/dr", "cr / dr", "type", "transaction type"]
 };
 
@@ -94,10 +101,15 @@ const HEADER_ROW_DETECTORS = [
   ...HEADER_ALIASES.date,
   ...HEADER_ALIASES.withdrawal,
   ...HEADER_ALIASES.deposit
-];
+].map(normalizeHeaderKey);
 
+// Case-, space- and punctuation-insensitive: banks vary only in those
+// across exports (ICICI "Withdrawal Amount (INR )" vs the alias
+// "withdrawal amount(inr)", Axis "DR|CR" vs "dr/cr"), and an exact-text
+// miss on the amount columns silently drops every row ("No valid
+// transaction rows found").
 function normalizeHeaderKey(key) {
-  return String(key || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 // Re-keys a sheet_to_json row (whose keys are the literal, possibly
@@ -153,8 +165,9 @@ function parseDate(raw) {
 
   const str = cleanString(String(raw));
 
-  // Numeric formats: DD/MM/YYYY, DD-MM-YYYY — optional trailing time
-  const numMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  // Numeric formats: DD/MM/YYYY, DD-MM-YYYY — optional trailing time,
+  // incl. 12-hour "10:15:32 AM" (cleanString may have clipped the "M")
+  const numMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M?)?)?$/i);
   if (numMatch) {
     let [, d, m, y] = numMatch;
     if (y.length === 2) y = "20" + y;
@@ -351,7 +364,8 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
   // Validated against bank_name (the fixed dropdown value, e.g.
   // "HDFC Bank"), NOT bank_ledger (which is a free-form Tally ledger
   // account name and could be anything the user typed there).
-  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils);
+  const headerRowIndex = findHeaderRowIndex(sheet);
+  const bankCheck = validateBankMatchesLedger(sheet, bank_name, xlsx.utils, headerRowIndex);
   if (!bankCheck.ok) {
     return {
       file_name: fileName,
@@ -365,7 +379,6 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     };
   }
 
-  const headerRowIndex = findHeaderRowIndex(sheet);
   // ...rest of the function stays exactly the same
 
   let rawRows = xlsx.utils.sheet_to_json(sheet, {
@@ -444,7 +457,7 @@ async function processStatementFile({ file, company_id, company_name, bank_ledge
     transactions.push({
       transaction_date: String(pickField(normRow, "date") ?? "").trim(),
       value_date: String(
-        normRow["value dt"] ?? normRow["value date"] ?? pickField(normRow, "date") ?? ""
+        normRow[normalizeHeaderKey("value dt")] ?? normRow[normalizeHeaderKey("value date")] ?? pickField(normRow, "date") ?? ""
       ).trim(),
       narration: narration || "",
       cheque_ref: chequeRef || "",
@@ -543,7 +556,11 @@ inserted.push({ ...r.rows[0], _action: 'inserted' });
       original_file_name: wasRenamed ? originalFileName : undefined,
       renamed: wasRenamed,
       success: false,
-      message: "No valid transaction rows found in the file"
+      // List the headers we actually saw so an unsupported layout can be
+      // added to HEADER_ALIASES without needing the customer's file.
+      message:
+        "No valid transaction rows found in the file. Columns found: " +
+        Object.keys(rawRows[0] || {}).filter((k) => !k.startsWith("__EMPTY")).join(", ")
     };
   }
 
@@ -607,6 +624,8 @@ router.post(
           message: "company_id, company_name and bank_ledger are required"
         });
       }
+      // Multipart body — parsed by multer after the app-level company guard ran.
+      if (!(await assertCompanyRefs(req, res, { ids: [company_id], names: [company_name] }))) return;
       if (!bank_name) {
         return res.status(400).json({
           success: false,
@@ -745,12 +764,119 @@ router.delete("/statement-files", async (req, res) => {
       );
       deleted = r.rowCount;
       await deleteJobs(company_id, deletable);
+      await db.query(
+        `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+         WHERE company_id = $1 AND statement_key = ANY($2)`,
+        [company_id, deletable.map((f) => `excel:${f}`)]
+      );
     }
 
     return res.json({ success: true, deleted_files: deletable, skipped_files: skipped, deleted_rows: deleted });
   } catch (err) {
     console.error("STATEMENT FILES DELETE ERROR:", err);
     return res.status(500).json({ success: false, message: "Failed to delete statement files" });
+  }
+});
+
+/* ===========================
+   REVIEW STATEMENT DRAFTS
+   Unsent per-row picks (ledger / voucher / narration). statement_key is
+   "excel:<file_name>" or "pdf:<document_id>"; row_id is the FE row id.
+=========================== */
+
+const DRAFT_FIELDS = ["ledger", "voucher", "narration"];
+
+router.get("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key } = req.query;
+    if (!company_id || !statement_key) {
+      return res.status(400).json({ success: false, message: "company_id and statement_key are required" });
+    }
+
+    const result = await db.query(
+      `SELECT row_id, ledger, voucher, narration
+       FROM ${DB_SCHEMA}.bank_statement_drafts
+       WHERE company_id = $1 AND statement_key = $2`,
+      [company_id, statement_key]
+    );
+
+    const drafts = {};
+    for (const r of result.rows) {
+      const d = {};
+      for (const f of DRAFT_FIELDS) if (r[f] !== null) d[f] = r[f];
+      drafts[r.row_id] = d;
+    }
+    return res.json({ success: true, drafts });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS GET ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to load drafts" });
+  }
+});
+
+/* Upsert one row's draft. Only the fields present in the body are written,
+   so saving a voucher doesn't wipe an earlier ledger pick. */
+router.put("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key, row_id } = req.body || {};
+    if (!company_id || !statement_key || row_id === undefined || row_id === null || row_id === "") {
+      return res.status(400).json({ success: false, message: "company_id, statement_key and row_id are required" });
+    }
+
+    const fields = DRAFT_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(req.body, f));
+    if (fields.length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to save" });
+    }
+
+    const userId = await resolveUserId(req).catch(() => null);
+    const params = [company_id, statement_key, String(row_id), userId];
+    const cols = fields.map((f) => {
+      const v = req.body[f];
+      params.push(v === null || v === undefined ? null : String(v));
+      return { col: f, ph: `$${params.length}` };
+    });
+
+    await db.query(
+      `INSERT INTO ${DB_SCHEMA}.bank_statement_drafts
+         (company_id, statement_key, row_id, updated_by, ${cols.map((c) => c.col).join(", ")})
+       VALUES ($1, $2, $3, $4, ${cols.map((c) => c.ph).join(", ")})
+       ON CONFLICT (company_id, statement_key, row_id) DO UPDATE SET
+         ${cols.map((c) => `${c.col} = EXCLUDED.${c.col}`).join(", ")},
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()`,
+      params
+    );
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS SAVE ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to save draft" });
+  }
+});
+
+/* Remove drafts for specific rows, or the whole statement if row_ids is omitted. */
+router.delete("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key, row_ids } = req.body || {};
+    if (!company_id || !statement_key) {
+      return res.status(400).json({ success: false, message: "company_id and statement_key are required" });
+    }
+
+    const r = Array.isArray(row_ids)
+      ? await db.query(
+          `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+           WHERE company_id = $1 AND statement_key = $2 AND row_id = ANY($3)`,
+          [company_id, statement_key, row_ids.map(String)]
+        )
+      : await db.query(
+          `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+           WHERE company_id = $1 AND statement_key = $2`,
+          [company_id, statement_key]
+        );
+
+    return res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS DELETE ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to delete drafts" });
   }
 });
 
@@ -942,6 +1068,13 @@ router.get("/suggest-party-ledger", async (req, res) => {
       });
     }
 
+    // company_name alone would also match another tenant's same-named
+    // company, so pin the suggestions to the caller's own company id.
+    const ownedCompanyId = await resolveOwnedCompanyByName(req, company_name);
+    if (!ownedCompanyId) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
     const trimmedNarration = narration && narration.trim() ? narration.trim() : null;
     const normalizedNarration = trimmedNarration ? trimmedNarration.toLowerCase() : null;
     const narrationPattern = trimmedNarration ? `%${trimmedNarration}%` : null;
@@ -956,6 +1089,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
           voucher_date
         FROM app_test.vouchers
         WHERE company_name = $1
+          AND company_id = $4
           AND party_ledger_name IS NOT NULL
           AND narration ILIKE $2
           AND deleted_at IS NULL
@@ -968,6 +1102,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
         SELECT party_ledger, narration, voucher_date
         FROM app_test.contra_vouchers
         WHERE company_name = $1
+          AND company_id = $4
           AND party_ledger IS NOT NULL
           AND status = 'SUCCESS'
         ${vouchersBranch}
@@ -988,7 +1123,7 @@ router.get("/suggest-party-ledger", async (req, res) => {
       ORDER BY match_tier DESC, usage_count DESC, last_used DESC
       LIMIT 5
       `,
-      [company_name, narrationPattern, normalizedNarration]
+      [company_name, narrationPattern, normalizedNarration, ownedCompanyId]
     );
 
     if (!result.rows.length) {
@@ -1028,16 +1163,25 @@ router.get("/suggest-party-ledger", async (req, res) => {
 
 router.get("/suggest-ledger-by-group-key", async (req, res) => {
   try {
-    const { company_name, group_key } = req.query;
+    const { company_id, company_name, group_key } = req.query;
 
-    if (!company_name || !group_key) {
+    if ((!company_id && !company_name) || !group_key) {
       return res.status(400).json({
         success: false,
-        message: "company_name and group_key are required"
+        message: "company_id (or company_name) and group_key are required"
       });
     }
 
-    const suggestionMap = await suggestLedgersForGroupKeys(company_name, [group_key]);
+    // Embeddings are keyed on company_id; a name is only resolved among the
+    // caller's own companies so it can't reach a same-named company's history.
+    const ownedCompanyId = company_id
+      ? Number(company_id)
+      : await resolveOwnedCompanyByName(req, company_name);
+    if (!Number.isInteger(ownedCompanyId) || ownedCompanyId <= 0) {
+      return res.status(404).json({ success: false, message: "Company not found" });
+    }
+
+    const suggestionMap = await suggestLedgersForGroupKeys(ownedCompanyId, [group_key]);
     const suggestion = suggestionMap.get(group_key) || null;
 
     return res.status(200).json({
@@ -1087,12 +1231,11 @@ router.get("/waiting-ledger", async (req, res) => {
     );
 
     const rows = result.rows;
-    const companyName = rows[0]?.company_name;
 
     let suggestionMap = new Map();
-    if (companyName) {
+    if (rows.length) {
       const groupKeys = rows.map((r) => r.group_key);
-      suggestionMap = await suggestLedgersForGroupKeys(companyName, groupKeys);
+      suggestionMap = await suggestLedgersForGroupKeys(company_id, groupKeys);
     }
 
     const data = rows.map((r) => {
@@ -1122,11 +1265,16 @@ router.get("/waiting-ledger", async (req, res) => {
 router.get("/all", async (req, res) => {
   try {
     const { company_id } = req.query;
+    // company_id used to be optional here, which returned every company's
+    // vouchers when omitted.
+    if (!company_id) {
+      return res.status(400).json({ success: false, message: "company_id is required" });
+    }
     const result = await db.query(
       `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
-       ${company_id ? "WHERE company_id = $1" : ""}
+       WHERE company_id = $1
        ORDER BY id DESC`,
-      company_id ? [company_id] : []
+      [company_id]
     );
     return res.status(200).json({ success: true, data: result.rows });
   } catch (err) {
@@ -1241,6 +1389,7 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
        status        = 'PENDING'
      WHERE id = $6
        AND status IN ('WAITING_LEDGER', 'FAILED')
+       AND company_id IN (${ownedCompaniesSql("$5")})
      RETURNING *`,
     [v.party_ledger, v.voucher_type.toLowerCase(),
      isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
@@ -1406,8 +1555,169 @@ router.put("/bulk-party-ledger", async (req, res) => {
   }
 });
 
+/* ===========================
+   CLUB — several same-date, same-side bank rows → ONE Payment / Receipt
+
+   Every row gets the same club_group_id. Only the leader (lowest id) is
+   enqueued; pushVoucher.worker.js builds one voucher from the whole group
+   and keeps every member's status in step with the leader.
+   Body: { vouchers: [{ id, party_ledger }], forcePush? }
+=========================== */
+router.post("/club", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
+    const forcePushFlag = req.body.forcePush === true;
+    const items = Array.isArray(req.body.vouchers) ? req.body.vouchers : [];
+
+    if (items.length < 2) {
+      return res.status(400).json({ success: false, message: "Select 2 or more transactions to club" });
+    }
+    const bad = items.find(v => !Number.isInteger(Number(v?.id)) || !String(v?.party_ledger || "").trim());
+    if (bad) {
+      return res.status(400).json({ success: false, message: "Each item needs a numeric id and a party_ledger" });
+    }
+
+    const ids = items.map(v => Number(v.id));
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ success: false, message: "Duplicate ids in request" });
+    }
+    // Keyed by string: pg returns bigint ids as strings.
+    const ledgerById = new Map(items.map(v => [String(Number(v.id)), String(v.party_ledger).trim()]));
+
+    const found = await db.query(
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = ANY($1::int[])
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+         AND company_id IN (${ownedCompaniesSql("$2")})
+       ORDER BY id ASC`,
+      [ids, userId]
+    );
+
+    if (found.rows.length !== ids.length) {
+      const foundIds = new Set(found.rows.map(r => Number(r.id)));
+      return res.status(404).json({
+        success: false,
+        message: "Some transactions were not found or are already sent",
+        notFound: ids.filter(id => !foundIds.has(id))
+      });
+    }
+
+    const rows = found.rows;
+    const dateKey = (d) => (d instanceof Date ? d.toISOString().split("T")[0] : String(d).slice(0, 10));
+    const same = (fn) => new Set(rows.map(fn)).size === 1;
+
+    if (!same(r => r.company_id) || !same(r => r.bank_ledger)) {
+      return res.status(400).json({ success: false, message: "All transactions must belong to the same company and bank ledger" });
+    }
+    if (!same(r => dateKey(r.voucher_date))) {
+      return res.status(400).json({ success: false, message: "All selected transactions must be on the same date" });
+    }
+    if (!same(r => String(r.debit_credit || "").toUpperCase())) {
+      return res.status(400).json({ success: false, message: "Cannot club debit and credit transactions together" });
+    }
+
+    const voucherType = String(rows[0].debit_credit || "").toUpperCase() === "CREDIT" ? "receipt" : "payment";
+    const clubGroupId = randomUUID();
+    const leaderId = rows[0].id;
+
+    // Assign ledgers + group in one transaction so a half-built club can't
+    // be picked up by the worker.
+    const client = await db.connect();
+    let updated;
+    try {
+      await client.query("BEGIN");
+      updated = [];
+      for (const r of rows) {
+        const u = await client.query(
+          `UPDATE ${DB_SCHEMA}.contra_vouchers
+           SET party_ledger   = $1,
+               voucher_type   = $2,
+               transfer_bank  = NULL,
+               force_push     = $3,
+               user_id        = $4,
+               club_group_id  = $5,
+               status         = 'PENDING',
+               updated_at     = NOW()
+           WHERE id = $6
+           RETURNING *`,
+          [ledgerById.get(String(r.id)), voucherType, forcePushFlag, userId, clubGroupId, r.id]
+        );
+        updated.push(u.rows[0]);
+      }
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    // Duplicate check per row — any hit stops the whole club so the user
+    // can deselect it; the rest go back to WAITING_LEDGER untouched.
+    if (!forcePushFlag) {
+      const duplicates = [];
+      for (const v of updated) {
+        const outcome = await runDuplicateCheck(v);
+        if (outcome.tallyUnreachable) {
+          await releaseClub(clubGroupId);
+          return res.status(503).json({ success: false, message: outcome.message });
+        }
+        if (outcome.exists) {
+          duplicates.push({ id: v.id, message: outcome.message, matches: outcome.matches });
+        }
+      }
+      if (duplicates.length) {
+        await releaseClub(clubGroupId, duplicates.map(d => d.id));
+        return res.status(409).json({
+          success: false,
+          duplicate: true,
+          message: `${duplicates.length} transaction(s) already exist in Tally`,
+          duplicates
+        });
+      }
+    }
+
+    const queue = await safeEnqueueVoucher(leaderId);
+
+    return res.status(202).json({
+      success: true,
+      message: `${rows.length} transactions queued as 1 ${voucherType} voucher`,
+      leaderId,
+      clubGroupId,
+      voucherType,
+      ids: rows.map(r => r.id),
+      queue
+    });
+  } catch (err) {
+    console.error("Club vouchers error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Undo a club that won't be pushed: duplicate rows stay DUPLICATE_FOUND
+// (set by runDuplicateCheck), everything else returns to WAITING_LEDGER.
+async function releaseClub(clubGroupId, keepDuplicateIds = []) {
+  await db.query(
+    `UPDATE ${DB_SCHEMA}.contra_vouchers
+     SET club_group_id = NULL,
+         status = CASE WHEN id = ANY($2::int[]) THEN status ELSE 'WAITING_LEDGER' END,
+         updated_at = NOW()
+     WHERE club_group_id = $1`,
+    [clubGroupId, keepDuplicateIds]
+  );
+}
+
 router.put("/:id/party-ledger", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const forcePushFlag = req.body.forcePush === true;
     const vouchers = [{
       id: Number(req.params.id),
@@ -1415,7 +1725,7 @@ router.put("/:id/party-ledger", async (req, res) => {
       voucher_type: req.body.voucher_type
     }];
 
-    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag);
+    const { status, body } = await assignPartyLedger(vouchers, forcePushFlag, userId);
     return res.status(status).json(body);
 
   } catch (err) {
@@ -1450,6 +1760,7 @@ router.post("/:id/confirm-push", async (req, res) => {
            user_id = $2
        WHERE id = $1
          AND status IN ('WAITING_LEDGER', 'FAILED', 'DUPLICATE_FOUND')
+         AND company_id IN (${ownedCompaniesSql("$2")})
        RETURNING *`,
       [voucherId, userId]
     );
@@ -1481,7 +1792,23 @@ router.post("/:id/confirm-push", async (req, res) => {
 
 router.post("/:id/cancel-push", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const voucherId = Number(req.params.id);
+
+    // Ownership first — the queued job must not be removed for a voucher
+    // that belongs to another company.
+    const owned = await db.query(
+      `SELECT 1 FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [voucherId, userId]
+    );
+    if (owned.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Voucher not found" });
+    }
 
     const jobId = getVoucherJobId(voucherId);
     const existingJob = await voucherQueue.getJob(jobId);
@@ -1528,9 +1855,15 @@ router.post("/:id/cancel-push", async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
     const result = await db.query(
-      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers WHERE id = $1`,
-      [req.params.id]
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [req.params.id, userId]
     );
 
     if (result.rows.length === 0) {

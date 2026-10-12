@@ -239,3 +239,68 @@ export const resolveConnectorForCompany = async (
 
   return null;
 };
+// A Tally check older than this is no longer evidence either way (the
+// connector reports every ~10s, so 45s means it stopped reporting — e.g. an
+// older connector build, or a long-running job holding up its polling).
+export const TALLY_STATUS_FRESH_MS = 45 * 1000;
+
+// What the connector last reported about Tally on its own machine:
+//   tally_connected true  -> Tally answered on its port
+//   tally_connected false -> connector is up but Tally did not answer
+//   tally_connected null  -> unknown (never reported, or report too old)
+// Never throws — a status badge must not break the routes that show it.
+export const getTallyStatusForKey = async (apiKeyId) => {
+  const unknown = { tally_connected: null, tally_checked_at: null };
+  if (!apiKeyId) return unknown;
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT tally_connected,
+             tally_checked_at,
+             EXTRACT(EPOCH FROM (NOW() - tally_checked_at)) * 1000 AS age_ms
+      FROM ${DB_SCHEMA}.connector_api_keys
+      WHERE id = $1
+      `,
+      [apiKeyId]
+    );
+
+    const row = result.rows[0];
+    if (!row || row.tally_connected === null || row.tally_checked_at === null) return unknown;
+
+    const fresh = Number(row.age_ms) <= TALLY_STATUS_FRESH_MS;
+    return {
+      tally_connected: fresh ? row.tally_connected : null,
+      tally_checked_at: row.tally_checked_at
+    };
+  } catch (err) {
+    console.error("Tally status lookup failed:", err.message);
+    return unknown;
+  }
+};
+
+// The connector device that is online for this user (scoped to one company
+// when given — the same check the pushes use), or null when it is offline.
+export const findLiveConnectorKey = async (userId, companyId = null) => {
+  if (companyId) {
+    const live = await resolveConnectorForCompany(companyId, userId);
+    return live
+      ? { api_key_id: live.api_key_id, machine_id: live.machine_id, last_seen_at: live.last_seen_at }
+      : null;
+  }
+
+  const result = await pool.query(
+    `
+    SELECT id AS api_key_id, machine_id, last_seen_at
+    FROM ${DB_SCHEMA}.connector_api_keys
+    WHERE user_id = $1
+      AND revoked_at IS NULL
+      AND last_seen_at >= NOW() - INTERVAL '${CONNECTOR_ONLINE_WINDOW}'
+    ORDER BY last_seen_at DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows[0] ?? null;
+};

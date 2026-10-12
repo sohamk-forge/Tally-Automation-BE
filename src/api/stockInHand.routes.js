@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../db/index.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -16,6 +17,12 @@ router.get("/closing-balance", async (req, res) => {
         success: false,
         message: "company_id or company query parameter is required"
       });
+    }
+
+    // A name is only a legacy input: resolve it to the caller's own company id.
+    if (!companyId) companyId = await resolveOwnedCompanyByName(req, company);
+    if (!companyId) {
+      return res.status(404).json({ success: false, message: "Company not found" });
     }
 
     // group_balances stores one row per synced group (Sundry Debtors,

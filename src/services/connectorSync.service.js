@@ -11,7 +11,60 @@ import { createConnectorJob } from "./connectorJob.service.js";
 import { resolveTallyOwner } from "./connectorOwner.service.js";
 
 const POLL_INTERVAL_MS = 250; // check every 1 second
-const TIMEOUT_MS = 600000;     // 10 minutes
+
+// How long one connector job is waited on. Exported so the sync worker can
+// size each step's HTTP timeout to outlast it — the worker used to give up
+// after 5 minutes while the route kept waiting for 10.
+export const CONNECTOR_WAIT_TIMEOUT_MS = 600000; // 10 minutes
+
+// A running connector polls every second, so a job still unclaimed after
+// this long means the connector isn't picking work up at all (not running,
+// unpaired, or its polls are being rejected). Without this, every wait ran
+// the full 10 minutes and a sync with a dead connector sat "processing"
+// for well over an hour before failing.
+const CONNECTOR_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+
+// sync.worker.js matches on this to stop the remaining sync steps — each
+// would just hit the same wall.
+export const CONNECTOR_NOT_CLAIMING_MESSAGE =
+  "Connector did not pick up the request — make sure the Connector app is running and paired, then sync again.";
+
+/**
+ * Fails a still-unclaimed job. Returns false (keep waiting) when the
+ * connector is alive but busy: it claims in batches and doesn't poll again
+ * until the current batch finishes, so a job can legitimately sit
+ * 'pending' behind a long Tally export (e.g. a full-year voucher sync).
+ * The status = 'pending' guard keeps this from racing a concurrent claim.
+ */
+async function failUnclaimedConnectorJob(connectorJobId, connectorUserId) {
+  const busy = await pool.query(
+    `
+    SELECT 1
+    FROM app_test.connector_jobs
+    WHERE user_id = $1
+      AND status = 'processing'
+    LIMIT 1
+    `,
+    [connectorUserId]
+  );
+
+  if (busy.rows.length > 0) return false;
+
+  const failed = await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET status = 'failed',
+        error_message = $2,
+        completed_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $1
+      AND status = 'pending'
+    `,
+    [connectorJobId, CONNECTOR_NOT_CLAIMING_MESSAGE]
+  );
+
+  return failed.rowCount > 0;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -196,12 +249,12 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
 
   const startTime = Date.now();
 
-  while (Date.now() - startTime < TIMEOUT_MS) {
+  while (Date.now() - startTime < CONNECTOR_WAIT_TIMEOUT_MS) {
     await sleep(POLL_INTERVAL_MS);
 
     const result = await pool.query(
       `
-      SELECT cj.status, cj.response_xml, cj.error_message
+      SELECT cj.status, cj.response_xml, cj.error_message, cj.user_id
       FROM app_test.connector_jobs cj
       WHERE cj.id = $1
         AND (
@@ -237,9 +290,37 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
     if (job.status === "failed") {
       throw new Error(job.error_message || `Sync connector job ${connectorJobId} failed`);
     }
+
+    if (
+      job.status === "pending" &&
+      Date.now() - startTime > CONNECTOR_CLAIM_TIMEOUT_MS &&
+      (await failUnclaimedConnectorJob(connectorJobId, job.user_id))
+    ) {
+      throw new Error(CONNECTOR_NOT_CLAIMING_MESSAGE);
+    }
   }
 
-  throw new Error(`Sync timed out after ${TIMEOUT_MS / 1000}s — is the Connector running?`);
+  const timeoutMessage = `Sync timed out after ${CONNECTOR_WAIT_TIMEOUT_MS / 1000}s — is the Connector running?`;
+
+  // Nobody is waiting on this job any more. Left 'pending', the connector
+  // would still claim and run it whenever it came back — a stale Tally
+  // export for a sync step that has already given up.
+  await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET status = 'failed',
+        error_message = $2,
+        completed_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $1
+      AND status IN ('pending', 'processing')
+    `,
+    [connectorJobId, timeoutMessage]
+  ).catch((err) => {
+    console.error(`Failed to mark timed-out connector job ${connectorJobId} as failed:`, err.message);
+  });
+
+  throw new Error(timeoutMessage);
 }
 
 /**

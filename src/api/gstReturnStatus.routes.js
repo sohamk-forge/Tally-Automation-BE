@@ -6,22 +6,27 @@
 
 import express from "express";
 import { checkReturnStatus, getLatestReturnStatus } from "../services/gstReturnStatus.service.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
 
+// Every :companyId in this router must belong to the caller.
+router.param("companyId", companyParamGuard);
+
 /* =========================================
    CHECK RETURN STATUS (hits WhiteBooks, stores a new row)
-   Body: { companyId, gstin, financialYear, returnType }
-   financialYear e.g. "2026-27". returnType is a WhiteBooks-defined
-   code — confirm valid values before hardcoding any in the frontend.
+   Body: { companyId, gstin, financialYear?, returnType? }
+   financialYear e.g. "2026-27" — defaults to the current FY.
+   returnType is optional: omitted, rettrack is called without `type` so
+   GSTR-1 and GSTR-3B filings both come back.
 ========================================= */
 router.post("/check", async (req, res) => {
   try {
     const { companyId, gstin, financialYear, returnType } = req.body;
-    if (!companyId || !gstin || !financialYear || !returnType) {
+    if (!companyId || !gstin) {
       return res.status(400).json({
         status: "error",
-        message: "companyId, gstin, financialYear and returnType are required",
+        message: "companyId and gstin are required",
       });
     }
 

@@ -6,7 +6,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
 import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
-import { resolveConnectorForCompany, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getTallyStatusForKey, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -95,7 +95,8 @@ router.get("/current", verifySession(), async (req, res) => {
         data: {
           connected: true,
           machine_id: live.machine_id,
-          last_seen_at: live.last_seen_at
+          last_seen_at: live.last_seen_at,
+          ...(await getTallyStatusForKey(live.api_key_id))
         }
       });
     }
@@ -105,6 +106,7 @@ router.get("/current", verifySession(), async (req, res) => {
     const result = await pool.query(
       `
       SELECT
+          k.id AS api_key_id,
           k.machine_id,
           k.last_seen_at,
           m.company_name,
@@ -136,6 +138,7 @@ router.get("/current", verifySession(), async (req, res) => {
         connected: true,
         machine_id: result.rows[0].machine_id,
         last_seen_at: result.rows[0].last_seen_at,
+        ...(await getTallyStatusForKey(result.rows[0].api_key_id)),
         company_name: result.rows[0].company_name,
         from_year: result.rows[0].from_year,
         to_year: result.rows[0].to_year

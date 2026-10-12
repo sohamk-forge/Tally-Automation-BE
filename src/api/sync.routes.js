@@ -2,7 +2,7 @@
     import pool from "../db/index.js";
     import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
-    import { isTallyConnectorLive, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
+    import { isTallyConnectorLive, getConnectorOfflineMessage, findLiveConnectorKey, getTallyStatusForKey } from "../services/connectorOwner.service.js";
     import axios from "axios";
     import {
       getCompaniesXML,
@@ -25,12 +25,13 @@
             getSalesGroupXML, getPurchaseGroupXML,getSalesInvoiceDetailsXML ,
         
     } from "../services/xmlBuilder.js";
-    import { parseXML } from "../services/parser.js";
+    import { parseXML, parseXMLKeepText } from "../services/parser.js";
     import {
       createAuditLog
     } from "../utils/createAuditLog.js";
   import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
     import { safeEnqueueSync } from "../queues/sync.queue.js";
+    import { SYNC_STEP_COUNT } from "../config/syncSteps.js";
 
 
 
@@ -140,6 +141,7 @@ async function getCompanyId(userId, company, client = null, requestedCompanyId =
     WHERE cpt.user_id = $1
       AND cpt.is_used = TRUE
       AND c.name = $2
+    ORDER BY c.id DESC
     LIMIT 1
     `,
     [userId, company]
@@ -249,6 +251,11 @@ const generateFallbackGuid = (company, uniqueValue, type) => {
 // only ever diffs/touches rows matching this pattern.
 const REAL_TALLY_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$/i;
 
+// The Tally company part of a real GUID (its first 36 chars), or null for a
+// fallback/missing GUID.
+const tallyCompanyGuidPrefix = (guid) =>
+  guid && REAL_TALLY_GUID_PATTERN.test(guid) ? String(guid).slice(0, 36).toLowerCase() : null;
+
 /* ===================================================
   UPSERT FUNCTION (PRODUCTION-SAFE)
 =================================================== */
@@ -295,6 +302,23 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
           `SELECT id, guid, master_id, alter_id FROM ${tableName} WHERE master_id = $1`,
           [masterId]
         );
+
+    // MASTERIDs are only unique within ONE Tally company. A real Tally GUID
+    // is "<company GUID>-<master id hex>", so a row whose GUID carries a
+    // different company prefix is a different master that merely shares the
+    // number (e.g. data synced from an earlier Tally company of the same
+    // name). Matching it used to make the upsert treat the new master as an
+    // older version of the old one and skip it ("alter_id_not_newer"), so
+    // the new ledger was never stored at all.
+    const incomingPrefix = tallyCompanyGuidPrefix(finalGuid);
+    if (incomingPrefix) {
+      existing = {
+        rows: existing.rows.filter((row) => {
+          const rowPrefix = tallyCompanyGuidPrefix(row.guid);
+          return !rowPrefix || rowPrefix === incomingPrefix;
+        })
+      };
+    }
   }
 
   if (existing.rows.length === 0 && (hasCompanyIdColumn ? companyId : true)) {
@@ -387,6 +411,69 @@ async function upsertRecord(tableName, guid, masterId, alterId, data, columns, c
   return { action: "updated", oldAlterId: dbAlterId, newAlterId, guidChanged };
 }
 
+// Master-level counterpart of the voucher soft-delete below: the ledger and
+// stock-item syncs fetch Tally's FULL list (no date/alter-id filter), so a
+// row this company has in the DB but Tally didn't just send was deleted
+// (or renamed away) in Tally. Mark it deleted_at rather than DELETE, and
+// clear the mark on anything that reappeared. `syncedNames` holds clean()ed,
+// lowercased names; the DB side gets the same whitespace normalisation.
+// Never runs on an empty list, so a bad/empty Tally response can't be read
+// as "everything was deleted". tableName/nameColumn are fixed literals from
+// the two callers, still checked against allowedTables.
+//
+// `syncedGuids` (ledgers only — stock_group_summary has no guid column):
+// lowercased real Tally GUIDs from this sync. When given, a row with a real
+// GUID is matched by GUID, not name — so a same-named master left over from
+// an earlier Tally company (different GUID prefix) is retired instead of
+// showing up as a duplicate. Rows with a fallback/missing GUID still match
+// by name.
+async function syncMasterSoftDelete(client, tableName, nameColumn, companyId, syncedNames, syncedGuids = null) {
+  if (!allowedTables.includes(tableName)) {
+    throw new Error(`Invalid table name: ${tableName}`);
+  }
+  if (!companyId || syncedNames.size === 0) {
+    return { softDeleted: 0, restored: 0 };
+  }
+
+  const names = [...syncedNames];
+  const guids = syncedGuids && syncedGuids.size > 0 ? [...syncedGuids] : null;
+  const normalized = `regexp_replace(LOWER(TRIM(${nameColumn})), '\\s+', ' ', 'g')`;
+  const realGuid = `COALESCE(guid, '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]+$'`;
+  // "Tally still has this row" — by GUID when we have GUIDs, else by name.
+  const stillInTally = guids
+    ? `(LOWER(guid) = ANY($3::text[]) OR (NOT (${realGuid}) AND ${normalized} = ANY($2::text[])))`
+    : `(${normalized} = ANY($2::text[]))`;
+  const params = guids ? [companyId, names, guids] : [companyId, names];
+
+  const restoredResult = await client.query(
+    `UPDATE ${tableName}
+        SET deleted_at = NULL, updated_at = NOW()
+      WHERE company_id = $1
+        AND deleted_at IS NOT NULL
+        AND ${stillInTally}`,
+    params
+  );
+
+  const deletedResult = await client.query(
+    `UPDATE ${tableName}
+        SET deleted_at = NOW()
+      WHERE company_id = $1
+        AND deleted_at IS NULL
+        AND NOT ${stillInTally}
+      RETURNING ${nameColumn}`,
+    params
+  );
+
+  if (deletedResult.rowCount > 0) {
+    console.log(
+      `🗑️ ${tableName}: soft-deleted ${deletedResult.rowCount} row(s) no longer in Tally for company ${companyId}`,
+      deletedResult.rows.slice(0, 20).map((r) => r[nameColumn])
+    );
+  }
+
+  return { softDeleted: deletedResult.rowCount, restored: restoredResult.rowCount };
+}
+
 function logUpsertSummary() {
   console.log("\n📊 UPSERT SUMMARY STATISTICS:");
   console.log(`  - GUID source changes: ${guidSourceChanged}`);
@@ -397,19 +484,44 @@ function logUpsertSummary() {
 /* ===================================================
   HEALTH API
 =================================================== */
+// Real answer, not a stub: is the connector device online, and does Tally
+// answer on its machine? ?company_id=<id> scopes it to that company's connector.
 router.get("/health", async (req, res) => {
   try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    const companyId = Number(req.query.company_id) || null;
+    const live = await findLiveConnectorKey(userId, companyId);
+
+    if (!live) {
+      return res.status(200).json({
+        status: "success",
+        message: "Connector is offline",
+        services: { api: "running", connector: "offline", tally: "unknown" },
+        timestamp: new Date()
+      });
+    }
+
+    const { tally_connected, tally_checked_at } = await getTallyStatusForKey(live.api_key_id);
+    const tally = tally_connected === true ? "connected" : tally_connected === false ? "disconnected" : "unknown";
+
     return res.status(200).json({
       status: "success",
-      message: "Sync service healthy",
-      services: { api: "running", tally: "connected" },
+      message:
+        tally === "connected" ? "Tally is connected" :
+        tally === "disconnected" ? "Connector is online but Tally is not running" :
+        "Connector is online; Tally status unknown",
+      services: { api: "running", connector: "online", tally },
+      machine_id: live.machine_id,
+      tally_checked_at,
       timestamp: new Date()
     });
   } catch (err) {
     return res.status(503).json({
       status: "error",
-      message: "Tally is not reachable",
-      services: { api: "running", tally: "disconnected" },
+      message: "Could not determine connector status",
+      services: { api: "running", connector: "unknown", tally: "unknown" },
       error: err.message,
       timestamp: new Date()
     });
@@ -426,10 +538,11 @@ router.get("/companies", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const xml = getCompaniesXML();
     const responseXML = await discoverCompaniesViaConnector(userId, xml);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection =
@@ -677,19 +790,19 @@ router.get("/group-summary-bank", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGroupSummaryBankXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -711,6 +824,7 @@ router.get("/group-summary-bank", async (req, res) => {
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, "bank");
       const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+      const parentGroup = clean(ledger?.PARENT || ledger?.$?.PARENT || "")?.replace(/&#4;/g, "").trim() || "Bank Accounts";
 
       const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
@@ -727,7 +841,7 @@ router.get("/group-summary-bank", async (req, res) => {
         // See upsertRecord's forceOverwrite comment — this is a balance
         // snapshot (opening/closing), not versioned master data.
         [
-          companyId, company, ledgerName, "Bank Accounts",
+          companyId, company, ledgerName, parentGroup,
           clean(ledger?.BANKACCHOLDERNAME || ledger?.ACHOLDERNAME || ledger?.BankAccHolderName),
           clean(ledger?.BANKACCOUNTNUMBER || ledger?.BANKACCOUNTNO || ledger?.ACCOUNTNUMBER || ledger?.BANKDETAILS),
           clean(ledger?.IFSCCODE || ledger?.IFSCODE),
@@ -822,7 +936,8 @@ router.get("/voucher-sync", async (req, res) => {
 
     const xml = getLedgerVouchersXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-    const parsed = await parseXML(responseXML);
+    // Supplier invoice numbers / GSTINs keep their exact text (leading zeros).
+    const parsed = await parseXMLKeepText(responseXML, ["REFERENCE", "PARTYGSTIN"]);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
     const list = Array.isArray(collection) ? collection : [collection];
@@ -852,6 +967,17 @@ router.get("/voucher-sync", async (req, res) => {
         const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
         const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
         const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
+        // GST header fields (supplier invoice no/date, party GSTIN, place of
+        // supply, cancelled/optional flags) — used by GST filing.
+        const supplierInvoiceNo = clean(voucher?.REFERENCE) || null;
+        const supplierInvoiceDate = clean(voucher?.REFERENCEDATE)?.match(/^(\d{4})(\d{2})(\d{2})$/)
+          ? clean(voucher.REFERENCEDATE).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")
+          : null;
+        const partyGstin = clean(voucher?.PARTYGSTIN)?.toUpperCase() || null;
+        const placeOfSupply = clean(voucher?.PLACEOFSUPPLY) || null;
+        const yesNo = (v) => (clean(v) == null ? null : /^yes$/i.test(clean(v)));
+        const isCancelled = yesNo(voucher?.ISCANCELLED);
+        const isOptional = yesNo(voucher?.ISOPTIONAL);
 
         let debitAmount = 0;
         let creditAmount = 0;
@@ -889,9 +1015,10 @@ router.get("/voucher-sync", async (req, res) => {
               guid, master_id, alter_id, company_id, company_name,
               voucher_date, voucher_type, voucher_number, party_ledger_name,
               narration, ledger_entries, debit_amount, credit_amount, balance,
+              supplier_invoice_no, supplier_invoice_date, party_gstin, place_of_supply, is_cancelled, is_optional,
               created_at, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW())
             ON CONFLICT (company_id, guid) WHERE guid IS NOT NULL AND guid <> ''
             DO UPDATE SET
               master_id = EXCLUDED.master_id,
@@ -905,6 +1032,12 @@ router.get("/voucher-sync", async (req, res) => {
               debit_amount = EXCLUDED.debit_amount,
               credit_amount = EXCLUDED.credit_amount,
               balance = EXCLUDED.balance,
+              supplier_invoice_no = EXCLUDED.supplier_invoice_no,
+              supplier_invoice_date = EXCLUDED.supplier_invoice_date,
+              party_gstin = EXCLUDED.party_gstin,
+              place_of_supply = EXCLUDED.place_of_supply,
+              is_cancelled = EXCLUDED.is_cancelled,
+              is_optional = EXCLUDED.is_optional,
               deleted_at = NULL,
               updated_at = NOW()
             RETURNING (xmax = 0) AS was_inserted
@@ -913,7 +1046,8 @@ router.get("/voucher-sync", async (req, res) => {
               guid, masterId, alterId, companyId, company,
               voucherDate, voucherTypeName, voucherNumber, partyLedgerName,
               clean(voucher?.NARRATION), JSON.stringify(normalized),
-              debitAmount, creditAmount, balance
+              debitAmount, creditAmount, balance,
+              supplierInvoiceNo, supplierInvoiceDate, partyGstin, placeOfSupply, isCancelled, isOptional
             ]
           );
 
@@ -1112,12 +1246,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // TRANSACTION
-    // ---------------------------------------------------------
-
-    await client.query("BEGIN");
-
-    // ---------------------------------------------------------
     // COMPANY
     // ---------------------------------------------------------
 
@@ -1139,8 +1267,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     );
 
     if (!owns) {
-      await client.query("ROLLBACK");
-
       return res.status(403).json({
         status: "error",
         message: "This company is not paired with your account.",
@@ -1173,6 +1299,13 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
       "sync",
       userId
     );
+
+    // ---------------------------------------------------------
+    // TRANSACTION — only after the connector wait, see the note
+    // in /company-details.
+    // ---------------------------------------------------------
+
+    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // PARSE XML
@@ -1349,19 +1482,19 @@ router.get("/parent-groups", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getParentGroupsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1431,14 +1564,11 @@ router.get("/payable-debtors", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -1522,6 +1652,9 @@ router.get("/payable-debtors", async (req, res) => {
     const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
     const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
 
+    // Only after all the connector waits above — see the note in /company-details.
+    await client.query("BEGIN");
+
     let inserted = 0, updated = 0, ignored = 0, skipped = 0;
 
     const upsertGroup = async (g) => {
@@ -1582,6 +1715,9 @@ router.get("/payable-debtors", async (req, res) => {
     =================================================== */
 
     router.get("/all-parent-groups", async (req, res) => {
+      const userId = await requireUser(req, res);
+      if (!userId) return;
+
       const company = req.query.company;
       const groupName = req.query.groupName;
       
@@ -1596,14 +1732,18 @@ router.get("/payable-debtors", async (req, res) => {
       try {
         await client.query("BEGIN");
         
-        // Get company_id using helper
-        const companyId = await getCompanyId(company, client);
-        if (!companyId) {
-          throw new Error("Company not found");
+        // Get company_id using helper — scoped to this user's own companies.
+        // (Was called as getCompanyId(company, client), shifting every
+        // argument by one, so it always failed; and it had no ownership check.)
+        const companyId = await getCompanyId(userId, company, client);
+        if (!companyId || !(await userOwnsCompany(userId, companyId, client))) {
+          await client.query("ROLLBACK");
+          return res.status(404).json({ status: "error", message: "Company not found" });
         }
-        
+
         const xml = getAllParentGroupDetailsXML(company, groupName);
-        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", req.headers['x-user-id'] || null);
+        // The resolved user, not a client-supplied x-user-id header.
+        const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
         const parsed = await parseXML(responseXML);
         
         const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -1702,19 +1842,19 @@ router.get("/profit-loss-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getProfitLossXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const groups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1813,19 +1953,19 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupSummaryXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
@@ -1914,24 +2054,33 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     }
 
     let inserted = 0, updated = 0;
+    const syncedItemNames = new Set();
 
     for (const item of list) {
       const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
+      if (itemName) syncedItemNames.add(itemName.toLowerCase());
 
+      // Keyed on company_id: same-named companies (one per user pairing)
+      // must not share rows. Legacy rows with no company_id are matched by
+      // name once and adopted by the UPDATE below.
       const existing = await client.query(
-        `SELECT id FROM app_test.stock_group_summary WHERE company_name = $1 AND item_name = $2`,
-        [company, itemName]
+        `SELECT id FROM app_test.stock_group_summary
+         WHERE item_name = $2
+           AND (company_id = $1 OR (company_id IS NULL AND company_name = $3))
+         ORDER BY (company_id IS NULL), id
+         LIMIT 1`,
+        [companyId, itemName, company]
       );
 
       if (existing.rows.length > 0) {
         await client.query(
           `
           UPDATE app_test.stock_group_summary
-          SET company_id=$1, group_name=$2, hsn_code=$3, quantity=$4, stock_value=$5,
-              unit=$6, gst_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10, gst_applicable=$11, updated_at=NOW()
-          WHERE company_name=$12 AND item_name=$13
+          SET company_id=$1, company_name=$2, group_name=$3, hsn_code=$4, quantity=$5, stock_value=$6,
+              unit=$7, gst_rate=$8, cgst_rate=$9, sgst_rate=$10, igst_rate=$11, gst_applicable=$12, updated_at=NOW()
+          WHERE id=$13
           `,
-          [companyId, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable, company, itemName]
+          [companyId, company, groupName, hsnCode, quantity, stockValue, unit, gstRate, cgstRate, sgstRate, igstRate, gstApplicable, existing.rows[0].id]
         );
         updated++;
         continue;
@@ -1948,6 +2097,10 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       inserted++;
     }
 
+    const { softDeleted, restored } = await syncMasterSoftDelete(
+      client, "app_test.stock_group_summary", "item_name", companyId, syncedItemNames
+    );
+
     await client.query("COMMIT");
 
     return res.status(200).json({
@@ -1955,7 +2108,7 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       source: "tally",
       message: "Stock group summary synced successfully",
       company,
-      summary: { inserted, updated, total: list.length },
+      summary: { inserted, updated, soft_deleted: softDeleted, restored, total: list.length },
       data: list.map((item) => {
         const { itemName, groupName, unit, quantity, stockValue, hsnCode, gstRate, cgstRate, sgstRate, igstRate, gstApplicable } = extractItemFields(item);
         return { group_name: groupName, item_name: itemName, hsn_code: hsnCode, quantity, stock_value: stockValue, unit, gst_rate: gstRate, cgst_rate: cgstRate, sgst_rate: sgstRate, igst_rate: igstRate, gst_applicable: gstApplicable };
@@ -1986,19 +2139,19 @@ router.get("/stock-group-gst-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupGSTXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const stockGroups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKGROUP || [];
@@ -2092,7 +2245,7 @@ router.post("/manual", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    const { company, fromYear, toYear } = req.body;
+    const { company, fromYear, toYear, companyId: requestedCompanyId } = req.body;
 
     if (!company || !fromYear || !toYear) {
       return res.status(400).json({ status: "error", message: "Company, fromYear and toYear are required" });
@@ -2109,9 +2262,11 @@ router.post("/manual", async (req, res) => {
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
         AND c.name = $2
+        AND ($3::int IS NULL OR c.id = $3::int)
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, trimmedCompany]
+      [userId, trimmedCompany, requestedCompanyId || null]
     );
 
     if (!existingCompany.rows.length) {
@@ -2359,19 +2514,19 @@ router.get("/units-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getUnitsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const units = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.UNIT || [];
@@ -2416,6 +2571,57 @@ router.get("/units-sync", async (req, res) => {
 });
 
 /* ===================================================
+  LEDGER PRIMARY GROUP HELPERS
+  Tally only gives a ledger its immediate PARENT group. A ledger under a
+  user-created sub-group ("ABC" under Sundry Creditors) must still land on
+  the Creditors tab, so we walk the group hierarchy upward and stop at the
+  first group the Ledger page classifies by — or, failing that, at the
+  top-level (Primary) group.
+=================================================== */
+const CLASSIFYING_GROUPS = ["Sundry Debtors", "Sundry Creditors", "Bank Accounts", "Bank OD A/c"];
+
+// Tally prefixes reserved names with a &#4; control char in some exports.
+const cleanGroupName = (value) => {
+  const cleaned = clean(value);
+  if (!cleaned) return null;
+  return cleaned.replace(/&#4;/g, "").replace(/[\x00-\x1F]/g, "").trim() || null;
+};
+
+// Map of lower-cased group name -> { name, parent } for the whole company.
+async function fetchGroupHierarchy(companyId, company, userId) {
+  const responseXML = await sendToTallyViaConnector(companyId, getParentGroupsXML(company), "sync", userId);
+  const parsed = await parseXML(responseXML);
+  const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
+  const list = Array.isArray(collection) ? collection : collection ? [collection] : [];
+
+  const hierarchy = new Map();
+  for (const group of list) {
+    const rawName = group?.NAME || group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
+    const name = cleanGroupName(Array.isArray(rawName) ? rawName[0] : rawName);
+    if (!name) continue;
+    hierarchy.set(name.toLowerCase(), { name, parent: cleanGroupName(group?.PARENT) });
+  }
+  return hierarchy;
+}
+
+function resolvePrimaryGroup(parentGroup, hierarchy) {
+  let current = cleanGroupName(parentGroup);
+  if (!current) return null;
+
+  // Depth cap guards against a malformed (cyclic) hierarchy.
+  for (let depth = 0; depth < 50; depth++) {
+    const classifying = CLASSIFYING_GROUPS.find((g) => g.toLowerCase() === current.toLowerCase());
+    if (classifying) return classifying;
+
+    const node = hierarchy.get(current.toLowerCase());
+    if (!node) return current;
+    if (!node.parent || node.parent.toLowerCase() === "primary") return node.name;
+    current = node.parent;
+  }
+  return current;
+}
+
+/* ===================================================
   ALL LEDGERS SYNC
 =================================================== */
 router.get("/all-ledgers-sync", async (req, res) => {
@@ -2428,14 +2634,11 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -2446,9 +2649,23 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
     const list = Array.isArray(collection) ? collection : [collection];
 
-    let inserted = 0, updated = 0, ignored = 0;
+    // A failed group fetch must not fail the ledger sync — primary_group is
+    // then left untouched and the UI falls back to parent_group.
+    let groupHierarchy = null;
+    try {
+      groupHierarchy = await fetchGroupHierarchy(companyId, company, userId);
+    } catch (groupErr) {
+      console.log("⚠️ ALL LEDGERS SYNC: group hierarchy fetch failed, primary_group not refreshed:", groupErr.message);
+    }
+
+    // Only after both connector waits — see the note in /company-details.
+    await client.query("BEGIN");
+
+    let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
     const updatedLedgers = [];
+    const syncedLedgerNames = new Set();
+    const syncedLedgerGuids = new Set();
 
     for (const ledger of list) {
       let rawLedgerName =
@@ -2459,9 +2676,11 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
       const ledgerName = clean(rawLedgerName);
       if (!ledgerName) { ignored++; continue; }
+      syncedLedgerNames.add(ledgerName.toLowerCase());
 
       const originalGuid = ledger?.GUID || ledger?.$?.GUID || null;
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, "ledger");
+      if (originalGuid && REAL_TALLY_GUID_PATTERN.test(guid)) syncedLedgerGuids.add(guid.toLowerCase());
       const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
 
@@ -2511,6 +2730,23 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
       const result = await upsertRecord("app_test.all_ledger_details", guid, masterId, alterId, data, columns, client);
 
+      // Written outside upsertRecord on purpose: moving group ABC to a new
+      // parent changes the GROUP's alter_id, not the ledger's, so the upsert
+      // would skip this row as "alter_id_not_newer" and keep a stale value.
+      if (groupHierarchy) {
+        const primaryGroup = resolvePrimaryGroup(parentGroup, groupHierarchy);
+        if (primaryGroup) {
+          const pgResult = await client.query(
+            `UPDATE app_test.all_ledger_details
+                SET primary_group = $1
+              WHERE company_id = $2 AND ledger_name = $3
+                AND primary_group IS DISTINCT FROM $1`,
+            [primaryGroup, companyId, ledgerName]
+          );
+          if (pgResult.rowCount > 0) primaryGroupUpdated++;
+        }
+      }
+
       if (result.action === "inserted") {
         inserted++;
         insertedLedgers.push({ name: ledgerName, guid, parent_group: parentGroup, gst_number: gstNumber, has_address: !!address, has_phone: !!(phone || mobile) });
@@ -2522,6 +2758,10 @@ router.get("/all-ledgers-sync", async (req, res) => {
       }
     }
 
+    const { softDeleted, restored } = await syncMasterSoftDelete(
+      client, "app_test.all_ledger_details", "ledger_name", companyId, syncedLedgerNames, syncedLedgerGuids
+    );
+
     await client.query("COMMIT");
 
     return res.status(200).json({
@@ -2529,7 +2769,7 @@ router.get("/all-ledgers-sync", async (req, res) => {
       source: "tally",
       message: "All ledger details synced successfully",
       company,
-      summary: { total_found: list.length, inserted, updated, ignored },
+      summary: { total_found: list.length, inserted, updated, ignored, soft_deleted: softDeleted, restored, primary_group_updated: primaryGroupUpdated, group_hierarchy_loaded: !!groupHierarchy },
       samples: { inserted: insertedLedgers.slice(0, 5), updated: updatedLedgers.slice(0, 5) },
       data_summary: {
         with_gst: insertedLedgers.filter(l => l.gst_number).length + updatedLedgers.filter(l => l.gst_number).length,
@@ -2560,19 +2800,19 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getPurchaseSalesLedgersXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const ledgers = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -2655,19 +2895,19 @@ router.get("/godown-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGodownsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
@@ -2742,9 +2982,15 @@ router.get("/job-status", async (req, res) => {
           jl.completed_at, jl.error_message,
           c.id as company_id, c.name as company_name
       FROM app_test.job_logs jl
-      JOIN app_test.companies c ON c.name = jl.payload->>'company'
-      WHERE c.id = $1
-        AND jl.user_id = $2
+      JOIN app_test.companies c ON c.id = $1::int
+      WHERE jl.user_id = $2
+        -- /manual and /manual-auto record the id in the payload. The name is
+        -- only a fallback for older rows that predate it, since same-named
+        -- companies would otherwise show each other's jobs.
+        AND (
+          jl.payload->>'companyId' = $1::text
+          OR (jl.payload->>'companyId' IS NULL AND jl.payload->>'company' = c.name)
+        )
       ORDER BY jl.id DESC
       LIMIT 1
       `,
@@ -2771,6 +3017,59 @@ router.get("/job-status", async (req, res) => {
     ALTER TABLE app_test.job_logs ADD COLUMN user_id INTEGER;
   and backfill historical rows before enforcing NOT NULL.
 =================================================== */
+/* ===================================================
+  SYNC JOB VIEW
+  Shared by GET /status/:jobId and GET /active so both report a sync job
+  (steps, stuck flag, message) identically.
+=================================================== */
+function formatSyncJob(job) {
+  // raw_response is written incrementally by sync.worker.js's
+  // updateJobProgress() after every step (not just once at the end), so
+  // this is real live progress. Parse defensively — an old pre-fix row, or
+  // one caught mid-write, could be null/malformed.
+  let steps = [];
+  if (job.raw_response) {
+    try {
+      steps = JSON.parse(job.raw_response);
+    } catch {
+      steps = [];
+    }
+  }
+
+  // "Stuck" is relative to status: a pending job older than 5 minutes
+  // hasn't even been picked up by the worker yet (same 5-minute threshold
+  // markStalePendingSyncAsFailed() uses to eventually fail it); a running
+  // job with no step progress after 5 minutes is presumably wedged
+  // mid-step. Computed off real timestamps so the frontend never has to do
+  // its own clock-skew-prone staleness math.
+  const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+  const now = Date.now();
+
+  const isStuck =
+    (job.status === "pending" && now - new Date(job.created_at).getTime() > STALE_THRESHOLD_MS) ||
+    (job.status === "running" && job.started_at && now - new Date(job.started_at).getTime() > STALE_THRESHOLD_MS && steps.length === 0);
+
+  return {
+    jobId: job.id,
+    syncStatus: job.status,
+    company: job.payload?.company,
+    companyId: job.payload?.companyId ?? null,
+    fromYear: job.payload?.fromYear,
+    toYear: job.payload?.toYear,
+    startedAt: job.started_at,
+    completedAt: job.completed_at,
+    error: job.error_message,
+    steps,
+    totalSteps: SYNC_STEP_COUNT,
+    isStuck,
+    message:
+      job.status === "completed" ? "Synchronization completed successfully." :
+      job.status === "running" ? "Synchronization is in progress." :
+      job.status === "failed" ? "Synchronization failed." :
+      "Synchronization is pending."
+  };
+}
+
 router.get("/status/:jobId", async (req, res) => {
   try {
     const userId = await requireUser(req, res);
@@ -2798,56 +3097,61 @@ router.get("/status/:jobId", async (req, res) => {
       return res.status(404).json({ status: "error", message: "Job not found" });
     }
 
-    // raw_response is now written incrementally by sync.worker.js's
-    // updateJobProgress() after every step (not just once at the end), so
-    // this is real live progress, not a stale end-of-job dump. Parse
-    // defensively — an old pre-fix row, or one caught mid-write, could be
-    // null/malformed.
-    let steps = [];
-    if (job.raw_response) {
-      try {
-        steps = JSON.parse(job.raw_response);
-      } catch {
-        steps = [];
-      }
+    return res.status(200).json({ status: "success", data: formatSyncJob(job) });
+
+  } catch (err) {
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* ===================================================
+  ACTIVE SYNC — "is a sync running for me right now?"
+  A sync can be started with no browser involved: the connector device
+  calls /manual itself when a machine is paired or a company is connected.
+  The frontend can't be told, so it asks. Returns the newest manual_sync
+  job that is pending/running, or finished within the last 2 minutes (so
+  the final tick/cross is still shown), or null.
+
+  Matches the caller's own jobs, plus — when companyId is given and the
+  caller has access to it — jobs for that company started by a teammate.
+  companyId is optional: during first-time pairing the company doesn't
+  exist in the browser yet.
+=================================================== */
+router.get("/active", async (req, res) => {
+  try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    const requestedCompanyId = Number(req.query.companyId) || null;
+    let companyFilterId = null;
+
+    if (requestedCompanyId && (await userOwnsCompany(userId, requestedCompanyId))) {
+      companyFilterId = requestedCompanyId;
     }
 
-    // "Stuck" is relative to status: a pending job older than 5 minutes
-    // hasn't even been picked up by the worker yet (matches the same
-    // 5-minute threshold markStalePendingSyncAsFailed() uses to eventually
-    // fail it); a running job with no step progress written in the last 5
-    // minutes is presumably wedged mid-step rather than genuinely
-    // progressing. Only compute this off real timestamps so the frontend
-    // never has to do its own clock-skew-prone staleness math.
-    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
-    const now = Date.now();
-
-    const isStuck =
-      (job.status === "pending" && now - new Date(job.created_at).getTime() > STALE_THRESHOLD_MS) ||
-      (job.status === "running" && job.started_at && now - new Date(job.started_at).getTime() > STALE_THRESHOLD_MS && steps.length === 0);
+    const result = await pool.query(
+      `
+      SELECT id, status, payload, error_message, started_at, completed_at,
+             created_at, raw_response
+      FROM app_test.job_logs
+      WHERE job_type = 'manual_sync'
+        AND (user_id = $1 OR ($2::text IS NOT NULL AND payload->>'companyId' = $2::text))
+        AND (
+          status IN ('pending', 'running')
+          OR completed_at > NOW() - INTERVAL '2 minutes'
+        )
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [userId, companyFilterId === null ? null : String(companyFilterId)]
+    );
 
     return res.status(200).json({
       status: "success",
-      data: {
-        jobId: job.id,
-        syncStatus: job.status,
-        company: job.payload?.company,
-        fromYear: job.payload?.fromYear,
-        toYear: job.payload?.toYear,
-        startedAt: job.started_at,
-        completedAt: job.completed_at,
-        error: job.error_message,
-        steps,
-        isStuck,
-        message:
-          job.status === "completed" ? "Synchronization completed successfully." :
-          job.status === "running" ? "Synchronization is in progress." :
-          job.status === "failed" ? "Synchronization failed." :
-          "Synchronization is pending."
-      }
+      data: result.rows.length ? formatSyncJob(result.rows[0]) : null
     });
-
   } catch (err) {
+    console.log("ACTIVE SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
@@ -2865,14 +3169,11 @@ router.get("/company-details", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -2888,6 +3189,12 @@ router.get("/company-details", async (req, res) => {
       waitForConnectorSyncJob(companyJobId, userId),
       waitForConnectorSyncJob(gstJobId, userId)
     ]);
+
+    // The transaction is opened only once Tally has answered. Opening it
+    // before the connector wait (as every sync route used to) left the
+    // connection "idle in transaction" for up to 10 minutes per step —
+    // and for the whole wait if the connector never picked the job up.
+    await client.query("BEGIN");
 
     const companyParsed = await parseXML(companyResponseXML);
 
@@ -3000,20 +3307,17 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
+    // No transaction: syncProfitLossSummary waits on the connector and then
+    // does a single upsert, so a BEGIN here would only sit idle across the wait.
     const summary = await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
-
-    await client.query("COMMIT");
 
     return res.status(200).json({
       status: "success",
@@ -3024,7 +3328,6 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
     console.log("❌ PROFIT LOSS SUMMARY SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
@@ -3076,9 +3379,9 @@ router.get("/profit-margin", async (req, res) => {
     let existing = await client.query(query, params);
 
     if (existing.rows.length === 0 || (fromDate && toDate)) {
-      await client.query("BEGIN");
+      // No BEGIN: it would sit idle across the connector wait inside, and
+      // the sync ends in a single upsert anyway.
       await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
-      await client.query("COMMIT");
       existing = await client.query(query, params);
     }
 

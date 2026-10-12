@@ -12,6 +12,7 @@ import {
   BULK_SALES_V2_JOB_OPTIONS,
   getBulkSalesV2JobId
 } from "../queues/bulkSalesV2.queue.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const router = express.Router();
 
@@ -93,10 +94,11 @@ router.post(
         JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
         WHERE cpt.user_id = $1
           AND cpt.is_used = TRUE
-          AND lower(trim(c.name)) = lower(trim($2))
+          AND ${companyMatchSql("$2", "$3")}
+        ORDER BY c.id DESC
         LIMIT 1
         `,
-        [userId, company]
+        [userId, company, requestedCompanyId(req)]
       );
 
       if (!companyResult.rows.length) {

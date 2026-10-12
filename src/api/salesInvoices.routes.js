@@ -2,10 +2,14 @@ import express from "express";
 import pool from "../db/index.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { ownedCompaniesSql } from "../middleware/companyAccess.middleware.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
 import { markChallansInvoiced } from "../services/challan.service.js";
 import { markQuotationsPushed } from "../services/quotation.service.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
+import { normName, pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
+import { findCompanyLedger } from "../services/vendorLedgerMapping.service.js";
 
 const router = express.Router();
 
@@ -112,10 +116,11 @@ router.post("/sales-invoices", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;
@@ -165,8 +170,8 @@ router.post("/sales-invoices", async (req, res) => {
     // exists yet — this used to be hardcoded unconditionally, which was
     // wrong for any company not based in Maharashtra.
     const companyDetailsResult = await pool.query(
-      `SELECT gstin, state FROM app_test.company_details WHERE trim(company_name) = trim($1) LIMIT 1`,
-      [company]
+      `SELECT gstin, state FROM app_test.company_details WHERE company_id = $1 LIMIT 1`,
+      [companyId]
     );
     let companyStateCode = null;
     let companyStateName = "";
@@ -650,15 +655,17 @@ router.delete("/sales-invoice-delete", async (req, res) => {
       });
     }
 
-    // Check existing invoices
+    // Check existing invoices — only ones in the caller's own companies
     const existing = await pool.query(
       `
-      SELECT id 
+      SELECT id
       FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
+        AND company_id IN (${ownedCompaniesSql("$2")})
       `,
-      [invoice_ids]
+      [invoice_ids, userId]
     );
+    const ownedIds = existing.rows.map((r) => r.id);
 
     if (existing.rows.length === 0) {
       return res.status(404).json({
@@ -679,21 +686,21 @@ router.delete("/sales-invoice-delete", async (req, res) => {
       }
     }
 
-    // Bulk delete
+    // Bulk delete — restricted to the ids verified above
     await pool.query(
       `
       DELETE FROM app_test.sales_invoice_extractions
       WHERE id = ANY($1)
       `,
-      [invoice_ids]
+      [ownedIds]
     );
 
-    console.log(`Deleted invoices: ${invoice_ids.join(", ")}`);
+    console.log(`Deleted invoices: ${ownedIds.join(", ")}`);
 
     return res.status(200).json({
       status: "success",
       message: "Invoices deleted successfully",
-      deleted_invoice_ids: invoice_ids.map(Number)
+      deleted_invoice_ids: ownedIds.map(Number)
     });
 
   } catch (err) {
@@ -792,9 +799,10 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
     if (missingItemNames.length) {
       const knownNamesResult = await pool.query(
         `
-        SELECT item_name FROM app_test.stock_group_summary WHERE company_id = $1
+        SELECT item_name FROM app_test.stock_group_summary WHERE company_id = $1 AND deleted_at IS NULL
         UNION
-        SELECT item_name FROM app_test.push_stock_item WHERE company_id = $1 AND status = 'success'
+        SELECT item_name FROM app_test.push_stock_item psi WHERE company_id = $1 AND status = 'success'
+          AND ${pushedStockItemStillInTally("app_test", "psi")}
         `,
         [companyId]
       );
@@ -817,6 +825,29 @@ router.get("/sales-invoices/missing-summary", async (req, res) => {
     }
 
     const missingLedgerNames = [...ledgerMap.values()];
+
+    // Same "Did you mean…" suggestions for missing ledgers — against the
+    // company's live ledgers only (soft-deleted ones excluded, otherwise a
+    // ledger removed from Tally would be suggested as the "fix" for itself).
+    if (missingLedgerNames.length) {
+      const knownLedgersResult = await pool.query(
+        `
+        SELECT ledger_name FROM app_test.all_ledger_details WHERE company_id = $1 AND deleted_at IS NULL
+        UNION
+        SELECT ledger_name FROM app_test.push_ledger pl WHERE company_id = $1 AND status = 'success'
+          AND ${pushedLedgerStillInTally("app_test", "pl")}
+        `,
+        [companyId]
+      );
+      const knownLedgers = knownLedgersResult.rows.map((r) => r.ledger_name).filter(Boolean);
+
+      for (const entry of missingLedgerNames) {
+        const candidates = knownLedgers.filter(
+          (n) => n.trim().toLowerCase() !== entry.name.trim().toLowerCase()
+        );
+        entry.suggestions = findTopItemMatches(candidates, entry.name, { minScore: 0.9 });
+      }
+    }
 
     // Real creation status, from the same table the "+ Create Item"/"New
     // Ledger" modals themselves write to — not inferred from the parent
@@ -899,15 +930,27 @@ router.post("/sales-invoices/resolve-missing-item", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;
     if (!companyId) {
       return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
+    }
+
+    // The manual "Fix name" box accepts free text, so confirm the target is
+    // a real, live stock item first — renaming onto a name Tally doesn't
+    // have would just fail the push again. Writes Tally's exact spelling.
+    const realItemName = await findCompanyStockItem(companyId, correct_name);
+    if (!realItemName) {
+      return res.status(400).json({
+        status: "error",
+        message: `"${String(correct_name).trim()}" isn't a stock item in Tally for this company. Pick one from the list, or create it first.`
+      });
     }
 
     const existing = await pool.query(
@@ -934,7 +977,7 @@ router.post("/sales-invoices/resolve-missing-item", async (req, res) => {
         let renamed = 0;
         for (const item of lineItems) {
           if (String(item.item_name || "").trim().toLowerCase() === wrongNameLower) {
-            item.item_name = correct_name;
+            item.item_name = realItemName;
             renamed++;
           }
         }
@@ -967,6 +1010,200 @@ router.post("/sales-invoices/resolve-missing-item", async (req, res) => {
     });
   } catch (err) {
     console.error("POST resolve-missing-item error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// Exact name of a live stock item in this company's Tally — synced (and not
+// soft-deleted) or created from this app and accepted by Tally. Ledger
+// counterpart is findCompanyLedger() in vendorLedgerMapping.service.js.
+async function findCompanyStockItem(companyId, itemName) {
+  const wanted = String(itemName || "").trim();
+  if (!wanted) return null;
+
+  const result = await pool.query(
+    `
+    SELECT TRIM(item_name) AS item_name
+    FROM (
+      SELECT item_name FROM app_test.stock_group_summary WHERE company_id = $1 AND deleted_at IS NULL
+      UNION ALL
+      SELECT item_name FROM app_test.push_stock_item psi WHERE company_id = $1 AND status = 'success'
+        AND ${pushedStockItemStillInTally("app_test", "psi")}
+    ) s
+    WHERE ${normName("item_name")} = ${normName("$2")}
+    LIMIT 1
+    `,
+    [companyId, wanted]
+  );
+  return result.rows[0]?.item_name || null;
+}
+
+// Mapped ledgers the sales worker injects into every voucher (see
+// pushSalesInvoice.worker.js) — a missing name can live here rather than
+// on the invoice itself (e.g. a TDS ledger deleted from Tally).
+const SALES_MAPPING_LEDGER_FIELDS = [
+  "sales_ledger",
+  "cgst_ledger",
+  "sgst_ledger",
+  "igst_ledger",
+  "tds_ledger",
+  "cess_ledger",
+  "rounded_off_ledger"
+];
+
+/* =========================================
+   POST /sales-invoices/resolve-missing-ledger
+   Ledger counterpart of resolve-missing-item: points a missing ledger name
+   at a real Tally ledger and re-queues every invoice it was blocking. The
+   name can sit on the invoice (customer_name — what sales_generator.py
+   sends as PARTYLEDGERNAME — party_ledger, sales_ledger, or a line's own
+   ledger) or in the company's sales ledger mapping (TDS/GST/round-off/
+   sales), so both are corrected. Renaming onto a ledger Tally doesn't have
+   is refused up front.
+========================================= */
+router.post("/sales-invoices/resolve-missing-ledger", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const { company, wrong_name, correct_name, invoice_ids } = req.body;
+
+    if (!company) {
+      return res.status(400).json({ status: "error", message: "company is required" });
+    }
+    if (!String(wrong_name || "").trim() || !String(correct_name || "").trim()) {
+      return res.status(400).json({ status: "error", message: "wrong_name and correct_name are required" });
+    }
+    if (!Array.isArray(invoice_ids) || invoice_ids.length === 0) {
+      return res.status(400).json({ status: "error", message: "invoice_ids array is required" });
+    }
+
+    const companyResult = await pool.query(
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
+      LIMIT 1
+      `,
+      [userId, company, requestedCompanyId(req)]
+    );
+
+    const companyId = companyResult.rows[0]?.id;
+    if (!companyId) {
+      return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
+    }
+
+    const realLedgerName = await findCompanyLedger(companyId, correct_name);
+    if (!realLedgerName) {
+      return res.status(400).json({
+        status: "error",
+        message: `"${String(correct_name).trim()}" isn't a ledger in Tally for this company. Pick one from the list, or create it first.`
+      });
+    }
+
+    const wrongNameLower = String(wrong_name).trim().toLowerCase();
+    const matchesWrong = (value) => String(value || "").trim().toLowerCase() === wrongNameLower;
+
+    // 1) Company-level sales ledger mapping.
+    const mappingResult = await pool.query(
+      `SELECT * FROM app_test.company_sales_ledger_mappings WHERE company_id = $1`,
+      [companyId]
+    );
+    const mapping = mappingResult.rows[0];
+    const mappingFieldsFixed = mapping
+      ? SALES_MAPPING_LEDGER_FIELDS.filter((field) => matchesWrong(mapping[field]))
+      : [];
+
+    if (mappingFieldsFixed.length) {
+      // Column names come from the fixed SALES_MAPPING_LEDGER_FIELDS list.
+      const setClause = mappingFieldsFixed.map((field) => `${field} = $1`).join(", ");
+      await pool.query(
+        `UPDATE app_test.company_sales_ledger_mappings SET ${setClause}, updated_at = NOW() WHERE company_id = $2`,
+        [realLedgerName, companyId]
+      );
+    }
+
+    // 2) The invoices themselves.
+    const existing = await pool.query(
+      `
+      SELECT id, raw_json
+      FROM app_test.sales_invoice_extractions
+      WHERE id = ANY($1) AND company_id = $2
+      `,
+      [invoice_ids, companyId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ status: "error", message: "No matching invoices found for this company" });
+    }
+
+    const results = [];
+
+    for (const row of existing.rows) {
+      try {
+        const rawJson = (typeof row.raw_json === "string" ? JSON.parse(row.raw_json) : row.raw_json) || {};
+
+        let renamed = 0;
+        for (const field of ["customer_name", "party_ledger", "sales_ledger"]) {
+          if (matchesWrong(rawJson[field])) {
+            rawJson[field] = realLedgerName;
+            renamed++;
+          }
+        }
+        for (const item of Array.isArray(rawJson.line_items) ? rawJson.line_items : []) {
+          if (matchesWrong(item.ledger)) {
+            item.ledger = realLedgerName;
+            renamed++;
+          }
+        }
+
+        // Nothing on the invoice itself, but the mapping was the culprit
+        // and is now fixed — still worth re-queuing.
+        if (renamed === 0 && mappingFieldsFixed.length === 0) {
+          results.push({ id: row.id, status: "skipped", message: "ledger name not found on this invoice or in the ledger mapping" });
+          continue;
+        }
+
+        await pool.query(
+          `
+          UPDATE app_test.sales_invoice_extractions
+          SET raw_json = $1,
+              customer_name = CASE WHEN LOWER(TRIM(customer_name)) = $3 THEN $4 ELSE customer_name END,
+              sync_status = 'pending', error_count = 0, error_message = NULL, updated_at = NOW()
+          WHERE id = $2
+          `,
+          [rawJson, row.id, wrongNameLower, realLedgerName]
+        );
+        await safeEnqueueSales(row.id, userId);
+        results.push({ id: row.id, status: "queued" });
+      } catch (err) {
+        console.error(`resolve-missing-ledger: failed for invoice ${row.id}:`, err.message);
+        results.push({ id: row.id, status: "error", message: err.message });
+      }
+    }
+
+    const queued = results.filter((r) => r.status === "queued").length;
+    const mappingNote = mappingFieldsFixed.length
+      ? ` Ledger mapping updated (${mappingFieldsFixed.join(", ")}).`
+      : "";
+
+    return res.status(200).json({
+      status: "success",
+      message: `${queued} of ${invoice_ids.length} invoice(s) updated to "${realLedgerName}" and re-queued.${mappingNote}`,
+      mapping_fields_fixed: mappingFieldsFixed,
+      results
+    });
+  } catch (err) {
+    console.error("POST resolve-missing-ledger error:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
@@ -1016,10 +1253,11 @@ router.post("/sales-invoices/retry-batch", async (req, res) => {
       JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
-        AND lower(trim(c.name)) = lower(trim($2))
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
       LIMIT 1
       `,
-      [userId, company]
+      [userId, company, requestedCompanyId(req)]
     );
 
     const companyId = companyResult.rows[0]?.id;
@@ -1093,8 +1331,9 @@ router.post("/sales-invoices/:id/resolve-state-mismatch", async (req, res) => {
     }
 
     const invoiceResult = await pool.query(
-      `SELECT id, raw_json, error_message, sync_status FROM app_test.sales_invoice_extractions WHERE id = $1`,
-      [id]
+      `SELECT id, raw_json, error_message, sync_status FROM app_test.sales_invoice_extractions
+       WHERE id = $1 AND company_id IN (${ownedCompaniesSql("$2")})`,
+      [id, userId]
     );
 
     const row = invoiceResult.rows[0];

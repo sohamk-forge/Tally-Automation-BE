@@ -4,6 +4,7 @@ import { DB_SCHEMA } from "../config/db.js";
 import { normalizeVoucherRow } from "../services/voucherPdf.service.js";
 import { renderVoucherPdf } from "../services/voucherPdfRenderer.service.js";
 import { getCompanyInfo } from "../services/companyInfo.service.js";
+import { assertCompanyAccess } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
 
@@ -29,13 +30,14 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Query params 'from' and 'to' (YYYY-MM-DD) are required" });
     }
 
-    const conditions = ["deleted_at IS NULL"];
-    const params = [];
-
-    if (company_id) {
-      params.push(company_id);
-      conditions.push(`company_id = $${params.length}`);
+    // Was optional, which returned every company's vouchers when omitted.
+    if (!company_id) {
+      return res.status(400).json({ error: "Query param 'company_id' is required" });
     }
+
+    const conditions = ["deleted_at IS NULL"];
+    const params = [company_id];
+    conditions.push(`company_id = $${params.length}`);
     if (party_ledger_name) {
       params.push(party_ledger_name);
       conditions.push(`party_ledger_name = $${params.length}`);
@@ -118,6 +120,8 @@ router.get("/:id/pdf", async (req, res) => {
     if (!row.company_id) {
       return res.status(422).json({ error: `Voucher ${id} has no company_id - cannot resolve letterhead` });
     }
+    // Looked up by id alone, so check the voucher's own company.
+    if (!(await assertCompanyAccess(req, res, row.company_id))) return;
 
     const companyInfo = await getCompanyInfo(row.company_id);
 

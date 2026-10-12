@@ -119,6 +119,7 @@ router.post("/pair", async (req, res) => {
       WHERE cpt.user_id = $1
         AND cpt.is_used = TRUE
         AND lower(trim(c.name)) = lower(trim($2))
+      ORDER BY c.id DESC
       LIMIT 1
       `,
       [user.id, company_name]

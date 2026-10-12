@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../db/index.js";
+import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();

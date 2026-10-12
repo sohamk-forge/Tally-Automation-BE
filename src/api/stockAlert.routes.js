@@ -3,7 +3,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-// import { checkCompanyAccess } from "../utils/companyAccess.js";
+import { assertCompanyAccess } from "../middleware/companyAccess.middleware.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -48,7 +48,7 @@ router.post(
       ============================== */
 
       if (
-        !data.company ||
+        !data.company_id ||
         !data.item_name ||
         data.minimum_alert_quantity == null
       ) {
@@ -58,7 +58,7 @@ router.post(
           status: "error",
 
           message:
-            "company, item_name and minimum_alert_quantity are required"
+            "company_id, item_name and minimum_alert_quantity are required"
 
         });
 
@@ -68,28 +68,24 @@ router.post(
          COMPANY
       ============================== */
 
-      const companyResult =
-        await pool.query(
+      const companyId = String(data.company_id).trim();
 
-          `
-          SELECT id
-          FROM ${DB_SCHEMA}.companies
-          WHERE TRIM(name)=TRIM($1)
-          LIMIT 1
-          `,
+      // Ownership check — the caller must have access to this company id.
+      if (!(await assertCompanyAccess(req, res, companyId))) return;
 
-          [data.company]
+      const companyResult = await pool.query(
+        `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1 LIMIT 1`,
+        [companyId]
+      );
 
-        );
-
-      if (companyResult.rows.length === 0) {
+      if (!companyResult.rows.length) {
         return res.status(404).json({
           status: "error",
-          message: `Company not found: ${data.company}`
+          message: `Company not found: ${companyId}`
         });
       }
 
-      const companyId = companyResult.rows[0].id;
+      const companyName = companyResult.rows[0].name;
 
       // const hasAccess = await checkCompanyAccess(userId, companyId);
       // if (!hasAccess) {
@@ -110,8 +106,13 @@ router.post(
           SELECT id
           FROM ${DB_SCHEMA}.stock_alerts
           WHERE
-            LOWER(TRIM(company_name))
-              = LOWER(TRIM($1))
+            (
+              company_id = $3
+              OR (
+                company_id IS NULL
+                AND LOWER(TRIM(company_name)) = LOWER(TRIM($1))
+              )
+            )
           AND
             LOWER(TRIM(item_name))
               = LOWER(TRIM($2))
@@ -119,8 +120,9 @@ router.post(
           `,
 
           [
-            data.company,
-            data.item_name
+            companyName,
+            data.item_name,
+            companyId
           ]
 
         );
@@ -232,7 +234,7 @@ router.post(
 
             companyId,
 
-            data.company?.trim(),
+            companyName,
 
             data.item_name?.trim(),
 

@@ -12,6 +12,7 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT ||
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
+  password: process.env.REDIS_PASSWORD || undefined,
   port: Number(process.env.REDIS_PORT || 6379),
   maxRetriesPerRequest: null
 });
@@ -118,7 +119,7 @@ const worker = new Worker(
         console.log(`🔄 Parent group not found, syncing...`);
 
         const syncResponse = await fetch(
-          `${BASE_URL}/api/sync/stock-group-summary-sync?company=${encodeURIComponent(row.company_name)}`
+          `${BASE_URL}/api/sync/stock-group-summary-sync?company=${encodeURIComponent(row.company_name)}&companyId=${encodeURIComponent(row.company_id)}`
         );
 
         if (!syncResponse.ok) {

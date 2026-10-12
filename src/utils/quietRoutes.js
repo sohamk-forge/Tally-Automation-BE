@@ -7,7 +7,9 @@
 // happens (e.g. a job is claimed).
 const QUIET_ROUTE_PATTERNS = [
   /^\/api\/connector\/jobs(\?|$)/,
-  /^\/api\/connector\/heartbeat(\?|$)/
+  /^\/api\/connector\/heartbeat(\?|$)/,
+  // Every open browser tab asks "is a sync running?" every few seconds.
+  /^\/api\/sync\/active(\?|$)/
 ];
 
 export function isQuietRoute(req) {

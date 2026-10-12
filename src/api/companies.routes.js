@@ -80,7 +80,8 @@ router.get("/", async (req, res) => {
        INNER JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
            ON c.id = cpt.company_id
        LEFT JOIN ${DB_SCHEMA}.connector_machines m
-           ON m.company_name = c.name
+           ON (m.company_id = c.id
+               OR (m.company_id IS NULL AND m.company_name = c.name))
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
          AND cpt.is_used = TRUE AND c.archived_at IS NULL
@@ -139,7 +140,8 @@ router.get("/:id", async (req, res) => {
        INNER JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
            ON c.id = cpt.company_id
        LEFT JOIN ${DB_SCHEMA}.connector_machines m
-           ON m.company_name = c.name
+           ON (m.company_id = c.id
+               OR (m.company_id IS NULL AND m.company_name = c.name))
           AND m.user_id = cpt.user_id
        WHERE c.id = $1
          AND cpt.user_id = $2
@@ -195,7 +197,8 @@ router.get("/all/list", async (req, res) => {
        INNER JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt
            ON c.id = cpt.company_id
        LEFT JOIN ${DB_SCHEMA}.connector_machines m
-           ON m.company_name = c.name
+           ON (m.company_id = c.id
+               OR (m.company_id IS NULL AND m.company_name = c.name))
           AND m.user_id = cpt.user_id
        WHERE cpt.user_id = $1
          AND cpt.is_used = TRUE AND c.archived_at IS NULL

@@ -68,6 +68,82 @@ function isPossibleDuplicateVoucher(responseXml) {
   return created === 0 && altered === 0 && errors === 0 && exceptions > 0 && !lineError;
 }
 
+// Tally rejects a voucher that names a master it doesn't have with a
+// LINEERROR like "Stock Item 'X' does not exist!" / "Ledger 'X' does not
+// exist!". That isn't a generic failure — it's the same "missing master"
+// case the purchase worker's own validation reports (our cached stock /
+// ledger lists can be stale), so it is reported in the same shape and
+// lands in the Missing screen, where the item/ledger can be created and
+// the invoice retried.
+function decodeXmlText(text) {
+  return String(text || "")
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+// Used by both purchase_invoice and sales_invoice — sales hits this when the
+// synced ledger cache (all_ledger_details) still lists a customer that the
+// target Tally company no longer has, so pre-push validation passes and only
+// Tally itself catches it. `table` is a fixed literal from the callers below.
+async function classifyMissingMasterFromTally(client, responseXml, invoiceId, table = "invoice_extractions") {
+  const lineError = (responseXml || "").match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/)?.[1];
+  if (!lineError) return null;
+
+  const message = decodeXmlText(lineError);
+  // Greedy capture: item names can themselves contain apostrophes
+  // (e.g. "4'TH GEAR COUNTER SHAFT").
+  const stockItem = message.match(/^Stock Item '(.*)' does not exist/i)?.[1];
+  const ledger = message.match(/^Ledger '(.*)' does not exist/i)?.[1];
+  if (!stockItem && !ledger) return null;
+
+  const invoiceResult = await client.query(
+    `SELECT raw_json FROM app_test.${table} WHERE id = $1`,
+    [invoiceId]
+  );
+  const raw = invoiceResult.rows[0]?.raw_json;
+  const invoice = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+
+  if (stockItem) {
+    const line = (invoice.line_items || []).find(
+      (item) => String(item.item_name || item.stock_name || item.name || "").trim() === stockItem.trim()
+    );
+    // Purchase lines carry `unit`; sales lines carry unit_of_measure /
+    // type_of_supply (same shape validateSalesInvoice() stores).
+    const unit = String(line?.unit || line?.unit_of_measure || "").trim();
+    const typeOfSupply = String(line?.type_of_supply || "").trim();
+    const details = unit || typeOfSupply
+      ? { [stockItem]: { unit_of_measure: unit, ...(typeOfSupply ? { type_of_supply: typeOfSupply } : {}) } }
+      : {};
+
+    return {
+      syncStatus: "stock_missing",
+      errorMessage: JSON.stringify({
+        message: `Tally: ${message}`,
+        missing_ledgers: [],
+        missing_stock_items: [stockItem],
+        missing_stock_item_details: details
+      })
+    };
+  }
+
+  const partyName = String(invoice.vendor_name || invoice.party_ledger || invoice.customer_name || "").trim();
+  return {
+    syncStatus: "ledger_missing",
+    errorMessage: JSON.stringify({
+      message: `Tally: ${message}`,
+      missing_ledgers: [
+        { field: ledger.trim() === partyName ? "party_ledger" : "tally_ledger", ledger }
+      ],
+      missing_stock_items: [],
+      missing_stock_item_details: {}
+    })
+  };
+}
+
 export async function processConnectorJobResult(client, job) {
   try {
     const { id, job_type, status, response_xml, result, payload } = job;
@@ -111,6 +187,19 @@ export async function processConnectorJobResult(client, job) {
             "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
         }
 
+        if (finalStatus === "failed") {
+          const missing = await classifyMissingMasterFromTally(
+            client,
+            response_xml,
+            payload.invoice_id,
+            "sales_invoice_extractions"
+          );
+          if (missing) {
+            finalStatus = missing.syncStatus;
+            errorMessage = missing.errorMessage;
+          }
+        }
+
         await client.query(
           `
           UPDATE app_test.sales_invoice_extractions
@@ -135,6 +224,14 @@ export async function processConnectorJobResult(client, job) {
           finalStatus = "possible_duplicate";
           errorMessage =
             "Tally reports this voucher may already exist (no line error returned) — verify in Tally before retrying.";
+        }
+
+        if (finalStatus === "failed") {
+          const missing = await classifyMissingMasterFromTally(client, response_xml, payload.invoice_id);
+          if (missing) {
+            finalStatus = missing.syncStatus;
+            errorMessage = missing.errorMessage;
+          }
         }
 
         await client.query(
@@ -258,14 +355,15 @@ export async function processConnectorJobResult(client, job) {
       err_message = $3,
       duplicate_message = NULL,
       updated_at = NOW()
-    WHERE id = $4
+    WHERE id = ANY($4::int[])
     RETURNING *
     `,
     [
       finalStatus === "success" ? "SUCCESS" : "FAILED",
       response_xml || null,
       errorMessage,
-      payload.voucher_id
+      // A clubbed voucher backs several rows — all of them settle together.
+      Array.isArray(payload.voucher_ids) ? payload.voucher_ids : [payload.voucher_id]
     ]
   );
 
@@ -275,16 +373,28 @@ export async function processConnectorJobResult(client, job) {
   // old direct-push worker. Runs inside the same DB transaction client
   // as the status update, but storeLedgerEmbedding talks to a separate
   // embedding store, not this transaction, so it can't roll it back.
-  if (finalStatus === "success" && voucherResult.rows[0]) {
-    const voucher = voucherResult.rows[0];
-    const embedResult = await storeLedgerEmbedding({
-      companyName: voucher.company_name,
-      groupKey: voucher.group_key,
-      ledgerName: voucher.party_ledger
-    });
-    if (!embedResult.stored) {
-      console.log(`ℹ️ Embedding not stored for voucher ${payload.voucher_id}: ${embedResult.reason}`);
-    }
+  // Not awaited: the embedding call takes tens of seconds, and awaiting it
+  // held this transaction open — the UI kept seeing PENDING_CONNECTOR long
+  // after Tally had accepted the voucher.
+  if (finalStatus === "success") {
+    const rows = voucherResult.rows;
+    (async () => {
+      for (const voucher of rows) {
+        try {
+          const embedResult = await storeLedgerEmbedding({
+            companyId: voucher.company_id,
+            companyName: voucher.company_name,
+            groupKey: voucher.group_key,
+            ledgerName: voucher.party_ledger
+          });
+          if (!embedResult.stored) {
+            console.log(`ℹ️ Embedding not stored for voucher ${voucher.id}: ${embedResult.reason}`);
+          }
+        } catch (embedErr) {
+          console.error(`Embedding failed for voucher ${voucher.id}:`, embedErr.message);
+        }
+      }
+    })();
   }
 
   break;

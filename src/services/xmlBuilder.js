@@ -449,7 +449,7 @@ export const getGroupSummaryCRXML = (company) => {
                 <TDLMESSAGE>
 
                     <SYSTEM TYPE="Formulae" NAME="BankFilter">
-                        $Parent = "Bank OD A/c" OR $Parent = "Bank Accounts" OR $Parent = "Bank Accounts"
+                        $$IsBelongsTo:"Bank Accounts" OR $$IsBelongsTo:"Bank OD A/c" OR $$IsBelongsTo:"Bank OCC A/c" OR $$IsBelongsTo:"Cash-in-Hand"
                     </SYSTEM>
 
                     <COLLECTION NAME="GroupSummaryBank">
@@ -615,6 +615,18 @@ export const getGroupSummaryCRXML = (company) => {
                               PARTYLEDGERNAME,
 
                               NARRATION,
+
+                              REFERENCE,
+
+                              REFERENCEDATE,
+
+                              PARTYGSTIN,
+
+                              PLACEOFSUPPLY,
+
+                              ISCANCELLED,
+
+                              ISOPTIONAL,
 
                               ALLLEDGERENTRIES.LIST
 

@@ -11,6 +11,7 @@ import {
   BULK_STOCK_ITEM_JOB_OPTIONS,
   getBulkStockItemJobId
 } from "../queues/bulkStockItem.queue.js";
+import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 
 const router = express.Router();
 
@@ -95,10 +96,11 @@ router.post(
         JOIN ${DB_SCHEMA}.connector_pairing_tokens cpt ON cpt.company_id = c.id
         WHERE cpt.user_id = $1
           AND cpt.is_used = TRUE
-          AND lower(trim(c.name)) = lower(trim($2))
+          AND ${companyMatchSql("$2", "$3")}
+        ORDER BY c.id DESC
         LIMIT 1
         `,
-        [userId, company]
+        [userId, company, requestedCompanyId(req)]
       );
 
       const companyId =
