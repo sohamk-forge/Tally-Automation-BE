@@ -57,7 +57,7 @@ async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
       WHERE company_id = $1
         AND DATE(voucher_date) >= $2
         AND DATE(voucher_date) < $3
-        AND deleted_at IS NULL`,
+        AND (LOWER(voucher_type) LIKE '%sales%' OR LOWER(voucher_type) LIKE '%purchase%')`,
     [companyId, yearStart, yearEnd]
   );
   return result.rows;

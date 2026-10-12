@@ -10,7 +10,7 @@ router.get("/closing-balance", async (req, res) => {
     const company = req.query.company;
     // Prefer company_id: several companies rows can share one name (one per
     // user pairing), so a name lookup can return another row's balance.
-    let companyId = req.query.company_id ? Number(req.query.company_id) : null;
+    const companyId = req.query.company_id ? Number(req.query.company_id) : null;
 
     if (!companyId && !company) {
       return res.status(400).json({
@@ -33,17 +33,17 @@ router.get("/closing-balance", async (req, res) => {
     const result = await pool.query(
       `SELECT closing_balance, opening_balance, updated_at
          FROM ${DB_SCHEMA}.group_balances
-        WHERE company_id = $1
+        WHERE ${companyId ? "company_id = $1" : "LOWER(company_name) = LOWER($1)"}
           AND LOWER(REPLACE(group_name, ' ', '-')) = 'stock-in-hand'
         ORDER BY updated_at DESC
         LIMIT 1`,
-      [companyId]
+      [companyId || company]
     );
 
     if (!result.rows.length) {
       return res.status(404).json({
         success: false,
-        message: `No "Stock-in-Hand" group balance found for "${companyId}". Run /payable-debtors sync first.`
+        message: `No "Stock-in-Hand" group balance found for "${companyId || company}". Run /payable-debtors sync first.`
       });
     }
 
