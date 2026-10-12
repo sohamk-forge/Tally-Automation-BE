@@ -763,12 +763,119 @@ router.delete("/statement-files", async (req, res) => {
       );
       deleted = r.rowCount;
       await deleteJobs(company_id, deletable);
+      await db.query(
+        `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+         WHERE company_id = $1 AND statement_key = ANY($2)`,
+        [company_id, deletable.map((f) => `excel:${f}`)]
+      );
     }
 
     return res.json({ success: true, deleted_files: deletable, skipped_files: skipped, deleted_rows: deleted });
   } catch (err) {
     console.error("STATEMENT FILES DELETE ERROR:", err);
     return res.status(500).json({ success: false, message: "Failed to delete statement files" });
+  }
+});
+
+/* ===========================
+   REVIEW STATEMENT DRAFTS
+   Unsent per-row picks (ledger / voucher / narration). statement_key is
+   "excel:<file_name>" or "pdf:<document_id>"; row_id is the FE row id.
+=========================== */
+
+const DRAFT_FIELDS = ["ledger", "voucher", "narration"];
+
+router.get("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key } = req.query;
+    if (!company_id || !statement_key) {
+      return res.status(400).json({ success: false, message: "company_id and statement_key are required" });
+    }
+
+    const result = await db.query(
+      `SELECT row_id, ledger, voucher, narration
+       FROM ${DB_SCHEMA}.bank_statement_drafts
+       WHERE company_id = $1 AND statement_key = $2`,
+      [company_id, statement_key]
+    );
+
+    const drafts = {};
+    for (const r of result.rows) {
+      const d = {};
+      for (const f of DRAFT_FIELDS) if (r[f] !== null) d[f] = r[f];
+      drafts[r.row_id] = d;
+    }
+    return res.json({ success: true, drafts });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS GET ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to load drafts" });
+  }
+});
+
+/* Upsert one row's draft. Only the fields present in the body are written,
+   so saving a voucher doesn't wipe an earlier ledger pick. */
+router.put("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key, row_id } = req.body || {};
+    if (!company_id || !statement_key || row_id === undefined || row_id === null || row_id === "") {
+      return res.status(400).json({ success: false, message: "company_id, statement_key and row_id are required" });
+    }
+
+    const fields = DRAFT_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(req.body, f));
+    if (fields.length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to save" });
+    }
+
+    const userId = await resolveUserId(req).catch(() => null);
+    const params = [company_id, statement_key, String(row_id), userId];
+    const cols = fields.map((f) => {
+      const v = req.body[f];
+      params.push(v === null || v === undefined ? null : String(v));
+      return { col: f, ph: `$${params.length}` };
+    });
+
+    await db.query(
+      `INSERT INTO ${DB_SCHEMA}.bank_statement_drafts
+         (company_id, statement_key, row_id, updated_by, ${cols.map((c) => c.col).join(", ")})
+       VALUES ($1, $2, $3, $4, ${cols.map((c) => c.ph).join(", ")})
+       ON CONFLICT (company_id, statement_key, row_id) DO UPDATE SET
+         ${cols.map((c) => `${c.col} = EXCLUDED.${c.col}`).join(", ")},
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()`,
+      params
+    );
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS SAVE ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to save draft" });
+  }
+});
+
+/* Remove drafts for specific rows, or the whole statement if row_ids is omitted. */
+router.delete("/statement-drafts", async (req, res) => {
+  try {
+    const { company_id, statement_key, row_ids } = req.body || {};
+    if (!company_id || !statement_key) {
+      return res.status(400).json({ success: false, message: "company_id and statement_key are required" });
+    }
+
+    const r = Array.isArray(row_ids)
+      ? await db.query(
+          `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+           WHERE company_id = $1 AND statement_key = $2 AND row_id = ANY($3)`,
+          [company_id, statement_key, row_ids.map(String)]
+        )
+      : await db.query(
+          `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+           WHERE company_id = $1 AND statement_key = $2`,
+          [company_id, statement_key]
+        );
+
+    return res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    console.error("STATEMENT DRAFTS DELETE ERROR:", err);
+    return res.status(500).json({ success: false, message: "Failed to delete drafts" });
   }
 });
 
