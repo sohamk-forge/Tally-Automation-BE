@@ -3,6 +3,7 @@ import db from "../db/index.js";
 import multer from "multer";
 import xlsx from "xlsx";
 import path from "path";
+import { randomUUID } from "crypto";
 
 import { DB_SCHEMA } from "../config/db.js";
 import {
@@ -1553,6 +1554,162 @@ router.put("/bulk-party-ledger", async (req, res) => {
     });
   }
 });
+
+/* ===========================
+   CLUB — several same-date, same-side bank rows → ONE Payment / Receipt
+
+   Every row gets the same club_group_id. Only the leader (lowest id) is
+   enqueued; pushVoucher.worker.js builds one voucher from the whole group
+   and keeps every member's status in step with the leader.
+   Body: { vouchers: [{ id, party_ledger }], forcePush? }
+=========================== */
+router.post("/club", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
+    const forcePushFlag = req.body.forcePush === true;
+    const items = Array.isArray(req.body.vouchers) ? req.body.vouchers : [];
+
+    if (items.length < 2) {
+      return res.status(400).json({ success: false, message: "Select 2 or more transactions to club" });
+    }
+    const bad = items.find(v => !Number.isInteger(Number(v?.id)) || !String(v?.party_ledger || "").trim());
+    if (bad) {
+      return res.status(400).json({ success: false, message: "Each item needs a numeric id and a party_ledger" });
+    }
+
+    const ids = items.map(v => Number(v.id));
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ success: false, message: "Duplicate ids in request" });
+    }
+    // Keyed by string: pg returns bigint ids as strings.
+    const ledgerById = new Map(items.map(v => [String(Number(v.id)), String(v.party_ledger).trim()]));
+
+    const found = await db.query(
+      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = ANY($1::int[])
+         AND status IN ('WAITING_LEDGER', 'FAILED')
+         AND company_id IN (${ownedCompaniesSql("$2")})
+       ORDER BY id ASC`,
+      [ids, userId]
+    );
+
+    if (found.rows.length !== ids.length) {
+      const foundIds = new Set(found.rows.map(r => Number(r.id)));
+      return res.status(404).json({
+        success: false,
+        message: "Some transactions were not found or are already sent",
+        notFound: ids.filter(id => !foundIds.has(id))
+      });
+    }
+
+    const rows = found.rows;
+    const dateKey = (d) => (d instanceof Date ? d.toISOString().split("T")[0] : String(d).slice(0, 10));
+    const same = (fn) => new Set(rows.map(fn)).size === 1;
+
+    if (!same(r => r.company_id) || !same(r => r.bank_ledger)) {
+      return res.status(400).json({ success: false, message: "All transactions must belong to the same company and bank ledger" });
+    }
+    if (!same(r => dateKey(r.voucher_date))) {
+      return res.status(400).json({ success: false, message: "All selected transactions must be on the same date" });
+    }
+    if (!same(r => String(r.debit_credit || "").toUpperCase())) {
+      return res.status(400).json({ success: false, message: "Cannot club debit and credit transactions together" });
+    }
+
+    const voucherType = String(rows[0].debit_credit || "").toUpperCase() === "CREDIT" ? "receipt" : "payment";
+    const clubGroupId = randomUUID();
+    const leaderId = rows[0].id;
+
+    // Assign ledgers + group in one transaction so a half-built club can't
+    // be picked up by the worker.
+    const client = await db.connect();
+    let updated;
+    try {
+      await client.query("BEGIN");
+      updated = [];
+      for (const r of rows) {
+        const u = await client.query(
+          `UPDATE ${DB_SCHEMA}.contra_vouchers
+           SET party_ledger   = $1,
+               voucher_type   = $2,
+               transfer_bank  = NULL,
+               force_push     = $3,
+               user_id        = $4,
+               club_group_id  = $5,
+               status         = 'PENDING',
+               updated_at     = NOW()
+           WHERE id = $6
+           RETURNING *`,
+          [ledgerById.get(String(r.id)), voucherType, forcePushFlag, userId, clubGroupId, r.id]
+        );
+        updated.push(u.rows[0]);
+      }
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    // Duplicate check per row — any hit stops the whole club so the user
+    // can deselect it; the rest go back to WAITING_LEDGER untouched.
+    if (!forcePushFlag) {
+      const duplicates = [];
+      for (const v of updated) {
+        const outcome = await runDuplicateCheck(v);
+        if (outcome.tallyUnreachable) {
+          await releaseClub(clubGroupId);
+          return res.status(503).json({ success: false, message: outcome.message });
+        }
+        if (outcome.exists) {
+          duplicates.push({ id: v.id, message: outcome.message, matches: outcome.matches });
+        }
+      }
+      if (duplicates.length) {
+        await releaseClub(clubGroupId, duplicates.map(d => d.id));
+        return res.status(409).json({
+          success: false,
+          duplicate: true,
+          message: `${duplicates.length} transaction(s) already exist in Tally`,
+          duplicates
+        });
+      }
+    }
+
+    const queue = await safeEnqueueVoucher(leaderId);
+
+    return res.status(202).json({
+      success: true,
+      message: `${rows.length} transactions queued as 1 ${voucherType} voucher`,
+      leaderId,
+      clubGroupId,
+      voucherType,
+      ids: rows.map(r => r.id),
+      queue
+    });
+  } catch (err) {
+    console.error("Club vouchers error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Undo a club that won't be pushed: duplicate rows stay DUPLICATE_FOUND
+// (set by runDuplicateCheck), everything else returns to WAITING_LEDGER.
+async function releaseClub(clubGroupId, keepDuplicateIds = []) {
+  await db.query(
+    `UPDATE ${DB_SCHEMA}.contra_vouchers
+     SET club_group_id = NULL,
+         status = CASE WHEN id = ANY($2::int[]) THEN status ELSE 'WAITING_LEDGER' END,
+         updated_at = NOW()
+     WHERE club_group_id = $1`,
+    [clubGroupId, keepDuplicateIds]
+  );
+}
 
 router.put("/:id/party-ledger", async (req, res) => {
   try {

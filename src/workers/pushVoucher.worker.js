@@ -147,6 +147,68 @@ function buildLedgers(voucher, amount) {
 
 /*
 ====================================
+BUILD LEDGERS FOR A CLUBBED VOUCHER
+
+One Payment / Receipt for the whole group: one party line per bank row
+(same ledger twice stays as two lines, not summed), and the bank ledger
+carries one bank allocation per row.
+====================================
+*/
+
+function buildClubLedgers(group) {
+  const leader = group[0];
+  if (!["payment", "receipt"].includes(leader.voucher_type)) {
+    throw new Error(`Club ${leader.club_group_id}: only payment/receipt can be clubbed, got ${leader.voucher_type}`);
+  }
+  const isPayment = leader.voucher_type === "payment";
+  // Payment: party Dr (negative, deemed positive), bank Cr. Receipt flips.
+  const partySign = isPayment ? -1 : 1;
+
+  const ledgers = [];
+  let total = 0;
+  const allocations = [];
+
+  for (const v of group) {
+    if (!v.party_ledger) {
+      throw new Error(`Club ${leader.club_group_id}: voucher ${v.id} has no party_ledger`);
+    }
+    const amount = Number(v.amount);
+    total += amount;
+    ledgers.push({
+      ledger_name: v.party_ledger,
+      amount: partySign * amount,
+      is_positive: isPayment
+    });
+    allocations.push({
+      bank_name: leader.bank_ledger,
+      party_name: v.party_ledger,
+      instrument_number: v.instrument_number || "",
+      amount: -partySign * amount
+    });
+  }
+
+  ledgers.push({
+    ledger_name: leader.bank_ledger,
+    amount: -partySign * total,
+    is_positive: !isPayment,
+    bank_allocations: allocations
+  });
+
+  return ledgers;
+}
+
+async function setStatusForIds(ids, status, message) {
+  const setErr = status === "FAILED" ? ", err_message = $2" : "";
+  await pool.query(
+    `UPDATE app_test.contra_vouchers
+     SET status = $1, tally_response = $2${setErr}, updated_at = NOW()
+     WHERE id = ANY($3::int[])`,
+    [status, message, ids]
+  );
+}
+
+/*
+====================================
 RUN PYTHON — XML GENERATION ONLY
 
 Generates the voucher XML and returns it as a string. Nothing in this
@@ -263,6 +325,22 @@ const worker = new Worker(
       return { voucherId, status: "cancelled" };
     }
 
+    // Clubbed rows: only the leader (lowest id) pushes, for the whole group.
+    let group = [voucher];
+    if (voucher.club_group_id) {
+      const groupResult = await pool.query(
+        `SELECT * FROM app_test.contra_vouchers WHERE club_group_id = $1 ORDER BY id ASC`,
+        [voucher.club_group_id]
+      );
+      group = groupResult.rows;
+      if (group[0].id !== voucher.id) {
+        console.log(`[VOUCHER] ${voucherId} is a member of club ${voucher.club_group_id} — leader ${group[0].id} pushes it`);
+        return { voucherId, status: "club_member" };
+      }
+    }
+    const isClub = group.length > 1;
+    const memberIds = group.map(v => v.id);
+
     console.log("");
     console.log("================================");
     console.log(`[VOUCHER] Processing voucher ID ${voucher.id}`);
@@ -276,7 +354,8 @@ const worker = new Worker(
 
       // Pre-push duplicate re-check — DB only. Skipped if force_push
       // was explicitly set (see confirm-push route in voucher.routes.js).
-      if (!voucher.force_push) {
+      // Clubs are checked row-by-row in POST /voucher/club instead.
+      if (!voucher.force_push && !isClub) {
         const voucherDateStr =
           voucher.voucher_date instanceof Date
             ? toIsoDate(voucher.voucher_date)
@@ -309,14 +388,16 @@ const worker = new Worker(
       }
 
       // Generate XML only. Nothing gets pushed from the server.
-      const ledgers = buildLedgers(voucher, amount);
+      const ledgers = isClub ? buildClubLedgers(group) : buildLedgers(voucher, amount);
       const payload = {
         company: voucher.company_name,
         voucher_type: voucher.voucher_type,
         voucher_number: voucher.voucher_number || "",
         date: formattedDate,
         party_ledger: voucher.party_ledger,
-        narration: voucher.narration || "",
+        narration: isClub
+          ? group.map(v => v.narration).filter(Boolean).join(" | ")
+          : (voucher.narration || ""),
         ledgers
       };
 
@@ -338,6 +419,7 @@ const worker = new Worker(
         requestXml: xml,
         payload: {
           voucher_id: voucherId,
+          ...(isClub ? { voucher_ids: memberIds } : {}),
           company_id: voucher.company_id,
           voucher_type: voucher.voucher_type
         }
@@ -346,8 +428,8 @@ const worker = new Worker(
       await pool.query(
         `UPDATE app_test.contra_vouchers
          SET status = 'PENDING_CONNECTOR', tally_response = NULL, duplicate_message = NULL, updated_at = NOW()
-         WHERE id = $1`,
-        [voucherId]
+         WHERE id = ANY($1::int[])`,
+        [memberIds]
       );
 
       console.log(`✅ Voucher connector job created: ${voucherId}`, {
@@ -369,21 +451,11 @@ const worker = new Worker(
 
     } catch (error) {
       if (isTemporaryVoucherError(error)) {
-        await pool.query(
-          `UPDATE app_test.contra_vouchers
-           SET status = 'PENDING', tally_response = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [error.message, voucherId]
-        );
+        await setStatusForIds(memberIds, "PENDING", error.message);
         throw error; // BullMQ retries per VOUCHER_JOB_OPTIONS
       }
 
-      await pool.query(
-        `UPDATE app_test.contra_vouchers
-         SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [error.message, voucherId]
-      );
+      await setStatusForIds(memberIds, "FAILED", error.message);
       console.log(`💥 Voucher Failed: ${voucherId} — ${error.message}`);
       return { voucherId, status: "failed" };
     }
@@ -421,7 +493,8 @@ worker.on("failed", async (job, error) => {
     await pool.query(
       `UPDATE app_test.contra_vouchers
        SET status = 'FAILED', tally_response = $1, err_message = $1, updated_at = NOW()
-       WHERE id = $2`,
+       WHERE id = $2
+          OR club_group_id = (SELECT club_group_id FROM app_test.contra_vouchers WHERE id = $2)`,
       [error.message, voucherId]
     );
   } catch (updateError) {

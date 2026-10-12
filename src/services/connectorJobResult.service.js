@@ -355,14 +355,15 @@ export async function processConnectorJobResult(client, job) {
       err_message = $3,
       duplicate_message = NULL,
       updated_at = NOW()
-    WHERE id = $4
+    WHERE id = ANY($4::int[])
     RETURNING *
     `,
     [
       finalStatus === "success" ? "SUCCESS" : "FAILED",
       response_xml || null,
       errorMessage,
-      payload.voucher_id
+      // A clubbed voucher backs several rows — all of them settle together.
+      Array.isArray(payload.voucher_ids) ? payload.voucher_ids : [payload.voucher_id]
     ]
   );
 
@@ -372,17 +373,28 @@ export async function processConnectorJobResult(client, job) {
   // old direct-push worker. Runs inside the same DB transaction client
   // as the status update, but storeLedgerEmbedding talks to a separate
   // embedding store, not this transaction, so it can't roll it back.
-  if (finalStatus === "success" && voucherResult.rows[0]) {
-    const voucher = voucherResult.rows[0];
-    const embedResult = await storeLedgerEmbedding({
-      companyId: voucher.company_id,
-      companyName: voucher.company_name,
-      groupKey: voucher.group_key,
-      ledgerName: voucher.party_ledger
-    });
-    if (!embedResult.stored) {
-      console.log(`ℹ️ Embedding not stored for voucher ${payload.voucher_id}: ${embedResult.reason}`);
-    }
+  // Not awaited: the embedding call takes tens of seconds, and awaiting it
+  // held this transaction open — the UI kept seeing PENDING_CONNECTOR long
+  // after Tally had accepted the voucher.
+  if (finalStatus === "success") {
+    const rows = voucherResult.rows;
+    (async () => {
+      for (const voucher of rows) {
+        try {
+          const embedResult = await storeLedgerEmbedding({
+            companyId: voucher.company_id,
+            companyName: voucher.company_name,
+            groupKey: voucher.group_key,
+            ledgerName: voucher.party_ledger
+          });
+          if (!embedResult.stored) {
+            console.log(`ℹ️ Embedding not stored for voucher ${voucher.id}: ${embedResult.reason}`);
+          }
+        } catch (embedErr) {
+          console.error(`Embedding failed for voucher ${voucher.id}:`, embedErr.message);
+        }
+      }
+    })();
   }
 
   break;

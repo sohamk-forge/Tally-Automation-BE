@@ -288,6 +288,19 @@ class VoucherGenerator:
                     amount
                 )
 
+            # Clubbed voucher: one allocation per bank row,
+            # each carrying its own signed amount.
+            for alloc in ledger.get(
+                "bank_allocations",
+                []
+            ):
+
+                self.add_bank_allocation(
+                    entry,
+                    alloc,
+                    float(alloc["amount"])
+                )
+
         return self.prettify_xml(
             root
         )

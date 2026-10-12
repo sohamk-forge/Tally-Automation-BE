@@ -538,10 +538,11 @@ router.get("/companies", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const xml = getCompaniesXML();
     const responseXML = await discoverCompaniesViaConnector(userId, xml);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection =
@@ -789,19 +790,19 @@ router.get("/group-summary-bank", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGroupSummaryBankXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -823,6 +824,7 @@ router.get("/group-summary-bank", async (req, res) => {
       const guid = originalGuid || generateFallbackGuid(company, ledgerName, "bank");
       const masterId = ledger?.MASTERID || ledger?.$?.MASTERID || null;
       const alterId = ledger?.ALTERID || ledger?.$?.ALTERID || null;
+      const parentGroup = clean(ledger?.PARENT || ledger?.$?.PARENT || "")?.replace(/&#4;/g, "").trim() || "Bank Accounts";
 
       const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
@@ -839,7 +841,7 @@ router.get("/group-summary-bank", async (req, res) => {
         // See upsertRecord's forceOverwrite comment — this is a balance
         // snapshot (opening/closing), not versioned master data.
         [
-          companyId, company, ledgerName, "Bank Accounts",
+          companyId, company, ledgerName, parentGroup,
           clean(ledger?.BANKACCHOLDERNAME || ledger?.ACHOLDERNAME || ledger?.BankAccHolderName),
           clean(ledger?.BANKACCOUNTNUMBER || ledger?.BANKACCOUNTNO || ledger?.ACCOUNTNUMBER || ledger?.BANKDETAILS),
           clean(ledger?.IFSCCODE || ledger?.IFSCODE),
@@ -1244,12 +1246,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // TRANSACTION
-    // ---------------------------------------------------------
-
-    await client.query("BEGIN");
-
-    // ---------------------------------------------------------
     // COMPANY
     // ---------------------------------------------------------
 
@@ -1271,8 +1267,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     );
 
     if (!owns) {
-      await client.query("ROLLBACK");
-
       return res.status(403).json({
         status: "error",
         message: "This company is not paired with your account.",
@@ -1305,6 +1299,13 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
       "sync",
       userId
     );
+
+    // ---------------------------------------------------------
+    // TRANSACTION — only after the connector wait, see the note
+    // in /company-details.
+    // ---------------------------------------------------------
+
+    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // PARSE XML
@@ -1481,19 +1482,19 @@ router.get("/parent-groups", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getParentGroupsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1563,14 +1564,11 @@ router.get("/payable-debtors", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -1653,6 +1651,9 @@ router.get("/payable-debtors", async (req, res) => {
     // ── Sales & Purchase ─────────────────────────────────────────
     const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
     const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
+
+    // Only after all the connector waits above — see the note in /company-details.
+    await client.query("BEGIN");
 
     let inserted = 0, updated = 0, ignored = 0, skipped = 0;
 
@@ -1841,19 +1842,19 @@ router.get("/profit-loss-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getProfitLossXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const groups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
@@ -1952,19 +1953,19 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupSummaryXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
@@ -2138,19 +2139,19 @@ router.get("/stock-group-gst-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupGSTXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const stockGroups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKGROUP || [];
@@ -2513,19 +2514,19 @@ router.get("/units-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getUnitsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const units = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.UNIT || [];
@@ -2633,14 +2634,11 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -2659,6 +2657,9 @@ router.get("/all-ledgers-sync", async (req, res) => {
     } catch (groupErr) {
       console.log("⚠️ ALL LEDGERS SYNC: group hierarchy fetch failed, primary_group not refreshed:", groupErr.message);
     }
+
+    // Only after both connector waits — see the note in /company-details.
+    await client.query("BEGIN");
 
     let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
@@ -2799,19 +2800,19 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getPurchaseSalesLedgersXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const ledgers = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
@@ -2894,19 +2895,19 @@ router.get("/godown-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGodownsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+
+    // Only after the connector wait — see the note in /company-details.
+    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
@@ -3168,14 +3169,11 @@ router.get("/company-details", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -3191,6 +3189,12 @@ router.get("/company-details", async (req, res) => {
       waitForConnectorSyncJob(companyJobId, userId),
       waitForConnectorSyncJob(gstJobId, userId)
     ]);
+
+    // The transaction is opened only once Tally has answered. Opening it
+    // before the connector wait (as every sync route used to) left the
+    // connection "idle in transaction" for up to 10 minutes per step —
+    // and for the whole wait if the connector never picked the job up.
+    await client.query("BEGIN");
 
     const companyParsed = await parseXML(companyResponseXML);
 
@@ -3303,20 +3307,17 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
-
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
+    // No transaction: syncProfitLossSummary waits on the connector and then
+    // does a single upsert, so a BEGIN here would only sit idle across the wait.
     const summary = await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
-
-    await client.query("COMMIT");
 
     return res.status(200).json({
       status: "success",
@@ -3327,7 +3328,6 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
     console.log("❌ PROFIT LOSS SUMMARY SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
@@ -3379,9 +3379,9 @@ router.get("/profit-margin", async (req, res) => {
     let existing = await client.query(query, params);
 
     if (existing.rows.length === 0 || (fromDate && toDate)) {
-      await client.query("BEGIN");
+      // No BEGIN: it would sit idle across the connector wait inside, and
+      // the sync ends in a single upsert anyway.
       await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
-      await client.query("COMMIT");
       existing = await client.query(query, params);
     }
 
