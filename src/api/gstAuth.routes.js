@@ -12,8 +12,10 @@
 import express from "express";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import {
+  getGstLoginSetup,
   startGstOtpRequest,
   verifyGstOtp,
+  refreshGstSession,
   getGstConnectionStatus,
 } from "../services/gstAuth.service.js";
 import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
@@ -52,45 +54,46 @@ function getClientIp(req) {
 }
 
 /* =========================================
-   REQUEST OTP
-   Body: {
-     companyId, gstin, clientId, clientSecret, gstUsername,
-     whitebooksEmail,   // the WhiteBooks account email for THIS company
-     gstPassword?
-   }
+   LOGIN SETUP (what the GST Login screen pre-fills)
+   -> { gstin, gstinSource, stateCode, gstUsername }
+   gstin is null when company_details has none and the user never typed one;
+   gstUsername is null on the very first login.
+========================================= */
+router.get("/credentials/:companyId", async (req, res) => {
+  try {
+    const data = await getGstLoginSetup({ companyId: req.params.companyId });
+    return res.json({ status: "success", data });
+  } catch (err) {
+    console.log("GST CREDENTIALS ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
 
-   gstUsername and whitebooksEmail are REQUIRED — different companies can
-   have entirely different WhiteBooks developer accounts, so nothing here
-   is a shared global constant.
+/* =========================================
+   REQUEST OTP
+   Body: { companyId, gstin, gstUsername }
+   Everything else WhiteBooks needs is resolved server-side:
+     state_cd       -> first 2 digits of gstin
+     ip_address     -> WHITEBOOKS_IP_ADDRESS, else the caller's IP
+     client_id/secret, email, base URL -> .env
+   The returned txn is stored in gst_auth_sessions.
 ========================================= */
 router.post("/request-otp", async (req, res) => {
   try {
     const userId = await resolveUserId(req);
-    const {
-      companyId,
-      gstin,
-      clientId,
-      clientSecret,
-      gstUsername,
-      whitebooksEmail,
-      gstPassword,
-    } = req.body;
+    const { companyId, gstin, gstUsername } = req.body;
 
-    if (!companyId || !gstin || !clientId || !clientSecret || !gstUsername || !whitebooksEmail) {
+    if (!companyId || !gstin || !gstUsername) {
       return res.status(400).json({
         status: "error",
-        message: "companyId, gstin, clientId, clientSecret, gstUsername and whitebooksEmail are required",
+        message: "companyId, gstin and gstUsername are required",
       });
     }
 
     const { txn, message } = await startGstOtpRequest({
       companyId,
       gstin,
-      clientId,
-      clientSecret,
       gstUsername,
-      whitebooksEmail,
-      gstPassword,
       createdBy: userId,
       ipAddress: getClientIp(req),
     });
@@ -98,7 +101,7 @@ router.post("/request-otp", async (req, res) => {
     return res.json({ status: "success", message, data: { txn } });
   } catch (err) {
     console.log("GST REQUEST-OTP ERROR:", err, err.details);
-    return res.status(502).json({
+    return res.status(typeof err.code === "number" ? err.code : 502).json({
       status: "error",
       message: err.details?.message || err.message,
       details: err.details,
@@ -107,10 +110,11 @@ router.post("/request-otp", async (req, res) => {
 });
 
 /* =========================================
-   VERIFY OTP
+   VERIFY OTP  (WhiteBooks GET /authentication/authtoken)
    Body: { companyId, gstin, txn, otp }
-   whitebooksEmail/gstUsername are read back from gst_credentials — you
-   don't resend them here.
+   -> { gstin, status: "AUTHENTICATED", expiresAt }
+   gst_username is read back from gst_credentials; client id/secret/email
+   from .env. Wrong OTP -> 400 with WhiteBooks' message, session stays open.
 ========================================= */
 router.post("/verify-otp", async (req, res) => {
   try {
@@ -136,10 +140,41 @@ router.post("/verify-otp", async (req, res) => {
     return res.json({
       status: "success",
       message: result.alreadyDone ? "Already authenticated" : "GST authentication successful",
-      data: { gstin, status: result.status },
+      data: { gstin, status: result.status, expiresAt: result.expiresAt },
     });
   } catch (err) {
     console.log("GST VERIFY-OTP ERROR:", err, err.details);
+    return res.status(502).json({
+      status: "error",
+      message: err.details?.message || err.message,
+      details: err.details,
+    });
+  }
+});
+
+/* =========================================
+   REFRESH SESSION  (WhiteBooks GET /authentication/refreshtoken)
+   Body: { companyId, gstin }  -> { status, expiresAt }
+   401 = session expired or refresh rejected; the user must redo OTP.
+========================================= */
+router.post("/refresh", async (req, res) => {
+  try {
+    const { companyId, gstin } = req.body;
+    if (!companyId || !gstin) {
+      return res.status(400).json({ status: "error", message: "companyId and gstin are required" });
+    }
+
+    const result = await refreshGstSession({ companyId, gstin, ipAddress: getClientIp(req) });
+    if (result.error) {
+      return res.status(result.code || 400).json({ status: "error", message: result.error });
+    }
+    return res.json({
+      status: "success",
+      message: "GST session refreshed",
+      data: { gstin, status: result.status, expiresAt: result.expiresAt },
+    });
+  } catch (err) {
+    console.log("GST REFRESH ERROR:", err, err.details);
     return res.status(502).json({
       status: "error",
       message: err.details?.message || err.message,

@@ -616,6 +616,18 @@ export const getGroupSummaryCRXML = (company) => {
 
                               NARRATION,
 
+                              REFERENCE,
+
+                              REFERENCEDATE,
+
+                              PARTYGSTIN,
+
+                              PLACEOFSUPPLY,
+
+                              ISCANCELLED,
+
+                              ISOPTIONAL,
+
                               ALLLEDGERENTRIES.LIST
 
                           </FETCH>

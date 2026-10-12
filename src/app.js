@@ -230,6 +230,9 @@ import gstAuthRoutes from "./api/gstAuth.routes.js";
 import emailVerificationRoutes from "./api/emailVerification.routes.js";
 
 import gstReturnStatusRoutes from "./api/gstReturnStatus.routes.js";
+import gstr1PrepareRoutes from "./api/gstr1Prepare.routes.js";
+import imsRoutes from "./api/ims.routes.js";
+import gstr3bRoutes from "./api/gstr3b.routes.js";
 
 import ledgerPdfRoutes from "./api/ledgerPdf.routes.js";
 
@@ -703,6 +706,9 @@ app.use("/api/v1/quotation", ...requireSessionAndCompany(), quotationPdfRoutes);
 app.use("/api/v1/ledger-pdf", ...requireSessionAndCompany(), ledgerPdfRoutes);
 
 app.use("/api/gst/return-status", ...requireSessionAndCompany(), gstReturnStatusRoutes);
+app.use("/api/gst/gstr1", ...requireSessionAndCompany(), gstr1PrepareRoutes);
+app.use("/api/gst/ims", ...requireSessionAndCompany(), imsRoutes);
+app.use("/api/gst/gstr3b", ...requireSessionAndCompany(), gstr3bRoutes);
 app.use(
   "/api/companies",
   ...requireSessionAndCompany(),

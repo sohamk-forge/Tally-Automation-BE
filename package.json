@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test:gst": "node --test --test-force-exit --test-concurrency=1 ../tests/gst/gstr1Builder.test.mjs ../tests/gst/portalAndReturns.test.mjs ../tests/gst/gstr1Pipeline.e2e.test.mjs ../tests/gst/imsPipeline.e2e.test.mjs ../tests/gst/gstr3bPipeline.e2e.test.mjs ../tests/gst/wholeFlow.e2e.test.mjs",
     "migrate:latest": "knex migrate:latest",
     "migrate:rollback": "knex migrate:rollback",
     "migrate:status": "knex migrate:status",
@@ -18,6 +19,7 @@
   },
   "dependencies": {
     "@bull-board/api": "^7.1.5",
+    "ajv": "^8.17.1",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.78.0",

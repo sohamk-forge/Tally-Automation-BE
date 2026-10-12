@@ -25,7 +25,7 @@
             getSalesGroupXML, getPurchaseGroupXML,getSalesInvoiceDetailsXML ,
         
     } from "../services/xmlBuilder.js";
-    import { parseXML } from "../services/parser.js";
+    import { parseXML, parseXMLKeepText } from "../services/parser.js";
     import {
       createAuditLog
     } from "../utils/createAuditLog.js";
@@ -934,7 +934,8 @@ router.get("/voucher-sync", async (req, res) => {
 
     const xml = getLedgerVouchersXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-    const parsed = await parseXML(responseXML);
+    // Supplier invoice numbers / GSTINs keep their exact text (leading zeros).
+    const parsed = await parseXMLKeepText(responseXML, ["REFERENCE", "PARTYGSTIN"]);
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
     const list = Array.isArray(collection) ? collection : [collection];
@@ -964,6 +965,17 @@ router.get("/voucher-sync", async (req, res) => {
         const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
         const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
         const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
+        // GST header fields (supplier invoice no/date, party GSTIN, place of
+        // supply, cancelled/optional flags) — used by GST filing.
+        const supplierInvoiceNo = clean(voucher?.REFERENCE) || null;
+        const supplierInvoiceDate = clean(voucher?.REFERENCEDATE)?.match(/^(\d{4})(\d{2})(\d{2})$/)
+          ? clean(voucher.REFERENCEDATE).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")
+          : null;
+        const partyGstin = clean(voucher?.PARTYGSTIN)?.toUpperCase() || null;
+        const placeOfSupply = clean(voucher?.PLACEOFSUPPLY) || null;
+        const yesNo = (v) => (clean(v) == null ? null : /^yes$/i.test(clean(v)));
+        const isCancelled = yesNo(voucher?.ISCANCELLED);
+        const isOptional = yesNo(voucher?.ISOPTIONAL);
 
         let debitAmount = 0;
         let creditAmount = 0;
@@ -1001,9 +1013,10 @@ router.get("/voucher-sync", async (req, res) => {
               guid, master_id, alter_id, company_id, company_name,
               voucher_date, voucher_type, voucher_number, party_ledger_name,
               narration, ledger_entries, debit_amount, credit_amount, balance,
+              supplier_invoice_no, supplier_invoice_date, party_gstin, place_of_supply, is_cancelled, is_optional,
               created_at, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW())
             ON CONFLICT (company_id, guid) WHERE guid IS NOT NULL AND guid <> ''
             DO UPDATE SET
               master_id = EXCLUDED.master_id,
@@ -1017,6 +1030,12 @@ router.get("/voucher-sync", async (req, res) => {
               debit_amount = EXCLUDED.debit_amount,
               credit_amount = EXCLUDED.credit_amount,
               balance = EXCLUDED.balance,
+              supplier_invoice_no = EXCLUDED.supplier_invoice_no,
+              supplier_invoice_date = EXCLUDED.supplier_invoice_date,
+              party_gstin = EXCLUDED.party_gstin,
+              place_of_supply = EXCLUDED.place_of_supply,
+              is_cancelled = EXCLUDED.is_cancelled,
+              is_optional = EXCLUDED.is_optional,
               deleted_at = NULL,
               updated_at = NOW()
             RETURNING (xmax = 0) AS was_inserted
@@ -1025,7 +1044,8 @@ router.get("/voucher-sync", async (req, res) => {
               guid, masterId, alterId, companyId, company,
               voucherDate, voucherTypeName, voucherNumber, partyLedgerName,
               clean(voucher?.NARRATION), JSON.stringify(normalized),
-              debitAmount, creditAmount, balance
+              debitAmount, creditAmount, balance,
+              supplierInvoiceNo, supplierInvoiceDate, partyGstin, placeOfSupply, isCancelled, isOptional
             ]
           );
 

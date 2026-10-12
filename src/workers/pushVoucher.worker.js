@@ -100,6 +100,29 @@ function buildLedgers(voucher, amount) {
       throw new Error(`Contra voucher ${voucher.id} is missing transfer_bank / party_ledger`);
     }
 
+    // CREDIT (deposit) row: money came INTO the statement bank from the
+    // other bank, so the statement bank is debited and the other bank credited.
+    if (String(voucher.debit_credit || "").toUpperCase() === "CREDIT") {
+      return [
+        {
+          ledger_name: voucher.bank_ledger,
+          amount: -amount,
+          is_positive: true,
+          bank_allocation: {
+            bank_name: voucher.bank_ledger,
+            party_name: destinationBank,
+            instrument_number: voucher.instrument_number || ""
+          }
+        },
+        {
+          ledger_name: destinationBank,
+          amount: amount,
+          is_positive: false
+        }
+      ];
+    }
+
+    // DEBIT (withdrawal) row: money left the statement bank to the other bank.
     return [
       {
         ledger_name: voucher.bank_ledger,

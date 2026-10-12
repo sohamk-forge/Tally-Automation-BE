@@ -12,7 +12,6 @@
 
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
-import { decrypt } from "../utils/encryption.js";
 import * as whitebooks from "./whitebooks.service.js";
 
 async function getCredentials(companyId, gstin) {
@@ -26,12 +25,13 @@ async function getCredentials(companyId, gstin) {
     err.code = 400;
     throw err;
   }
-  if (!creds.whitebooks_email) {
-    const err = new Error("No whitebooks_email stored for this company/gstin");
-    err.code = 400;
-    throw err;
-  }
-  return creds;
+  const config = whitebooks.getWhiteBooksConfig();
+  return {
+    ...creds,
+    client_id: config.clientId,
+    clientSecret: config.clientSecret,
+    whitebooks_email: config.whitebooksEmail,
+  };
 }
 
 /**
@@ -119,7 +119,7 @@ function countInvoices(payload) {
  */
 export const saveDraft = async ({ companyId, gstin, financialYear, returnPeriod, gstUsername, ipAddress, createdBy, gstr1Payload }) => {
   const creds = await getCredentials(companyId, gstin);
-  const clientSecret = decrypt(creds.client_secret_enc);
+  const clientSecret = creds.clientSecret;
   const txn = await getActiveTxn(companyId, gstin);
 
   const filingId = await insertFilingRow({ companyId, gstin, financialYear, returnPeriod, createdBy, requestPayload: gstr1Payload });
@@ -155,7 +155,7 @@ export const saveDraft = async ({ companyId, gstin, financialYear, returnPeriod,
  */
 export const getSummary = async ({ companyId, gstin, returnPeriod, gstUsername, ipAddress, summaryType }) => {
   const creds = await getCredentials(companyId, gstin);
-  const clientSecret = decrypt(creds.client_secret_enc);
+  const clientSecret = creds.clientSecret;
   const txn = await getActiveTxn(companyId, gstin);
 
   return whitebooks.getGstr1Summary({
@@ -177,7 +177,7 @@ export const getSummary = async ({ companyId, gstin, returnPeriod, gstUsername, 
  */
 export const fileReturn = async ({ companyId, gstin, financialYear, returnPeriod, gstUsername, ipAddress, pan, evcOtp, chksum, secSum, createdBy }) => {
   const creds = await getCredentials(companyId, gstin);
-  const clientSecret = decrypt(creds.client_secret_enc);
+  const clientSecret = creds.clientSecret;
   const txn = await getActiveTxn(companyId, gstin);
 
   const filingId = await insertFilingRow({ companyId, gstin, financialYear, returnPeriod, createdBy, requestPayload: { chksum, secSum } });
@@ -211,7 +211,7 @@ export const fileReturn = async ({ companyId, gstin, financialYear, returnPeriod
  */
 export const resetDraft = async ({ companyId, gstin, returnPeriod, gstUsername, ipAddress }) => {
   const creds = await getCredentials(companyId, gstin);
-  const clientSecret = decrypt(creds.client_secret_enc);
+  const clientSecret = creds.clientSecret;
   const txn = await getActiveTxn(companyId, gstin);
 
   return whitebooks.resetGstr1Draft({
