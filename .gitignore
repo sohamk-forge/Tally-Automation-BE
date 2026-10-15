@@ -146,6 +146,7 @@ src/python/sales_voucher_counter.txt
 connector-jwt.txt
 connector-api-key.txt
 machine-guid.txt
+generated-xml
 
 sales_debug.xml
 docs

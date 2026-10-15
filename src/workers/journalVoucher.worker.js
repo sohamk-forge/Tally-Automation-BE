@@ -1,5 +1,7 @@
 import { Worker, UnrecoverableError } from "bullmq";
 import IORedis from "ioredis";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 import pool from "../db/index.js";
 
@@ -212,6 +214,20 @@ const worker = new Worker(
       console.log(
         "[JOURNAL] XML generated"
       );
+
+
+    const xmlDirectory = path.resolve("generated-xml");
+
+      await fs.mkdir(xmlDirectory, { recursive: true });
+
+            const xmlFilePath = path.join(
+                   xmlDirectory,
+                   `journal-voucher-${voucherId}.xml`
+            );
+
+     await fs.writeFile(xmlFilePath, xml, "utf8");
+
+console.log(`Journal XML saved: ${xmlFilePath}`);
 
 
       // --------------------------------
