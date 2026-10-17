@@ -10,7 +10,8 @@ const router = express.Router();
 =================================================== */
 // Id-only: names aren't unique, so callers resolve a name to the caller's own
 // company id (resolveOwnedCompanyByName) before getting here.
-async function getCompanyInfo(companyId) {
+// fyStart (optional, 4-digit year): the financial year the dashboard has picked, instead of the company's stored years.
+async function getCompanyInfo(companyId, fyStart) {
   const result = await pool.query(
     `SELECT id, name, financial_year_start, financial_year_end
      FROM ${DB_SCHEMA}.companies
@@ -20,6 +21,17 @@ async function getCompanyInfo(companyId) {
 
   const row = result.rows[0];
   if (!row) return null;
+
+  const pickedYear = Number(fyStart);
+  if (Number.isInteger(pickedYear) && pickedYear >= 2000 && pickedYear <= 2100) {
+    return {
+      id: row.id,
+      name: row.name,
+      yearStart: `${pickedYear}-04-01`,
+      yearEnd: `${pickedYear + 1}-04-01`,
+      fyLabel: `${pickedYear}-${pickedYear + 1}`
+    };
+  }
 
   if (!row.financial_year_start) {
     const now = new Date();
@@ -171,7 +183,7 @@ router.get("/monthly-sales-trend", async (req, res) => {
     // A name is resolved among the caller's own companies only — the old
     // global name lookup could pick another tenant's same-named company.
     const ownedCompanyId = companyId || (await resolveOwnedCompanyByName(req, companyName));
-    const companyInfo = ownedCompanyId ? await getCompanyInfo(ownedCompanyId) : null;
+    const companyInfo = ownedCompanyId ? await getCompanyInfo(ownedCompanyId, req.query.fy_start) : null;
 
     if (!companyInfo) {
       return res.status(404).json({

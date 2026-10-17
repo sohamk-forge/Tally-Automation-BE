@@ -4,6 +4,7 @@ import { resolveUserId } from "../utils/resolveUserId.js";
 import { getCompanyMemberRole, checkSeatAvailable } from "../utils/companyMembers.js";
 import { PAGE_KEYS, EDITABLE_PAGE_KEYS, ADMIN_ONLY_PAGE_KEYS, EDITABLE_ROLES, getRolePermissionMatrix, getEnabledPagesForRole } from "../utils/pagePermissions.js";
 import { getEnabledFeatureKeys } from "../utils/featureFlags.js";
+import { withFinancialYears } from "../services/companyFinancialYears.service.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -97,7 +98,7 @@ router.get("/", async (req, res) => {
       limit,
       total,
       count: result.rows.length,
-      data: result.rows
+      data: await withFinancialYears(result.rows)
     });
 
   } catch (err) {
@@ -106,6 +107,100 @@ router.get("/", async (req, res) => {
       status: "error",
       message: err.message
     });
+  }
+});
+
+/* =========================================
+   FINANCIAL-YEAR SUMMARY (current user only)
+   The dashboard cards for ONE financial year, read from the profit & loss that the sync stored for that
+   year (the dated "PROFIT & LOSS" step keeps one row per financial year).
+========================================= */
+router.get("/:id/financial-years/:startYear/summary", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = Number(req.params.id);
+    const wantsAll = req.params.startYear === "all";
+    const startYear = Number(req.params.startYear);
+    if (!Number.isInteger(companyId) || (!wantsAll && (!Number.isInteger(startYear) || startYear < 2000 || startYear > 2100))) {
+      return res.status(400).json({ status: "error", message: "Invalid company or financial year" });
+    }
+
+    const owned = await pool.query(
+      `SELECT 1 FROM ${DB_SCHEMA}.connector_pairing_tokens
+       WHERE company_id = $1 AND user_id = $2 AND is_used = TRUE LIMIT 1`,
+      [companyId, userId]
+    );
+    if (!owned.rows.length) {
+      return res.status(404).json({ status: "error", message: "Company not found" });
+    }
+
+    // The stored profit & loss of one financial year (the newest row inside it), or null.
+    const yearRow = async (year) => {
+      const result = await pool.query(
+        `SELECT from_date::text AS from_date, to_date::text AS to_date,
+                total_sales, total_purchase, stock_value, gross_profit
+         FROM ${DB_SCHEMA}.profit_loss
+         WHERE company_id = $1 AND from_date >= $2 AND to_date <= $3
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+        [companyId, `${year}-04-01`, `${year + 1}-03-31`]
+      );
+      return result.rows[0] || null;
+    };
+    const label = (year) => `${year}-${String(year + 1).slice(2)}`;
+    const percent = (part, whole) => (whole ? Number(((part / whole) * 100).toFixed(2)) : 0);
+
+    let years;
+    if (wantsAll) {
+      const known = await pool.query(
+        `SELECT start_year FROM ${DB_SCHEMA}.company_financial_years WHERE company_id = $1 ORDER BY start_year`,
+        [companyId]
+      );
+      years = known.rows.map((r) => r.start_year);
+    } else {
+      years = [startYear];
+    }
+
+    const rows = [];
+    for (const year of years) {
+      const row = await yearRow(year);
+      if (row) rows.push({ year, ...row });
+    }
+
+    if (!rows.length) {
+      return res.status(404).json({
+        status: "error",
+        message: wantsAll ? "No profit & loss synced yet" : `No profit & loss synced for FY ${label(startYear)} yet`
+      });
+    }
+
+    // All years: sales, purchase and gross profit add up across the years; stock is a running position, so it
+    // is the latest year's closing; the margin is worked out again from the totals.
+    const sum = (key) => rows.reduce((total, r) => total + Number(r[key]), 0);
+    const latest = rows[rows.length - 1];
+    const totalSales = sum("total_sales");
+
+    return res.json({
+      status: "success",
+      data: {
+        financial_year: wantsAll ? "all" : label(startYear),
+        years: rows.map((r) => label(r.year)),
+        from_date: rows[0].from_date,
+        to_date: latest.to_date,
+        total_sales: totalSales,
+        total_purchase: sum("total_purchase"),
+        stock_value: Number(latest.stock_value),
+        // gross profit as a share of sales, the same measure the dashboard card shows
+        gross_profit_percent: percent(sum("gross_profit"), totalSales)
+      }
+    });
+  } catch (err) {
+    console.log("FY SUMMARY ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
   }
 });
 
@@ -158,7 +253,7 @@ router.get("/:id", async (req, res) => {
 
     return res.json({
       status: "success",
-      data: result.rows[0]
+      data: (await withFinancialYears([result.rows[0]]))[0]
     });
 
   } catch (err) {
@@ -209,7 +304,7 @@ router.get("/all/list", async (req, res) => {
     return res.json({
       status: "success",
       count: result.rows.length,
-      data: result.rows
+      data: await withFinancialYears(result.rows)
     });
 
   } catch (err) {

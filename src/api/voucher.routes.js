@@ -22,6 +22,7 @@ import {
   enqueueExtraction
 } from "../services/statementExtraction.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
+import { readDateWindow } from "../utils/dateWindow.js";
 import { assertCompanyRefs, ownedCompaniesSql, resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 
@@ -887,6 +888,12 @@ router.get("/statement-files", async (req, res) => {
       return res.status(400).json({ success: false, message: "company_id is required" });
     }
 
+    // Optional financial-year window (from/to): only statements whose transactions overlap it.
+    const window = readDateWindow(req.query);
+    if (window?.error) {
+      return res.status(400).json({ success: false, message: window.error });
+    }
+
     const result = await db.query(
       `SELECT
          cv.file_name,
@@ -902,8 +909,9 @@ router.get("/statement-files", async (req, res) => {
        WHERE cv.company_id = $1
          AND cv.file_name IS NOT NULL
        GROUP BY cv.file_name
+       ${window ? "HAVING MIN(cv.voucher_date) <= $3::date AND MAX(cv.voucher_date) >= $2::date" : ""}
        ORDER BY cv.file_name ASC`,
-      [company_id]
+      window ? [company_id, window.from, window.to] : [company_id]
     );
 
     return res.json({ success: true, files: result.rows });

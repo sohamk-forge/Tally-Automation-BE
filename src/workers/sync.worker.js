@@ -8,6 +8,8 @@ import { failConnectorJobBusinessRecord } from "../services/connectorJobResult.s
 import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
 import { CONNECTOR_WAIT_TIMEOUT_MS, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
 import { recordTallyLicence, LICENCE_INACTIVE_MESSAGE } from "../services/tallyLicence.service.js";
+import { resolveSyncRange } from "../utils/financialYears.js";
+import { recordFinancialYears } from "../services/companyFinancialYears.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -39,24 +41,11 @@ const connection = new IORedis({
 // server's own routes at all.
 const api = axios.create({
   baseURL: process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`,
+  timeout: 300000,
   headers: {
     "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
   }
 });
-
-/* ===================================================
-  DATE HELPERS
-  fromYear/toYear come in as plain years (e.g. "2026",
-  "2027") from job.data — Tally's voucher-sync route
-  expects full YYYYMMDD dates, financial-year style
-  (1 Apr fromYear → 31 Mar toYear).
-=================================================== */
-
-function financialYearDates(fromYear, toYear) {
-  const fromDate = `${fromYear}0401`;
-  const toDate = `${toYear}0331`;
-  return { fromDate, toDate };
-}
 
 /* ===================================================
   JOB LOG STATUS HELPERS
@@ -138,30 +127,68 @@ async function markJobFailed(jobLogId, errorMessage) {
   the rest of the sync from attempting to run.
 =================================================== */
 
-async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
+// Raised by a step when the connector is not picking up requests at all. Unlike an ordinary
+// step failure, continuing would just repeat the same 2-minute wait 13 more times.
+class ConnectorNotPickingUpError extends Error {}
+
+// connectorCalls = how many sequential connector requests the route makes. Each may wait up
+// to CONNECTOR_WAIT_TIMEOUT_MS, so the HTTP timeout is derived from it (plus a minute for
+// the database work) and can never be shorter than the wait it is waiting on.
+// Adds up the numeric fields of the per-financial-year summaries into the one summary a step reports.
+function mergeSummaries(summaries) {
+  const present = summaries.filter(Boolean);
+  if (present.length <= 1) return present[0] || null;
+  const merged = {};
+  for (const summary of present) {
+    for (const [key, value] of Object.entries(summary)) {
+      if (typeof value === "number") merged[key] = (merged[key] || 0) + value;
+    }
+  }
+  return merged;
+}
+
+// `pieces` (financial-year ranges): the route is called once per piece, oldest first, and the step reports
+// one combined result - so a three-year sync is still the same N steps in the progress loader.
+async function runSyncStep({ label, path, params, pieces, userId, results, jobLogId, connectorCalls = 1 }) {
   console.log(`\n➡️  [${label}] STARTING`);
   console.log(`   GET ${path}`, { params, userId });
 
   const startedAt = Date.now();
 
   try {
-    const response = await api.get(path, {
-      params,
-      headers: {
-        "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET,
-        "x-internal-user-id": String(userId)
+    const calls = pieces?.length
+      ? pieces.map((piece) => ({ piece, params: { ...params, fromDate: piece.fromDate, toDate: piece.toDate } }))
+      : [{ piece: null, params }];
+
+    const summaries = [];
+    for (const call of calls) {
+      try {
+        const response = await api.get(path, {
+          params: call.params,
+          timeout: connectorCalls * CONNECTOR_WAIT_TIMEOUT_MS + 60000,
+          headers: {
+            "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET,
+            "x-internal-user-id": String(userId)
+          }
+        });
+        if (call.piece) console.log(`   FY ${call.piece.label} (${call.piece.fromDate} -> ${call.piece.toDate}) done`);
+        summaries.push(response.data?.summary || null);
+      } catch (err) {
+        // Say which financial year failed; earlier years are already saved.
+        if (call.piece && calls.length > 1) err.message = `FY ${call.piece.label}: ${err.response?.data?.message || err.message}`;
+        throw err;
       }
-    });
+    }
 
     const durationMs = Date.now() - startedAt;
 
     // GREEN TICK
     console.log(`✅ [${label}] SYNC COMPLETED (${durationMs}ms)`);
-    if (response.data?.summary) {
-      console.log(`   Summary:`, response.data.summary);
-    }
 
-    const summary = response.data?.summary || null;
+    const summary = mergeSummaries(summaries);
+    if (summary) {
+      console.log(`   Summary:`, summary);
+    }
     const failedRecords = Number(summary?.failed) || 0;
 
     // A 200 with per-record failures (e.g. vouchers rejected by a DB
@@ -215,7 +242,7 @@ const worker = new Worker(
   SYNC_QUEUE_NAME,
 
   async (job) => {
-    const { jobLogId, company, companyId, fromYear, toYear, userId } = job.data;
+    const { jobLogId, company, companyId, fromYear, toYear, fromDate: requestedFrom, toDate: requestedTo, userId } = job.data;
 
     console.log("\n=================================================");
     console.log("[SYNC] 🔄 Job started");
@@ -225,6 +252,7 @@ const worker = new Worker(
     console.log(`Company    : ${company}`);
     console.log(`From Year  : ${fromYear}`);
     console.log(`To Year    : ${toYear}`);
+    console.log(`Range      : ${requestedFrom || "-"} -> ${requestedTo || "-"}`);
     console.log(`User ID    : ${userId}`);
     console.log("=================================================\n");
 
@@ -237,7 +265,15 @@ const worker = new Worker(
 
     await markJobRunning(jobLogId);
 
-    const { fromDate, toDate } = financialYearDates(fromYear, toYear);
+    // The range to pull, split into financial years (1 Apr -> 31 Mar), oldest first. A connector that
+    // sends real dates gets exactly that range; older ones send two years, read as whole financial years.
+    const pieces = resolveSyncRange({ fromDate: requestedFrom, toDate: requestedTo, fromYear, toYear });
+    if (!pieces.length) {
+      const msg = `Invalid sync period (${requestedFrom || fromYear} to ${requestedTo || toYear})`;
+      await markJobFailed(jobLogId, msg);
+      throw new UnrecoverableError(msg);
+    }
+    console.log(`Financial years: ${pieces.map((p) => `${p.label} [${p.fromDate}-${p.toDate}]`).join(", ")}`);
 
     const results = [];
 
@@ -250,134 +286,63 @@ const worker = new Worker(
       anything up.)
     =============================================== */
 
-    await runSyncStep({
-      label: "COMPANY DETAILS",
-      path: "/api/sync/company-details",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
+    // The steps, in the order they must run. `calls` = connector requests the route makes in a
+    // row (used for its timeout); `dated` = the route also takes the financial-year dates.
+    const SYNC_STEPS = [
+      { label: "COMPANY DETAILS", path: "/api/sync/company-details", calls: 2 },
+      { label: "ALL LEDGERS", path: "/api/sync/all-ledgers-sync", calls: 2 },
+      { label: "BANK ACCOUNTS", path: "/api/sync/group-summary-bank" },
+      { label: "STOCK GROUP GST DETAILS", path: "/api/sync/stock-group-gst-sync" },
+      { label: "STOCK GROUP SUMMARY", path: "/api/sync/stock-group-summary-sync" },
+      { label: "UNITS", path: "/api/sync/units-sync" },
+      { label: "GODOWNS", path: "/api/sync/godown-sync" },
+      { label: "PURCHASE/SALES LEDGERS", path: "/api/sync/purchase-sales-ledgers-sync" },
+      { label: "PAYABLE/DEBTORS", path: "/api/sync/payable-debtors", calls: 6 },
+      { label: "PARENT GROUPS", path: "/api/sync/parent-groups" },
+      { label: "PROFIT & LOSS", path: "/api/sync/profit-loss-sync", dated: true },
+      { label: "PROFIT & LOSS SUMMARY", path: "/api/sync/profit-loss-summary-sync" },
+      { label: "VOUCHERS", path: "/api/sync/voucher-sync", dated: true },
+      // Must run AFTER voucher-sync - this route only UPDATEs the delivery_notes column on
+      // voucher rows voucher-sync already inserted, it never inserts rows itself.
+      { label: "SALES INVOICE DELIVERY DETAILS", path: "/api/sync/sales-invoice-details-sync", dated: true }
+    ];
 
-    await runSyncStep({
-      label: "ALL LEDGERS",
-      path: "/api/sync/all-ledgers-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
+    try {
+      // Is the Tally licence active? Asked once, here, whenever a sync starts (a manual sync, or the
+      // first sync a connector pairing starts). Educational mode (false) refuses the sync; "could not
+      // tell" (null) does not, so a Tally that is slow to answer never blocks anybody by mistake.
+      const licensed = await recordTallyLicence(companyId, userId);
+      if (licensed === false) {
+        await markJobFailed(jobLogId, LICENCE_INACTIVE_MESSAGE);
+        throw new UnrecoverableError(LICENCE_INACTIVE_MESSAGE);
+      }
 
-    await runSyncStep({
-      label: "BANK ACCOUNTS",
-      path: "/api/sync/group-summary-bank",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
+      for (const step of SYNC_STEPS) {
+        await runSyncStep({
+          label: step.label,
+          path: step.path,
+          params: { company, companyId },
+          pieces: step.dated ? pieces : undefined,
+          connectorCalls: step.calls,
+          userId,
+          results,
+          jobLogId
+        });
 
-    await runSyncStep({
-      label: "STOCK GROUP GST DETAILS",
-      path: "/api/sync/stock-group-gst-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "STOCK GROUP SUMMARY",
-      path: "/api/sync/stock-group-summary-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "UNITS",
-      path: "/api/sync/units-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "GODOWNS",
-      path: "/api/sync/godown-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PURCHASE/SALES LEDGERS",
-      path: "/api/sync/purchase-sales-ledgers-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PAYABLE/DEBTORS",
-      path: "/api/sync/payable-debtors",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PARENT GROUPS",
-      path: "/api/sync/parent-groups",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PROFIT & LOSS",
-      path: "/api/sync/profit-loss-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PROFIT & LOSS SUMMARY",
-      path: "/api/sync/profit-loss-summary-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "VOUCHERS",
-      path: "/api/sync/voucher-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
-
-    // Must run AFTER voucher-sync — this route only UPDATEs the
-    // delivery_notes column on voucher rows voucher-sync already inserted,
-    // it never inserts rows itself.
-    await runSyncStep({
-      label: "SALES INVOICE DELIVERY DETAILS",
-      path: "/api/sync/sales-invoice-details-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
+        // Vouchers are the data a financial year is for: remember the years only once they were pulled.
+        if (step.label === "VOUCHERS" && results.at(-1)?.status === "success") {
+          await recordFinancialYears(companyId, pieces);
+        }
+      }
+    } catch (err) {
+      const connectorDown = err instanceof ConnectorNotPickingUpError || String(err.message).includes(CONNECTOR_NOT_PICKING_UP_CODE);
+      if (!connectorDown) throw err;
+      // The connector is not taking any work: stop here, say why, and do not retry the
+      // whole sync (it would just wait again).
+      const message = String(err.message).replace(CONNECTOR_NOT_PICKING_UP_CODE, "").trim();
+      await markJobFailed(jobLogId, message);
+      throw new UnrecoverableError(message);
+    }
 
     /* ===============================================
       FINAL SUMMARY LOG
@@ -472,6 +437,29 @@ worker.on("completed", (job, returnValue) => {
 
 worker.on("failed", async (job, error) => {
   console.error(`[SYNC] ❌ Job failed: ${job?.id}`, error.message);
+
+  // BullMQ gave up on this job (stalled after a crash/restart, retries used up, or we threw
+  // UnrecoverableError). Nothing else will ever move its job_logs row off 'running', so close
+  // it here. Attempts BullMQ is going to retry are left alone.
+  const finalFailure =
+    error?.name === "UnrecoverableError" ||
+    /stalled more than allowable limit/i.test(error?.message || "") ||
+    (job?.attemptsMade ?? 0) >= (job?.opts?.attempts ?? 1);
+  const jobLogId = job?.data?.jobLogId;
+  if (!finalFailure || !jobLogId) return;
+
+  try {
+    await pool.query(
+      `
+      UPDATE app_test.job_logs
+      SET status = 'failed', completed_at = NOW(), error_message = $2
+      WHERE id = $1 AND status IN ('pending', 'running')
+      `,
+      [jobLogId, error.message]
+    );
+  } catch (dbError) {
+    console.error(`[SYNC] Could not close job_logs ${jobLogId}:`, dbError.message);
+  }
 });
 
 worker.on("error", (error) => {
@@ -554,20 +542,34 @@ async function markStalePendingSyncAsFailed() {
   }
 }
 
-// Step timeouts now outlast each route's connector waits (see runSyncStep),
-// so a sync stuck behind an unresponsive connector can legitimately run
-// past STALE_RUNNING_MINUTES. Same idea as the pending sweep below: skip
-// rows whose BullMQ job is still active — a dead worker's job goes
-// 'stalled' and leaves 'active', so 'active' means a live worker owns it.
 async function markStaleRunningSyncAsFailed() {
   const candidates = await pool.query(
     `SELECT id FROM app_test.job_logs
      WHERE status = 'running'
        AND job_type IN ('manual_sync')
-       AND started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'
-     RETURNING id`
+       AND started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'`
   );
-  console.log(`Marked ${result.rowCount} stale running sync jobs as failed`);
+
+  let failedCount = 0;
+  for (const row of candidates.rows) {
+    // A long but live sync (slow Tally, large voucher list) must never be failed by this
+    // sweep: only a row whose BullMQ job is not actively running is really orphaned.
+    const existingJob = await syncQueue.getJob(getSyncJobId(row.id));
+    if (existingJob && (await existingJob.getState()) === "active") continue;
+
+    const updated = await pool.query(
+      `UPDATE app_test.job_logs
+       SET status = 'failed',
+           error_message = 'Sync interrupted / worker restarted mid-run',
+           completed_at = NOW()
+       WHERE id = $1 AND status = 'running'
+       RETURNING id`,
+      [row.id]
+    );
+    if (updated.rowCount > 0) failedCount++;
+  }
+
+  console.log(`Marked ${failedCount} stale running sync jobs as failed`);
 }
 
 async function enqueuePendingSyncJobs() {
@@ -587,7 +589,7 @@ async function enqueuePendingSyncJobs() {
   for (const row of result.rows) {
     if (!row.user_id) continue; // pre-fix row — no safe way to attribute it, leave for manual cleanup
 
-    const { company, companyId, fromYear, toYear } = row.payload || {};
+    const { company, companyId, fromYear, toYear, fromDate, toDate } = row.payload || {};
 
     if (!company || !fromYear || !toYear) continue; // incomplete payload — can't safely rebuild the job
 
@@ -597,6 +599,8 @@ async function enqueuePendingSyncJobs() {
       companyId,
       fromYear,
       toYear,
+      fromDate,
+      toDate,
       userId: row.user_id
     });
 

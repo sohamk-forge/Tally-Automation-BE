@@ -2,6 +2,7 @@
     import pool from "../db/index.js";
     import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
     import { LICENCE_INACTIVE_MESSAGE } from "../services/tallyLicence.service.js";
+    import { resolveSyncRange } from "../utils/financialYears.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
     import { isTallyConnectorLive, getConnectorOfflineMessage, findLiveConnectorKey, getTallyStatusForKey } from "../services/connectorOwner.service.js";
     import axios from "axios";
@@ -544,11 +545,10 @@ router.get("/companies", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
+    await client.query("BEGIN");
+
     const xml = getCompaniesXML();
     const responseXML = await discoverCompaniesViaConnector(userId, xml);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     const collection =
@@ -798,7 +798,6 @@ router.get("/group-summary-bank", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -810,9 +809,6 @@ router.get("/group-summary-bank", async (req, res) => {
 
     const xml = getGroupSummaryBankXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -1258,11 +1254,7 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
       return;
     }
 
-    // ---------------------------------------------------------
-    // TRANSACTION
-    // ---------------------------------------------------------
 
-    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // COMPANY
@@ -1286,7 +1278,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     );
 
     if (!owns) {
-      await client.query("ROLLBACK");
 
       return res.status(403).json({
         status: "error",
@@ -1320,13 +1311,6 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
       "sync",
       userId
     );
-
-    // ---------------------------------------------------------
-    // TRANSACTION — only after the connector wait, see the note
-    // in /company-details.
-    // ---------------------------------------------------------
-
-    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // PARSE XML
@@ -1509,7 +1493,6 @@ router.get("/parent-groups", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -1521,9 +1504,6 @@ router.get("/parent-groups", async (req, res) => {
 
     const xml = getParentGroupsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -1599,7 +1579,6 @@ router.get("/payable-debtors", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -1688,6 +1667,10 @@ router.get("/payable-debtors", async (req, res) => {
     // ── Sales & Purchase ─────────────────────────────────────────
     const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
     const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     let inserted = 0, updated = 0, ignored = 0, skipped = 0;
 
@@ -1878,7 +1861,6 @@ router.get("/profit-loss-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -1890,9 +1872,6 @@ router.get("/profit-loss-sync", async (req, res) => {
 
     const xml = getProfitLossXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -1944,7 +1923,9 @@ router.get("/profit-loss-sync", async (req, res) => {
       "app_test.profit_loss", guid, null, alterId,
       [companyId, company, fromDate, toDate, totalSales, totalPurchase, stockValue, grossProfit, netProfit, profitMargin],
       ["company_id", "company_name", "from_date", "to_date", "total_sales", "total_purchase", "stock_value", "gross_profit", "net_profit", "profit_margin"],
-      client
+      client,
+      // A period's totals are a snapshot with a fixed alterId, so without this a re-sync never replaced them.
+      { forceOverwrite: true }
     );
 
     await client.query("COMMIT");
@@ -1997,7 +1978,6 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2009,9 +1989,6 @@ router.get("/stock-group-summary-sync", async (req, res) => {
 
     const xml = getStockGroupSummaryXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -2191,7 +2168,6 @@ router.get("/stock-group-gst-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2203,9 +2179,6 @@ router.get("/stock-group-gst-sync", async (req, res) => {
 
     const xml = getStockGroupGSTXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -2303,11 +2276,21 @@ router.post("/manual", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    const { company, fromYear, toYear, companyId: requestedCompanyId } = req.body;
+    const { company, fromYear, toYear, fromDate, toDate, companyId: requestedCompanyId } = req.body;
 
-    if (!company || !fromYear || !toYear) {
-      return res.status(400).json({ status: "error", message: "Company, fromYear and toYear are required" });
+    // Real dates (fromDate/toDate, YYYY-MM-DD) are what a connector sends now; fromYear/toYear still work
+    // for older connectors. The range is pulled one financial year at a time.
+    const pieces = company ? resolveSyncRange({ fromDate, toDate, fromYear, toYear }) : [];
+    if (!company || !pieces.length) {
+      return res.status(400).json({
+        status: "error",
+        message: fromDate || toDate
+          ? "Company, a valid fromDate and a toDate on or after it are required"
+          : "Company, fromDate and toDate (or fromYear and toYear) are required"
+      });
     }
+    const rangeFrom = pieces[0].fromDate;
+    const rangeTo = pieces[pieces.length - 1].toDate;
 
     const trimmedCompany = company.trim();
 
@@ -2362,10 +2345,17 @@ router.post("/manual", async (req, res) => {
           updated_at = NOW()
       WHERE id = $1
       `,
-      [companyId, fromYear, toYear]
+      [companyId, pieces[0].startYear, pieces[pieces.length - 1].startYear + 1]
     );
 
-    const payload = { company: trimmedCompany, companyId, fromYear, toYear };
+    const payload = {
+      company: trimmedCompany,
+      companyId,
+      fromYear: pieces[0].startYear,
+      toYear: pieces[pieces.length - 1].startYear + 1,
+      fromDate: rangeFrom,
+      toDate: rangeTo
+    };
 
     const result = await pool.query(
       `
@@ -2379,7 +2369,7 @@ router.post("/manual", async (req, res) => {
     const jobLogId = result.rows[0].id;
 
     // companyId travels with the job: the worker needs it for the licence check (and to pin every step to this exact company).
-    await safeEnqueueSync(jobLogId, { jobLogId, company: trimmedCompany, companyId, fromYear, toYear, userId });
+    await safeEnqueueSync(jobLogId, { jobLogId, company: trimmedCompany, companyId, ...payload, userId });
 
     return res.status(200).json({
       status: "success",
@@ -2492,11 +2482,25 @@ router.post("/manual-auto", async (req, res) => {
     // -------------------------------------------------
     // CREATE JOB PAYLOAD
     // -------------------------------------------------
+    // Re-sync exactly the financial years this company was synced for before (kept per company), not
+    // just two years; falls back to the stored start/end year when none are recorded yet.
+    const knownYears = await pool.query(
+      `
+      SELECT to_char(MIN(from_date), 'YYYY-MM-DD') AS from_date, to_char(MAX(to_date), 'YYYY-MM-DD') AS to_date
+      FROM app_test.company_financial_years
+      WHERE company_id = $1
+      `,
+      [syncCompanyId]
+    ).then((r) => r.rows[0]).catch(() => null);
+
     const payload = {
       company: company_name,
       companyId: syncCompanyId,
       fromYear: from_year,
-      toYear: to_year
+      toYear: to_year,
+      ...(knownYears?.from_date && knownYears?.to_date
+        ? { fromDate: knownYears.from_date, toDate: knownYears.to_date }
+        : {})
     };
 
     // -------------------------------------------------
@@ -2525,10 +2529,7 @@ router.post("/manual-auto", async (req, res) => {
     // -------------------------------------------------
     await safeEnqueueSync(jobLogId, {
       jobLogId,
-      company: company_name,
-      companyId: syncCompanyId,
-      fromYear: from_year,
-      toYear: to_year,
+      ...payload,
       userId
     });
 
@@ -2575,7 +2576,6 @@ router.get("/units-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2587,9 +2587,6 @@ router.get("/units-sync", async (req, res) => {
 
     const xml = getUnitsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -2703,7 +2700,6 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2731,6 +2727,10 @@ router.get("/all-ledgers-sync", async (req, res) => {
       if (String(groupErr.message).includes(CONNECTOR_NOT_PICKING_UP_CODE)) throw groupErr;
       console.log("⚠️ ALL LEDGERS SYNC: group hierarchy fetch failed, primary_group not refreshed:", groupErr.message);
     }
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
@@ -2873,7 +2873,6 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2885,9 +2884,6 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
 
     const xml = getPurchaseSalesLedgersXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -2976,7 +2972,6 @@ router.get("/godown-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -2988,9 +2983,6 @@ router.get("/godown-sync", async (req, res) => {
 
     const xml = getGodownsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
-
-    // Only after the connector wait — see the note in /company-details.
-    await client.query("BEGIN");
     const parsed = await parseXML(responseXML);
 
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
@@ -3258,7 +3250,6 @@ router.get("/company-details", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
     const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
@@ -3280,12 +3271,6 @@ router.get("/company-details", async (req, res) => {
       waitForConnectorSyncJob(companyJobId, userId),
       waitForConnectorSyncJob(gstJobId, userId)
     ]);
-
-    // The transaction is opened only once Tally has answered. Opening it
-    // before the connector wait (as every sync route used to) left the
-    // connection "idle in transaction" for up to 10 minutes per step —
-    // and for the whole wait if the connector never picked the job up.
-    await client.query("BEGIN");
 
     const companyParsed = await parseXML(companyResponseXML);
 
@@ -3402,17 +3387,20 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
+    await client.query("BEGIN");
+
     const companyId = await getCompanyId(userId, company, client, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
     const owns = await userOwnsCompany(userId, companyId, client);
     if (!owns) {
+      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
-    // No transaction: syncProfitLossSummary waits on the connector and then
-    // does a single upsert, so a BEGIN here would only sit idle across the wait.
     const summary = await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
+
+    await client.query("COMMIT");
 
     return res.status(200).json({
       status: "success",
@@ -3423,6 +3411,7 @@ router.get("/profit-loss-summary-sync", async (req, res) => {
     });
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.log("❌ PROFIT LOSS SUMMARY SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
@@ -3474,9 +3463,9 @@ router.get("/profit-margin", async (req, res) => {
     let existing = await client.query(query, params);
 
     if (existing.rows.length === 0 || (fromDate && toDate)) {
-      // No BEGIN: it would sit idle across the connector wait inside, and
-      // the sync ends in a single upsert anyway.
+      await client.query("BEGIN");
       await syncProfitLossSummary(client, { company, companyId, fromDate, toDate, userId });
+      await client.query("COMMIT");
       existing = await client.query(query, params);
     }
 
