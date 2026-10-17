@@ -14,6 +14,7 @@ import {
 
 import { formatVoucherDate, checkDuplicateFromDb } from "../api/voucher.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
+import { resolveTallyOwner } from "../services/connectorOwner.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -135,7 +136,7 @@ the user's machine via the connector app.
 function runPythonForXml(payload) {
   return new Promise((resolve, reject) => {
     const pythonFile = path.join(process.cwd(), "src", "python", "VoucherGenerator.py");
-    const python = spawn("python", [pythonFile, JSON.stringify(payload)]);
+    const python = spawn(process.env.PYTHON_BIN || "python", [pythonFile, JSON.stringify(payload)]);
 
     let xmlData = "";
     let errorData = "";
@@ -309,8 +310,13 @@ const worker = new Worker(
         throw new Error(`Voucher ${voucherId} has no user_id set — cannot route to a connector`);
       }
 
+      // Staff/accountants have no connector of their own: their work runs on
+      // the company admin's, and the connector only polls jobs saved under
+      // its own user id. For everyone else this resolves to voucher.user_id.
+      const owner = await resolveTallyOwner(voucher.company_id, voucher.user_id);
+
       const connectorJob = await createConnectorJob({
-        userId: voucher.user_id,
+        userId: owner.ownerUserId,
         jobType: "voucher",
         requestXml: xml,
         payload: {
@@ -329,7 +335,8 @@ const worker = new Worker(
 
       console.log(`✅ Voucher connector job created: ${voucherId}`, {
         jobId: connectorJob.id,
-        userId: voucher.user_id
+        userId: voucher.user_id,
+        connectorUserId: owner.ownerUserId
       });
 
       // This worker does not block waiting for the connector. The

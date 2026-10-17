@@ -44,7 +44,7 @@ function embedGroupKeysBatch(groupKeys) {
     if (!groupKeys.length) return resolve([]);
 
    const pyFile = path.join(process.cwd(), "src", "python", "ledger_embedding_cli.py");
-    const python = spawn("python", [pyFile]);
+    const python = spawn(process.env.PYTHON_BIN || "python", [pyFile]);
 
     let output = "";
     let errorOutput = "";

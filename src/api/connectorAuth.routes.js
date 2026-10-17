@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import pool from "../db/index.js";
 import { hashApiKey } from "../middleware/apiKey.middleware.js";
+import { recordTallyLicence } from "../services/tallyLicence.service.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -303,6 +304,10 @@ router.post("/pair", async (req, res) => {
     } catch (claimErr) {
       console.error("connector_machines claim failed (non-fatal):", claimErr.message);
     }
+
+    // A connector was just paired: ask its Tally whether the licence is active. Fire-and-forget (the
+    // connector only starts polling once it has this response), and nothing here may fail the pairing.
+    recordTallyLicence(companyId, user.id).catch(() => {});
 
     // Return the API key with full user details — the raw key is only ever
     // shown here, the connector app must store it locally.

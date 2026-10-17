@@ -1,6 +1,7 @@
   import express from "express";
     import pool from "../db/index.js";
-    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob } from "../services/connectorSync.service.js";
+    import { sendToTallyViaConnector, createConnectorSyncJob, waitForConnectorSyncJob, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
+    import { LICENCE_INACTIVE_MESSAGE } from "../services/tallyLicence.service.js";
     import { resolveUserId } from "../utils/resolveUserId.js";
     import { isTallyConnectorLive, getConnectorOfflineMessage, findLiveConnectorKey, getTallyStatusForKey } from "../services/connectorOwner.service.js";
     import axios from "axios";
@@ -198,10 +199,11 @@ async function checkSyncCooldown(companyId) {
     FROM app_test.job_logs
     WHERE job_type = 'manual_sync'
       AND (payload->>'companyId')::int = $1
+      AND COALESCE(error_message, '') <> $2
     ORDER BY created_at DESC
     LIMIT 1
     `,
-    [companyId]
+    [companyId, LICENCE_INACTIVE_MESSAGE]
   );
 
   if (!recent.rows[0]) return { throttled: false };
@@ -498,30 +500,34 @@ router.get("/health", async (req, res) => {
       return res.status(200).json({
         status: "success",
         message: "Connector is offline",
-        services: { api: "running", connector: "offline", tally: "unknown" },
+        services: { api: "running", connector: "offline", tally: "unknown", licence: "unknown" },
         timestamp: new Date()
       });
     }
 
-    const { tally_connected, tally_checked_at } = await getTallyStatusForKey(live.api_key_id);
+    const { tally_connected, tally_checked_at, tally_licensed, tally_licence_checked_at } = await getTallyStatusForKey(live.api_key_id);
     const tally = tally_connected === true ? "connected" : tally_connected === false ? "disconnected" : "unknown";
+    // active = licensed, inactive = Educational mode, unknown = connector could not tell (never "inactive" by default)
+    const licence = tally_licensed === true ? "active" : tally_licensed === false ? "inactive" : "unknown";
 
     return res.status(200).json({
       status: "success",
       message:
+        tally === "connected" && licence === "inactive" ? "Tally is connected but its licence is not active (Educational mode)" :
         tally === "connected" ? "Tally is connected" :
         tally === "disconnected" ? "Connector is online but Tally is not running" :
         "Connector is online; Tally status unknown",
-      services: { api: "running", connector: "online", tally },
+      services: { api: "running", connector: "online", tally, licence },
       machine_id: live.machine_id,
       tally_checked_at,
+      licence_checked_at: tally_licence_checked_at,
       timestamp: new Date()
     });
   } catch (err) {
     return res.status(503).json({
       status: "error",
       message: "Could not determine connector status",
-      services: { api: "running", connector: "unknown", tally: "unknown" },
+      services: { api: "running", connector: "unknown", tally: "unknown", licence: "unknown" },
       error: err.message,
       timestamp: new Date()
     });
@@ -784,25 +790,29 @@ router.get("/group-summary-bank", async (req, res) => {
     return res.status(400).json({ status: "error", message: "company query parameter required" });
   }
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGroupSummaryBankXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
     const list = Array.isArray(collection) ? collection : [collection];
@@ -883,11 +893,11 @@ router.get("/group-summary-bank", async (req, res) => {
       summary: { inserted, updated, ignored, total: list.length }
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ BANK ACCOUNTS ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -912,7 +922,6 @@ router.get("/voucher-sync", async (req, res) => {
     return res.status(400).json({ status: "error", message: "company, fromDate and toDate required" });
   }
 
-  const client = await pool.connect();
 
   try {
     const userId = await requireUser(req, res);
@@ -924,10 +933,10 @@ router.get("/voucher-sync", async (req, res) => {
       metadata: { company, fromDate, toDate, voucherType, party }
     });
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
@@ -1107,7 +1116,7 @@ router.get("/voucher-sync", async (req, res) => {
     // ===================================================
     let softDeleted = 0;
     if (list.length > 0) {
-      const softDeleteResult = await client.query(
+      const softDeleteResult = await pool.query(
         `
         UPDATE app_test.vouchers
         SET deleted_at = NOW()
@@ -1170,8 +1179,6 @@ router.get("/voucher-sync", async (req, res) => {
     });
     console.log("❌ VOUCHER SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
-  } finally {
-    client.release();
   }
 });
 
@@ -1210,7 +1217,9 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     });
   }
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     // ---------------------------------------------------------
@@ -1223,11 +1232,7 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
       return;
     }
 
-    // ---------------------------------------------------------
-    // TRANSACTION
-    // ---------------------------------------------------------
 
-    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // COMPANY
@@ -1236,7 +1241,7 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     const companyId = await getCompanyId(
       userId,
       company,
-      client,
+      pool,
       req.query.companyId
     );
 
@@ -1247,11 +1252,10 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     const owns = await userOwnsCompany(
       userId,
       companyId,
-      client
+      pool
     );
 
     if (!owns) {
-      await client.query("ROLLBACK");
 
       return res.status(403).json({
         status: "error",
@@ -1291,6 +1295,10 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     // ---------------------------------------------------------
 
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     // ---------------------------------------------------------
     // GET VOUCHERS
@@ -1423,7 +1431,7 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
     // ---------------------------------------------------------
 
     try {
-      await client.query("ROLLBACK");
+      if (client) await client.query("ROLLBACK").catch(() => {});
     } catch (rollbackError) {
       console.error(
         "❌ ROLLBACK ERROR:",
@@ -1445,7 +1453,7 @@ router.get("/sales-invoice-details-sync", async (req, res) => {
 
   } finally {
 
-    client.release();
+    if (client) client.release();
 
   }
 });
@@ -1456,25 +1464,29 @@ router.get("/parent-groups", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getParentGroupsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
     const list = Array.isArray(collection) ? collection : collection ? [collection] : [];
@@ -1517,11 +1529,11 @@ router.get("/parent-groups", async (req, res) => {
       summary: { inserted, updated, ignored, total: list.length }
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ PARENT GROUPS ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -1538,19 +1550,19 @@ router.get("/payable-debtors", async (req, res) => {
     return res.status(400).json({ status: "error", message: "company query parameter required" });
   }
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -1634,6 +1646,10 @@ router.get("/payable-debtors", async (req, res) => {
     const sales    = await getCollectionGroupData(getSalesGroupXML(company), "Sales Accounts");
     const purchase = await getCollectionGroupData(getPurchaseGroupXML(company), "Purchase Accounts");
 
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
+
     let inserted = 0, updated = 0, ignored = 0, skipped = 0;
 
     const upsertGroup = async (g) => {
@@ -1681,11 +1697,11 @@ router.get("/payable-debtors", async (req, res) => {
       data: { debtors, creditors, stock, sales, purchase }
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ GROUP BALANCES ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -1815,26 +1831,30 @@ router.get("/profit-loss-sync", async (req, res) => {
     return res.status(400).json({ status: "error", message: "company, fromDate and toDate required" });
   }
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getProfitLossXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const groups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
     const list = Array.isArray(groups) ? groups : [groups];
@@ -1897,7 +1917,7 @@ router.get("/profit-loss-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("❌ PROFIT LOSS SYNC ERROR:", err.message);
     return res.status(500).json({
       status: "error",
@@ -1905,7 +1925,7 @@ router.get("/profit-loss-sync", async (req, res) => {
       detail: process.env.NODE_ENV === "development" ? err.stack : undefined
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -1926,26 +1946,30 @@ router.get("/stock-group-summary-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupSummaryXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const stockItems = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM || [];
     const list = Array.isArray(stockItems) ? stockItems : [stockItems];
@@ -2094,11 +2118,11 @@ router.get("/stock-group-summary-sync", async (req, res) => {
       })
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ STOCK GROUP SUMMARY SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -2112,26 +2136,30 @@ router.get("/stock-group-gst-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getStockGroupGSTXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const stockGroups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKGROUP || [];
     const list = Array.isArray(stockGroups) ? stockGroups : [stockGroups];
@@ -2208,11 +2236,11 @@ router.get("/stock-group-gst-sync", async (req, res) => {
       summary: { inserted, updated, total: list.length }
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ STOCK GROUP GST SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -2299,7 +2327,8 @@ router.post("/manual", async (req, res) => {
 
     const jobLogId = result.rows[0].id;
 
-    await safeEnqueueSync(jobLogId, { jobLogId, company: trimmedCompany, fromYear, toYear, userId });
+    // companyId travels with the job: the worker needs it for the licence check (and to pin every step to this exact company).
+    await safeEnqueueSync(jobLogId, { jobLogId, company: trimmedCompany, companyId, fromYear, toYear, userId });
 
     return res.status(200).json({
       status: "success",
@@ -2487,26 +2516,30 @@ router.get("/units-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getUnitsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const units = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.UNIT || [];
     const list = Array.isArray(units) ? units : [units];
@@ -2541,11 +2574,11 @@ router.get("/units-sync", async (req, res) => {
       summary: { inserted, updated, ignored, total: list.length }
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ UNITS SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -2607,20 +2640,20 @@ router.get("/all-ledgers-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -2637,8 +2670,15 @@ router.get("/all-ledgers-sync", async (req, res) => {
     try {
       groupHierarchy = await fetchGroupHierarchy(companyId, company, userId);
     } catch (groupErr) {
+      // A failed group fetch is tolerated, but "the connector is not taking any work" is not a
+      // group problem: let it through so the sync stops instead of waiting again on every step.
+      if (String(groupErr.message).includes(CONNECTOR_NOT_PICKING_UP_CODE)) throw groupErr;
       console.log("⚠️ ALL LEDGERS SYNC: group hierarchy fetch failed, primary_group not refreshed:", groupErr.message);
     }
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     let inserted = 0, updated = 0, ignored = 0, primaryGroupUpdated = 0;
     const insertedLedgers = [];
@@ -2758,11 +2798,11 @@ router.get("/all-ledgers-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ ALL LEDGERS SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -2773,26 +2813,30 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getPurchaseSalesLedgersXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const ledgers = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER || [];
     const list = Array.isArray(ledgers) ? ledgers : [ledgers];
@@ -2853,11 +2897,11 @@ router.get("/purchase-sales-ledgers-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ PURCHASE/SALES LEDGER SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -2868,26 +2912,30 @@ router.get("/godown-sync", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
     const xml = getGodownsXML(company);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
+
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
     const list = Array.isArray(rawGodowns) ? rawGodowns : [rawGodowns];
@@ -2928,11 +2976,11 @@ router.get("/godown-sync", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ GODOWN SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -3142,20 +3190,20 @@ router.get("/company-details", async (req, res) => {
   const company = req.query.company;
   if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
 
-  const client = await pool.connect();
+  // The pooled client and its transaction are taken only after Tally has answered,
+  // so nothing is held open while the connector works.
+  let client = null;
 
   try {
     const userId = await requireUser(req, res);
     if (!userId) return;
 
-    await client.query("BEGIN");
 
-    const companyId = await getCompanyId(userId, company, client, req.query.companyId);
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
     if (!companyId) throw new Error("Company not found");
 
-    const owns = await userOwnsCompany(userId, companyId, client);
+    const owns = await userOwnsCompany(userId, companyId, pool);
     if (!owns) {
-      await client.query("ROLLBACK");
       return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
     }
 
@@ -3231,6 +3279,10 @@ router.get("/company-details", async (req, res) => {
     const effectiveFrom = readTallyValue(gstRegistrationDetails?.FROMDATE);
     const gstr1Periodicity = readTallyValue(gstRegistrationDetails?.GSTR1PERIODICITY);
 
+    // Taken only now that Tally has answered: nothing is held open during the connector wait.
+    client = await pool.connect();
+    await client.query("BEGIN");
+
     await client.query(
       `
       INSERT INTO app_test.company_details
@@ -3259,11 +3311,11 @@ router.get("/company-details", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("❌ COMPANY DETAILS ERROR", err);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
