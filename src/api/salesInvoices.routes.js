@@ -1,3 +1,4 @@
+import { readDateWindow, filterRowsByWindow } from "../utils/dateWindow.js";
 import express from "express";
 import pool from "../db/index.js";
 import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js";
@@ -547,6 +548,12 @@ router.get("/sales-invoices", async (req, res) => {
     const companyId = validateCompanyId(req.query.company_id);
     const { sync_status, invoice_no, error_only } = req.query;
 
+    // Optional financial-year window (from/to, YYYY-MM-DD): only invoices dated inside it.
+    const window = readDateWindow(req.query);
+    if (window?.error) {
+      return res.status(400).json({ status: "error", message: window.error });
+    }
+
     if (!companyId) {
       return res.status(400).json({
         status: "error",
@@ -593,7 +600,10 @@ router.get("/sales-invoices", async (req, res) => {
     // (much older) id happens to sort.
     query += ` ORDER BY updated_at DESC, id DESC`;
 
-    const result = await pool.query(query, params);
+    const queried = await pool.query(query, params);
+    // invoice_date is free text from the extraction, so the window is applied in code, not SQL; an invoice with
+    // no readable date stays in.
+    const result = { ...queried, rows: filterRowsByWindow(queried.rows, window, (row) => row.invoice_date) };
 
     // Only failed rows get state / gst_registration_type added — everything
     // else passes through unchanged, exactly as the DB returned it.
