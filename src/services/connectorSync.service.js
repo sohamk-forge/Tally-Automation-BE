@@ -12,59 +12,24 @@ import { resolveTallyOwner } from "./connectorOwner.service.js";
 
 const POLL_INTERVAL_MS = 250; // check every 1 second
 
-// How long one connector job is waited on. Exported so the sync worker can
-// size each step's HTTP timeout to outlast it — the worker used to give up
-// after 5 minutes while the route kept waiting for 10.
+// How long one connector request may take before the caller gives up. The sync worker
+// derives each step's HTTP timeout from this (calls x this + 1 min), so the two can
+// never drift apart again.
 export const CONNECTOR_WAIT_TIMEOUT_MS = 600000; // 10 minutes
+const TIMEOUT_MS = CONNECTOR_WAIT_TIMEOUT_MS;
 
-// A running connector polls every second, so a job still unclaimed after
-// this long means the connector isn't picking work up at all (not running,
-// unpaired, or its polls are being rejected). Without this, every wait ran
-// the full 10 minutes and a sync with a dead connector sat "processing"
-// for well over an hour before failing.
-const CONNECTOR_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+// A running connector polls every second, so a request still unclaimed after this long
+// means nothing is picking it up (app closed, not paired, wrong key) - fail fast with a
+// clear message instead of waiting the full timeout. Not applied while the same
+// connector is busy with another job: it only polls again once its batch finishes.
+const UNCLAIMED_LIMIT_MS = 2 * 60 * 1000;
+const CONNECTOR_BUSY_WINDOW = "5 minutes"; // same window the stale-claim sweep uses
 
-// sync.worker.js matches on this to stop the remaining sync steps — each
-// would just hit the same wall.
-export const CONNECTOR_NOT_CLAIMING_MESSAGE =
-  "Connector did not pick up the request — make sure the Connector app is running and paired, then sync again.";
-
-/**
- * Fails a still-unclaimed job. Returns false (keep waiting) when the
- * connector is alive but busy: it claims in batches and doesn't poll again
- * until the current batch finishes, so a job can legitimately sit
- * 'pending' behind a long Tally export (e.g. a full-year voucher sync).
- * The status = 'pending' guard keeps this from racing a concurrent claim.
- */
-async function failUnclaimedConnectorJob(connectorJobId, connectorUserId) {
-  const busy = await pool.query(
-    `
-    SELECT 1
-    FROM app_test.connector_jobs
-    WHERE user_id = $1
-      AND status = 'processing'
-    LIMIT 1
-    `,
-    [connectorUserId]
-  );
-
-  if (busy.rows.length > 0) return false;
-
-  const failed = await pool.query(
-    `
-    UPDATE app_test.connector_jobs
-    SET status = 'failed',
-        error_message = $2,
-        completed_at = NOW(),
-        updated_at = NOW()
-    WHERE id = $1
-      AND status = 'pending'
-    `,
-    [connectorJobId, CONNECTOR_NOT_CLAIMING_MESSAGE]
-  );
-
-  return failed.rowCount > 0;
-}
+// The code travels inside the message (routes hand errors back as an HTTP message);
+// the sync worker looks for the code to stop the whole sync early.
+export const CONNECTOR_NOT_PICKING_UP_CODE = "[CONNECTOR_NOT_PICKING_UP]";
+export const CONNECTOR_NOT_PICKING_UP_MESSAGE =
+  `${CONNECTOR_NOT_PICKING_UP_CODE} Connector did not pick up the request - make sure the Connector app is running and paired, then sync again.`;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -254,7 +219,8 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
 
     const result = await pool.query(
       `
-      SELECT cj.status, cj.response_xml, cj.error_message, cj.user_id
+      SELECT cj.status, cj.response_xml, cj.error_message, cj.user_id AS owner_user_id,
+             EXTRACT(EPOCH FROM (NOW() - cj.created_at)) * 1000 AS age_ms
       FROM app_test.connector_jobs cj
       WHERE cj.id = $1
         AND (
@@ -291,36 +257,55 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
       throw new Error(job.error_message || `Sync connector job ${connectorJobId} failed`);
     }
 
+    // Nobody has claimed it for 2 minutes and the connector is not busy with something else.
+    // The status = 'pending' guard means a claim landing at this very moment still wins.
     if (
       job.status === "pending" &&
-      Date.now() - startTime > CONNECTOR_CLAIM_TIMEOUT_MS &&
-      (await failUnclaimedConnectorJob(connectorJobId, job.user_id))
+      Number(job.age_ms) > UNCLAIMED_LIMIT_MS &&
+      !(await connectorIsBusy(job.owner_user_id))
     ) {
-      throw new Error(CONNECTOR_NOT_CLAIMING_MESSAGE);
+      const failed = await pool.query(
+        `
+        UPDATE app_test.connector_jobs
+        SET status = 'failed', error_message = $2, completed_at = NOW(), updated_at = NOW()
+        WHERE id = $1 AND status = 'pending'
+        RETURNING id
+        `,
+        [connectorJobId, CONNECTOR_NOT_PICKING_UP_MESSAGE]
+      );
+      if (failed.rowCount > 0) throw new Error(CONNECTOR_NOT_PICKING_UP_MESSAGE);
     }
   }
 
-  const timeoutMessage = `Sync timed out after ${CONNECTOR_WAIT_TIMEOUT_MS / 1000}s — is the Connector running?`;
-
-  // Nobody is waiting on this job any more. Left 'pending', the connector
-  // would still claim and run it whenever it came back — a stale Tally
-  // export for a sync step that has already given up.
+  // Nobody is waiting any more, so cancel the request: the connector only claims 'pending'
+  // rows, so it can never run this later against a sync that has moved on. A late result
+  // for a 'failed' job is still accepted and ignored by /api/connector/jobs/result.
+  const timeoutMessage = `Sync timed out after ${TIMEOUT_MS / 1000}s - is the Connector running?`;
   await pool.query(
     `
     UPDATE app_test.connector_jobs
-    SET status = 'failed',
-        error_message = $2,
-        completed_at = NOW(),
-        updated_at = NOW()
-    WHERE id = $1
-      AND status IN ('pending', 'processing')
+    SET status = 'failed', error_message = $2, completed_at = NOW(), updated_at = NOW()
+    WHERE id = $1 AND status IN ('pending', 'processing')
     `,
     [connectorJobId, timeoutMessage]
-  ).catch((err) => {
-    console.error(`Failed to mark timed-out connector job ${connectorJobId} as failed:`, err.message);
-  });
-
+  );
   throw new Error(timeoutMessage);
+}
+
+// True while this user's connector has a job it claimed recently and has not reported on.
+async function connectorIsBusy(userId) {
+  const result = await pool.query(
+    `
+    SELECT 1
+    FROM app_test.connector_jobs
+    WHERE user_id = $1
+      AND status = 'processing'
+      AND claimed_at > NOW() - INTERVAL '${CONNECTOR_BUSY_WINDOW}'
+    LIMIT 1
+    `,
+    [userId]
+  );
+  return result.rows.length > 0;
 }
 
 /**
