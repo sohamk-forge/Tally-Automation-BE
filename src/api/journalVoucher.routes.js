@@ -165,6 +165,55 @@ router.post("/push/journal-voucher", async (req, res) => {
     }
 
     // -----------------------------
+    // CHECK LEDGER NAMES IN DATABASE
+    // -----------------------------
+
+  const requestedLedgerNames = [
+  ...new Set(cleanEntries.map((entry) => entry.ledgerName))
+  ];
+
+    const ledgerResult = await pool.query(
+     `
+     SELECT ledger_name
+     FROM ${DB_SCHEMA}.all_ledger_details
+     WHERE company_id = $1
+     AND deleted_at IS NULL
+     `,
+    [companyId]
+  );
+
+// Normalize case, line breaks and extra spaces.
+   const normalizeLedgerName = (name) =>
+     String(name ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+   const existingLedgers = new Set(
+    ledgerResult.rows.map((row) =>
+    normalizeLedgerName(row.ledger_name)
+   )
+  );
+
+   const missingLedgers = requestedLedgerNames.filter(
+      (name) => !existingLedgers.has(normalizeLedgerName(name))
+   );
+
+// Stop if any ledger is missing.
+   if (missingLedgers.length > 0) {
+    return res.status(400).json({
+    success: false,
+    message:
+      "Journal voucher not created. The following ledger(s) do not exist in the database.",
+    company_id: companyId,
+    missing_ledgers: missingLedgers
+     });
+  }
+
+  // If every ledger exists, continue to INSERT VOUCHER + ENTRIES.
+
+    // -----------------------------
     // INSERT VOUCHER + ENTRIES (ONE TRANSACTION)
     // -----------------------------
 
