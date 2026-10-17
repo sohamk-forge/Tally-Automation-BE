@@ -164,6 +164,33 @@ router.post("/push/journal-voucher", async (req, res) => {
       });
     }
 
+      //DECIMAL VALIDATION HERE
+    for (let i = 0; i < entries.length; i++) {
+      const amount = entries[i].amount;
+
+      if (
+        typeof amount !== "number" ||
+        !Number.isFinite(amount)
+      ) {
+        return res.status(400).json({
+          status: "error",
+          message: `Entry ${i + 1}: amount must be a valid number.`
+        });
+      }
+
+      if (
+        Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-8
+      ) {
+        return res.status(400).json({
+          status: "error",
+          message: `Entry ${i + 1}: amount cannot have more than two decimal places.`,
+          field: `entries[${i}].amount`,
+          received_amount: amount
+        });
+      }
+    }
+
+
     // -----------------------------
     // CHECK LEDGER NAMES IN DATABASE
     // -----------------------------
