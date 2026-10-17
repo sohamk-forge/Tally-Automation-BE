@@ -1,3 +1,4 @@
+import { readDateWindow, filterRowsByWindow } from "../utils/dateWindow.js";
 import express from "express";
 import pool from "../db/index.js";
 import { safeEnqueuePurchase } from "../queues/purchase.queue.js";
@@ -233,6 +234,12 @@ router.get("/invoices", async (req, res) => {
     // never matches any month filter — expected, not a bug).
     const month = req.query.month?.trim();
 
+    // Optional financial-year window (from/to, YYYY-MM-DD): only invoices dated inside it.
+    const window = readDateWindow(req.query);
+    if (window?.error) {
+      return res.status(400).json({ status: "error", message: window.error });
+    }
+
     const result = await pool.query(
       `
       SELECT ie.id, ie.invoice_no, ie.invoice_date, ie.vendor_name, ie.gstin, ie.sync_status, ie.error_message, ie.raw_json, ie.created_at, ie.updated_at
@@ -250,7 +257,10 @@ router.get("/invoices", async (req, res) => {
       [companyId, month || null]
     );
 
-    return res.status(200).json({ status: "success", data: result.rows });
+    // invoice_date is free text from the extraction, so the window is applied in code, not SQL.
+    const rows = filterRowsByWindow(result.rows, window, (row) => row.invoice_date);
+
+    return res.status(200).json({ status: "success", data: rows });
   } catch (err) {
     console.error("GET invoices error:", err);
     return res.status(500).json({ status: "error", message: err.message });

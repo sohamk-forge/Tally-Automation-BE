@@ -27,3 +27,24 @@ export function dmyToIso(value) {
 
 // A document covering startIso..endIso belongs to the window when the two ranges overlap.
 export const overlapsWindow = (startIso, endIso, window) => startIso <= window.to && endIso >= window.from;
+
+// Any date text an invoice may carry -> "yyyy-mm-dd", or null when it can't be read with confidence:
+// 2026-09-12, 2026-09-12T10:00:00Z, 2026/09/12, 12-09-2026, 12/09/2026, 12.09.2026 (day first, as Indian invoices write it).
+export function anyDateToIso(value) {
+  const text = String(value ?? "").trim();
+  let m = text.match(/^(\d{4})[-/.](\d{2})[-/.](\d{2})(?:$|[T\s])/);
+  if (m) return isRealDay(`${m[1]}-${m[2]}-${m[3]}`) ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  m = text.match(/^(\d{2})[-/.](\d{2})[-/.](\d{4})$/);
+  if (m) return isRealDay(`${m[3]}-${m[2]}-${m[1]}`) ? `${m[3]}-${m[2]}-${m[1]}` : null;
+  return null;
+}
+
+// Rows whose date falls inside the window. A row whose date can't be read stays in: hiding it would make an
+// invoice vanish just because of how its date was typed.
+export function filterRowsByWindow(rows, window, getDate) {
+  if (!window) return rows;
+  return rows.filter((row) => {
+    const day = anyDateToIso(getDate(row));
+    return !day || (day >= window.from && day <= window.to);
+  });
+}
