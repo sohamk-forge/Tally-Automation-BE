@@ -1,4 +1,4 @@
-﻿import { Worker } from "bullmq";
+﻿import { Worker, UnrecoverableError } from "bullmq";
 import IORedis from "ioredis";
 import axios from "axios";
 
@@ -6,6 +6,8 @@ import pool from "../db/index.js";
 import { SYNC_STEP_COUNT } from "../config/syncSteps.js";
 import { failConnectorJobBusinessRecord } from "../services/connectorJobResult.service.js";
 import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
+import { CONNECTOR_WAIT_TIMEOUT_MS, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
+import { recordTallyLicence, LICENCE_INACTIVE_MESSAGE } from "../services/tallyLicence.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -137,7 +139,14 @@ async function markJobFailed(jobLogId, errorMessage) {
   the rest of the sync from attempting to run.
 =================================================== */
 
-async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
+// Raised by a step when the connector is not picking up requests at all. Unlike an ordinary
+// step failure, continuing would just repeat the same 2-minute wait 13 more times.
+class ConnectorNotPickingUpError extends Error {}
+
+// connectorCalls = how many sequential connector requests the route makes. Each may wait up
+// to CONNECTOR_WAIT_TIMEOUT_MS, so the HTTP timeout is derived from it (plus a minute for
+// the database work) and can never be shorter than the wait it is waiting on.
+async function runSyncStep({ label, path, params, userId, results, jobLogId, connectorCalls = 1 }) {
   console.log(`\n➡️  [${label}] STARTING`);
   console.log(`   GET ${path}`, { params, userId });
 
@@ -146,6 +155,7 @@ async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
   try {
     const response = await api.get(path, {
       params,
+      timeout: connectorCalls * CONNECTOR_WAIT_TIMEOUT_MS + 60000,
       headers: {
         "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET,
         "x-internal-user-id": String(userId)
@@ -181,7 +191,9 @@ async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
   } catch (err) {
     const durationMs = Date.now() - startedAt;
     const status = err.response?.status;
-    const message = err.response?.data?.message || err.message;
+    const rawMessage = err.response?.data?.message || err.message;
+    const connectorDown = String(rawMessage).includes(CONNECTOR_NOT_PICKING_UP_CODE);
+    const message = String(rawMessage).replace(CONNECTOR_NOT_PICKING_UP_CODE, "").trim();
 
     // RED CROSS
     console.log(`❌ [${label}] SYNC FAILED (${durationMs}ms)`);
@@ -195,6 +207,8 @@ async function runSyncStep({ label, path, params, userId, results, jobLogId }) {
       error: message
     });
     await updateJobProgress(jobLogId, results);
+
+    if (connectorDown) throw new ConnectorNotPickingUpError(message);
 
     // Intentionally does NOT re-throw — one step failing (e.g. a
     // company-specific data issue in Tally) shouldn't prevent the
@@ -245,134 +259,57 @@ const worker = new Worker(
       anything up.)
     =============================================== */
 
-    await runSyncStep({
-      label: "COMPANY DETAILS",
-      path: "/api/sync/company-details",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
+    // The steps, in the order they must run. `calls` = connector requests the route makes in a
+    // row (used for its timeout); `dated` = the route also takes the financial-year dates.
+    const SYNC_STEPS = [
+      { label: "COMPANY DETAILS", path: "/api/sync/company-details", calls: 2 },
+      { label: "ALL LEDGERS", path: "/api/sync/all-ledgers-sync", calls: 2 },
+      { label: "BANK ACCOUNTS", path: "/api/sync/group-summary-bank" },
+      { label: "STOCK GROUP GST DETAILS", path: "/api/sync/stock-group-gst-sync" },
+      { label: "STOCK GROUP SUMMARY", path: "/api/sync/stock-group-summary-sync" },
+      { label: "UNITS", path: "/api/sync/units-sync" },
+      { label: "GODOWNS", path: "/api/sync/godown-sync" },
+      { label: "PURCHASE/SALES LEDGERS", path: "/api/sync/purchase-sales-ledgers-sync" },
+      { label: "PAYABLE/DEBTORS", path: "/api/sync/payable-debtors", calls: 6 },
+      { label: "PARENT GROUPS", path: "/api/sync/parent-groups" },
+      { label: "PROFIT & LOSS", path: "/api/sync/profit-loss-sync", dated: true },
+      { label: "PROFIT & LOSS SUMMARY", path: "/api/sync/profit-loss-summary-sync" },
+      { label: "VOUCHERS", path: "/api/sync/voucher-sync", dated: true },
+      // Must run AFTER voucher-sync - this route only UPDATEs the delivery_notes column on
+      // voucher rows voucher-sync already inserted, it never inserts rows itself.
+      { label: "SALES INVOICE DELIVERY DETAILS", path: "/api/sync/sales-invoice-details-sync", dated: true }
+    ];
 
-    await runSyncStep({
-      label: "ALL LEDGERS",
-      path: "/api/sync/all-ledgers-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
+    try {
+      // Is the Tally licence active? Asked once, here, whenever a sync starts (a manual sync, or the
+      // first sync a connector pairing starts). Educational mode (false) refuses the sync; "could not
+      // tell" (null) does not, so a Tally that is slow to answer never blocks anybody by mistake.
+      const licensed = await recordTallyLicence(companyId, userId);
+      if (licensed === false) {
+        await markJobFailed(jobLogId, LICENCE_INACTIVE_MESSAGE);
+        throw new UnrecoverableError(LICENCE_INACTIVE_MESSAGE);
+      }
 
-    await runSyncStep({
-      label: "BANK ACCOUNTS",
-      path: "/api/sync/group-summary-bank",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "STOCK GROUP GST DETAILS",
-      path: "/api/sync/stock-group-gst-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "STOCK GROUP SUMMARY",
-      path: "/api/sync/stock-group-summary-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "UNITS",
-      path: "/api/sync/units-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "GODOWNS",
-      path: "/api/sync/godown-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PURCHASE/SALES LEDGERS",
-      path: "/api/sync/purchase-sales-ledgers-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PAYABLE/DEBTORS",
-      path: "/api/sync/payable-debtors",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PARENT GROUPS",
-      path: "/api/sync/parent-groups",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PROFIT & LOSS",
-      path: "/api/sync/profit-loss-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "PROFIT & LOSS SUMMARY",
-      path: "/api/sync/profit-loss-summary-sync",
-      params: { company, companyId },
-      userId,
-      results,
-      jobLogId
-    });
-
-    await runSyncStep({
-      label: "VOUCHERS",
-      path: "/api/sync/voucher-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
-
-    // Must run AFTER voucher-sync — this route only UPDATEs the
-    // delivery_notes column on voucher rows voucher-sync already inserted,
-    // it never inserts rows itself.
-    await runSyncStep({
-      label: "SALES INVOICE DELIVERY DETAILS",
-      path: "/api/sync/sales-invoice-details-sync",
-      params: { company, companyId, fromDate, toDate },
-      userId,
-      results,
-      jobLogId
-    });
+      for (const step of SYNC_STEPS) {
+        await runSyncStep({
+          label: step.label,
+          path: step.path,
+          params: step.dated ? { company, companyId, fromDate, toDate } : { company, companyId },
+          connectorCalls: step.calls,
+          userId,
+          results,
+          jobLogId
+        });
+      }
+    } catch (err) {
+      const connectorDown = err instanceof ConnectorNotPickingUpError || String(err.message).includes(CONNECTOR_NOT_PICKING_UP_CODE);
+      if (!connectorDown) throw err;
+      // The connector is not taking any work: stop here, say why, and do not retry the
+      // whole sync (it would just wait again).
+      const message = String(err.message).replace(CONNECTOR_NOT_PICKING_UP_CODE, "").trim();
+      await markJobFailed(jobLogId, message);
+      throw new UnrecoverableError(message);
+    }
 
     /* ===============================================
       FINAL SUMMARY LOG
@@ -465,8 +402,31 @@ worker.on("completed", (job, returnValue) => {
   });
 });
 
-worker.on("failed", (job, error) => {
+worker.on("failed", async (job, error) => {
   console.error(`[SYNC] ❌ Job failed: ${job?.id}`, error.message);
+
+  // BullMQ gave up on this job (stalled after a crash/restart, retries used up, or we threw
+  // UnrecoverableError). Nothing else will ever move its job_logs row off 'running', so close
+  // it here. Attempts BullMQ is going to retry are left alone.
+  const finalFailure =
+    error?.name === "UnrecoverableError" ||
+    /stalled more than allowable limit/i.test(error?.message || "") ||
+    (job?.attemptsMade ?? 0) >= (job?.opts?.attempts ?? 1);
+  const jobLogId = job?.data?.jobLogId;
+  if (!finalFailure || !jobLogId) return;
+
+  try {
+    await pool.query(
+      `
+      UPDATE app_test.job_logs
+      SET status = 'failed', completed_at = NOW(), error_message = $2
+      WHERE id = $1 AND status IN ('pending', 'running')
+      `,
+      [jobLogId, error.message]
+    );
+  } catch (dbError) {
+    console.error(`[SYNC] Could not close job_logs ${jobLogId}:`, dbError.message);
+  }
 });
 
 worker.on("error", (error) => {
@@ -550,18 +510,33 @@ async function markStalePendingSyncAsFailed() {
 }
 
 async function markStaleRunningSyncAsFailed() {
-  const result = await pool.query(
-    `UPDATE app_test.job_logs
-     SET
-       status = 'failed',
-       error_message = 'Sync interrupted / worker restarted mid-run',
-       completed_at = NOW()
+  const candidates = await pool.query(
+    `SELECT id FROM app_test.job_logs
      WHERE status = 'running'
        AND job_type IN ('manual_sync')
-       AND started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'
-     RETURNING id`
+       AND started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'`
   );
-  console.log(`Marked ${result.rowCount} stale running sync jobs as failed`);
+
+  let failedCount = 0;
+  for (const row of candidates.rows) {
+    // A long but live sync (slow Tally, large voucher list) must never be failed by this
+    // sweep: only a row whose BullMQ job is not actively running is really orphaned.
+    const existingJob = await syncQueue.getJob(getSyncJobId(row.id));
+    if (existingJob && (await existingJob.getState()) === "active") continue;
+
+    const updated = await pool.query(
+      `UPDATE app_test.job_logs
+       SET status = 'failed',
+           error_message = 'Sync interrupted / worker restarted mid-run',
+           completed_at = NOW()
+       WHERE id = $1 AND status = 'running'
+       RETURNING id`,
+      [row.id]
+    );
+    if (updated.rowCount > 0) failedCount++;
+  }
+
+  console.log(`Marked ${failedCount} stale running sync jobs as failed`);
 }
 
 async function enqueuePendingSyncJobs() {

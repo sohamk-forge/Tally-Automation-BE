@@ -218,6 +218,13 @@ router.get("/api-keys", verifySession(), async (req, res) => {
    The connector polls for pending work and submits results back.
 ========================================= */
 
+// The connector's 1-second heartbeat. verifyConnectorApiKey does all the work: it saves last_seen_at and
+// the Tally up/down report that comes in the headers. Kept separate from /jobs because the connector
+// pauses job polling while it is busy with a slow Tally job, but must still be seen as alive.
+router.post("/ping", verifyConnectorApiKey, (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 router.get("/jobs", verifyConnectorApiKey, async (req, res) => {
   try {
     const { userId } = req.connectorMachine;

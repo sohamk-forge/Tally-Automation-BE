@@ -80,10 +80,13 @@ const notifyAdminConnectorOffline = async (companyId, owner, actingUserId) => {
   }
 };
 
-// Now that pushes are hard-gated on this check (invoices.routes.js rejects
-// with 409 when offline), a 30s window would flag a connector as offline
-// whenever it is briefly busy inside a slow Tally call and skips a poll.
-export const CONNECTOR_ONLINE_WINDOW = "60 seconds";
+// A connector sends a heartbeat (POST /api/connector/ping) every second, on its own timer that keeps
+// running while it is busy with a slow Tally job. So "online" means: heard from within the last few
+// beats. 3 s = 3 missed beats: absorbs normal network jitter yet shows an offline connector within
+// seconds. On a slow or lossy link, raise it (CONNECTOR_ONLINE_WINDOW_SECONDS) if the badge flaps. Connector builds from before the heartbeat existed only report between jobs: they
+// would look offline during long Tally jobs, so they need updating. CONNECTOR_ONLINE_WINDOW_SECONDS
+// overrides it (the old value was 60).
+export const CONNECTOR_ONLINE_WINDOW = `${Number(process.env.CONNECTOR_ONLINE_WINDOW_SECONDS) || 3} seconds`;
 
 // Liveness check for the sync path. Deliberately looser than
 // resolveConnectorForCompany: syncs only ever needed a used pairing plus a
@@ -239,10 +242,9 @@ export const resolveConnectorForCompany = async (
 
   return null;
 };
-// A Tally check older than this is no longer evidence either way (the
-// connector reports every ~10s, so 45s means it stopped reporting — e.g. an
-// older connector build, or a long-running job holding up its polling).
-export const TALLY_STATUS_FRESH_MS = 45 * 1000;
+// A Tally check older than this is no longer evidence either way (the connector reports it with every
+// 1-second heartbeat, so 3 s means it stopped reporting - e.g. an older connector build).
+export const TALLY_STATUS_FRESH_MS = (Number(process.env.TALLY_STATUS_FRESH_SECONDS) || 3) * 1000;
 
 // What the connector last reported about Tally on its own machine:
 //   tally_connected true  -> Tally answered on its port
@@ -250,14 +252,16 @@ export const TALLY_STATUS_FRESH_MS = 45 * 1000;
 //   tally_connected null  -> unknown (never reported, or report too old)
 // Never throws — a status badge must not break the routes that show it.
 export const getTallyStatusForKey = async (apiKeyId) => {
-  const unknown = { tally_connected: null, tally_checked_at: null };
+  const unknown = { tally_connected: null, tally_checked_at: null, tally_licensed: null, tally_licence_checked_at: null };
   if (!apiKeyId) return unknown;
 
-  try {
-    const result = await pool.query(
+  // The licence column came later: on a database that has not run that migration yet, read the
+  // rest without it instead of losing the Tally up/down status as well.
+  const read = (withLicence) =>
+    pool.query(
       `
       SELECT tally_connected,
-             tally_checked_at,
+             tally_checked_at,${withLicence ? "\n             tally_licensed,\n             tally_licence_checked_at," : ""}
              EXTRACT(EPOCH FROM (NOW() - tally_checked_at)) * 1000 AS age_ms
       FROM ${DB_SCHEMA}.connector_api_keys
       WHERE id = $1
@@ -265,13 +269,23 @@ export const getTallyStatusForKey = async (apiKeyId) => {
       [apiKeyId]
     );
 
+  try {
+    const result = await read(true).catch((err) => {
+      if (err.code !== "42703") throw err; // 42703 = column does not exist
+      return read(false);
+    });
+
     const row = result.rows[0];
     if (!row || row.tally_connected === null || row.tally_checked_at === null) return unknown;
 
     const fresh = Number(row.age_ms) <= TALLY_STATUS_FRESH_MS;
     return {
       tally_connected: fresh ? row.tally_connected : null,
-      tally_checked_at: row.tally_checked_at
+      tally_checked_at: row.tally_checked_at,
+      // Licence is checked at sync start and at pairing, not continuously: show the last answer while
+      // Tally itself is reporting in and up, with the time it was asked.
+      tally_licensed: fresh && row.tally_connected === true ? (row.tally_licensed ?? null) : null,
+      tally_licence_checked_at: fresh && row.tally_connected === true ? (row.tally_licence_checked_at ?? null) : null
     };
   } catch (err) {
     console.error("Tally status lookup failed:", err.message);
