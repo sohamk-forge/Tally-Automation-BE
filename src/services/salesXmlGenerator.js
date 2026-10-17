@@ -14,7 +14,7 @@ export function generateSalesXml(invoiceData) {
 
     const scriptPath = path.join(__dirname, "../python/sales_generator.py");
 
-    const py = spawn("python", [scriptPath]);
+    const py = spawn(process.env.PYTHON_BIN || "python", [scriptPath]);
 
     let stdout = "";
     let stderr = "";
