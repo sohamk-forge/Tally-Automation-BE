@@ -9,7 +9,7 @@ export function generateXml(invoiceData) {
     console.log("=================================");
 
     const python = spawn(
-      "python",
+      process.env.PYTHON_BIN || "python",
       ["src/python/generator.py"]
     );
 
@@ -66,7 +66,7 @@ export function generateSalesXml(invoiceData) {
     console.log("=================================");
 
     const python = spawn(
-      "python",
+      process.env.PYTHON_BIN || "python",
       ["src/python/sales_generator.py"]  // ✅ Sales Python file
     );
 
