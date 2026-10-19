@@ -150,19 +150,75 @@ router.post("/push/journal-voucher", async (req, res) => {
 
     // The name goes straight into <SVCURRENTCOMPANY>; trusting the request
     // body for it would let the stored id and the Tally company disagree.
-    const companyResult = await pool.query(
-      `SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1 LIMIT 1`,
+         
+   const companyResult = await pool.query(
+      `SELECT name, financial_year_start, financial_year_end
+      FROM ${DB_SCHEMA}.companies
+      WHERE id = $1
+     LIMIT 1`,
       [companyId]
-    );
+   );
 
-    const companyName = companyResult.rows[0]?.name;
+const companyRecord = companyResult.rows[0];
+const companyName = companyRecord?.name;
 
-    if (!companyName) {
-      return res.status(404).json({
-        success: false,
-        message: `Company not found: ${companyId}`
-      });
+if (!companyName) {
+  return res.status(404).json({
+    success: false,
+    message: `Company not found: ${companyId}`
+  });
+}
+
+// Convert the database's stored date to YYYY-MM-DD. 
+  
+ const parseFinancialYear = (value) => {
+  const year = String(value ?? "").trim();
+
+  if (!/^\d{4}$/.test(year)) {
+    return null;
+  }
+
+  return Number(year);
+ };
+
+const startYear = parseFinancialYear(
+  companyRecord.financial_year_start
+);
+
+const endYear = parseFinancialYear(
+  companyRecord.financial_year_end
+);
+
+if (
+  startYear === null ||
+  endYear === null ||
+  endYear !== startYear + 1
+) {
+  return res.status(500).json({
+    success: false,
+    message: "Company financial year is missing or invalid."
+  });
+}
+
+// Indian financial-year convention: 1 April to 31 March.
+const periodStart = `${startYear}-04-01`;
+const periodEnd = `${endYear}-03-31`;
+
+// voucher_date has already been validated above.
+if (voucher_date < periodStart || voucher_date > periodEnd) {
+  return res.status(400).json({
+    success: false,
+    message: "Voucher date is outside the company's accounting period.",
+    voucher_date,
+    allowed_period: {
+      start: periodStart,
+      end: periodEnd
     }
+  });
+}
+
+
+
 
       //DECIMAL VALIDATION HERE
     for (let i = 0; i < entries.length; i++) {
