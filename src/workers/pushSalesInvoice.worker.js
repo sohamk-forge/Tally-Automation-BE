@@ -5,13 +5,15 @@ import IORedis from "ioredis";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { SALES_QUEUE_NAME, safeEnqueueSales } from "../queues/sales.queue.js";
+import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
-import { getSalesVoucherExistsXML } from "../services/xmlBuilder.js";
+import { getSalesVoucherExistsXML, getLedgerVoucherByMasterIdXML } from "../services/xmlBuilder.js";
+import { firstVoucherNode, cleanText, tallyDateToIso } from "../services/voucherUpsert.service.js";
 import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
-import { parseXML } from "../services/parser.js";
+import { parseXML, parseXMLKeepText } from "../services/parser.js";
 import { resolveStateName, normalizeStateName } from "../utils/gstState.js";
 import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 import { SAP_UPLOAD_SOURCE, checkSapSalesInvoice } from "../services/salesSapBilling.js";
@@ -304,6 +306,12 @@ const worker = new Worker(
     const row = result.rows[0];
     if (!row) {
       throw new Error(`Sales invoice ${salesId} not found`);
+    }
+
+    // A draft (Save Draft on the Create screen) must never reach Tally, whatever
+    // queued it. Pushing a draft moves it to 'pending' first.
+    if (row.sync_status === "draft") {
+      return { salesId, status: "skipped", reason: "draft" };
     }
 
     // Read from the row, not job.data — startup recovery re-enqueues with
@@ -603,7 +611,10 @@ const worker = new Worker(
       // CREATED=0/ALTERED=0/EXCEPTIONS=1 with no LINEERROR on the repeat
       // push, which reads as a generic failure). Skipped for first-time
       // pushes to avoid an extra connector round-trip on the common path.
-      if (Number(row.error_count || 0) > 0) {
+      // Not for an alter: the voucher is meant to exist, and marking it
+      // "success" here would skip applying the edits.
+      const isAlter = row.tally_alter_pending === true && !!row.tally_master_id;
+      if (!isAlter && Number(row.error_count || 0) > 0) {
         try {
           const existsXml = getSalesVoucherExistsXML(row.company_name, row.invoice_no);
           const existsResponseXml = await sendToTallyViaConnector(
@@ -637,6 +648,30 @@ const worker = new Worker(
               ]
             );
 
+            // No import response exists on this path, so the print flow gets its
+            // voucher ID from the duplicate-check result instead of LASTVCHID.
+            if (row.print_requested) {
+              const matched = Array.isArray(existingVoucher) ? existingVoucher[0] : existingVoucher;
+              const matchedId = String(matched?.MASTERID?._ ?? matched?.MASTERID ?? "").replace(/\D/g, "");
+              if (matchedId) {
+                await pool.query(
+                  `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+                   SET tally_master_id = $1, print_status = 'fetching', print_error = NULL
+                   WHERE id = $2`,
+                  [matchedId, salesId]
+                );
+                await safeEnqueueSalesPrint(salesId);
+              } else {
+                await pool.query(
+                  `UPDATE ${DB_SCHEMA}.sales_invoice_extractions
+                   SET print_status = 'failed',
+                       print_error = 'Tally did not return a voucher ID for the existing invoice'
+                   WHERE id = $1`,
+                  [salesId]
+                );
+              }
+            }
+
             return { salesId, status: "success", note: "matched_existing_voucher" };
           }
         } catch (dupCheckError) {
@@ -648,6 +683,38 @@ const worker = new Worker(
             error: dupCheckError.message
           });
         }
+      }
+
+      // This Tally finds the voucher to alter by its CURRENT date + number, and
+      // silently creates a second voucher when either is wrong. So read both
+      // live from Tally by master id (the synced copy can be stale, e.g. after
+      // an earlier edit changed the date). Never fall back to Create here.
+      let alterTarget = null;
+      if (isAlter) {
+        const fyYear = Number(String(row.invoice_date || "").match(/\d{4}/)?.[0]) || new Date().getFullYear();
+        const liveXml = await sendToTallyViaConnector(
+          row.company_id,
+          getLedgerVoucherByMasterIdXML(
+            row.company_name,
+            row.tally_master_id,
+            `${fyYear - 2}0401`,
+            `${fyYear + 1}0331`
+          ),
+          "sync",
+          userId
+        );
+        const liveVoucher = firstVoucherNode(await parseXMLKeepText(liveXml, ["REFERENCE", "PARTYGSTIN"]));
+        const liveNumber = cleanText(liveVoucher?.VOUCHERNUMBER);
+        const liveDate = tallyDateToIso(liveVoucher?.DATE); // YYYY-MM-DD
+        if (!liveNumber || !/^\d{4}-\d{2}-\d{2}$/.test(liveDate || "")) {
+          throw new Error(
+            `Cannot update in Tally: voucher ${row.tally_master_id} was not found in Tally (it may have been deleted or cancelled there).`
+          );
+        }
+        alterTarget = {
+          voucher_number: liveNumber,
+          voucher_date: liveDate.split("-").reverse().join("-")
+        };
       }
 
       let xml = await generateXmlViaQueue("sales", {
@@ -668,7 +735,9 @@ const worker = new Worker(
 
         reference_date: row.invoice_date,
         reference_number: row.invoice_no,
-        voucher_type: "Sales Invoice"
+        voucher_type: "Sales Invoice",
+        alter_voucher_number: alterTarget?.voucher_number,
+        alter_voucher_date: alterTarget?.voucher_date
       });
 
       console.log("📤 Sales invoice XML generated", logCtx);

@@ -85,8 +85,13 @@ router.post("/sales-invoices", async (req, res) => {
       narration,
       // Optional. If the caller (e.g. the Review tab's retry) knows which row it
       // is re-pushing, it can send the id and we update that exact row.
-      invoice_id
+      invoice_id,
+      // Set only by the manual Create Sales Invoice screen. When true, after a
+      // successful push the invoice is read back from Tally so it can be
+      // printed. Bulk uploads never send it.
+      print_after_push
     } = req.body;
+    const printRequested = print_after_push === true;
 
     if (!company || !invoice_data) {
       return res.status(400).json({
@@ -372,6 +377,7 @@ router.post("/sales-invoices", async (req, res) => {
         SELECT id
         FROM app_test.sales_invoice_extractions
         WHERE company_id = $1
+          AND sync_status <> 'draft'
           AND LOWER(TRIM(customer_name)) = LOWER(TRIM($2))
           AND TRIM(invoice_date) = TRIM($3)
           AND (raw_json->>'grand_total')::numeric = $4
@@ -410,6 +416,31 @@ router.post("/sales-invoices", async (req, res) => {
 
       console.log(`Updating existing invoice: ${invoice_data.invoice_no || "(no invoice_no)"}`);
 
+      // An invoice that is already in Tally (or whose alter failed earlier) is
+      // re-pushed as an Alter of that voucher, addressed by its master id. Keep
+      // the Tally link instead of wiping it, otherwise it would be created again.
+      const alterCheck = await pool.query(
+        `
+        SELECT sync_status, tally_alter_pending, COALESCE(tally_master_id, '') <> '' AS has_master
+        FROM app_test.sales_invoice_extractions
+        WHERE id = $1
+        `,
+        [existingInvoice.rows[0].id]
+      );
+      const prior = alterCheck.rows[0] || {};
+      const isAlter = prior.has_master === true && (prior.sync_status === 'success' || prior.tally_alter_pending === true);
+
+      // Already in Tally but we never stored its voucher ID (pushed before IDs
+      // were saved): re-pushing would create a second voucher.
+      if (!isAlter && prior.sync_status === 'success') {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "This invoice was pushed before its Tally voucher ID was saved, so it can't be updated automatically. Edit it directly in Tally to avoid a duplicate."
+        });
+      }
+      if (isAlter) console.log(`Invoice ${existingInvoice.rows[0].id} will be altered in Tally`);
+
       // invoice_no is written here too, so a retry that supplies a corrected
       // number updates it. COALESCE/NULLIF keeps the stored number when the
       // retry sends a blank one, instead of wiping it.
@@ -429,6 +460,13 @@ router.post("/sales-invoices", async (req, res) => {
           error_message = NULL,
           gst_details = NULL,
           user_id = $7,
+          print_requested = $9,
+          tally_alter_pending = $10,
+          tally_master_id = CASE WHEN $10 THEN tally_master_id ELSE NULL END,
+          tally_voucher_number = CASE WHEN $10 THEN tally_voucher_number ELSE NULL END,
+          voucher_row_id = CASE WHEN $10 THEN voucher_row_id ELSE NULL END,
+          print_status = NULL,
+          print_error = NULL,
           updated_at = NOW()
         WHERE id = $8
         RETURNING id
@@ -441,7 +479,9 @@ router.post("/sales-invoices", async (req, res) => {
           cleanInvoiceData,
           invoice_data.invoice_no || "",
           userId,
-          existingInvoice.rows[0].id
+          existingInvoice.rows[0].id,
+          printRequested,
+          isAlter
         ]
       );
 
@@ -468,12 +508,13 @@ router.post("/sales-invoices", async (req, res) => {
           error_count,
           last_error,
           user_id,
+          print_requested,
           created_at,
           updated_at
         )
         VALUES
         (
-          $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0, NULL, $9, NOW(), NOW()
+          $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0, NULL, $9, $10, NOW(), NOW()
         )
         RETURNING id
         `,
@@ -490,7 +531,8 @@ router.post("/sales-invoices", async (req, res) => {
           invoice_data.invoice_date || "",
           invoice_data.godown_name ?? "Main Location",
           cleanInvoiceData,
-          userId
+          userId,
+          printRequested
         ]
       );
 
@@ -531,6 +573,119 @@ router.post("/sales-invoices", async (req, res) => {
 
   }
 
+});
+
+/*
+  POST /sales-invoices/draft
+  "Save Draft" on the Create Sales Invoice screen. Stores the form as-is in
+  sales_invoice_extractions with sync_status = 'draft'. A draft is never
+  queued, never sent to Tally and never touches balances or the vouchers table;
+  it only becomes a real invoice when the user later pushes it (POST
+  /sales-invoices with this row's invoice_id, which moves it to 'pending').
+  Re-saving updates the same draft; a row that is no longer a draft is refused
+  so a pushed invoice can't be rewound.
+*/
+router.post("/sales-invoices/draft", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const { company, invoice_data, invoice_id } = req.body;
+    if (!company || !invoice_data) {
+      return res.status(400).json({ status: "error", message: "company and invoice_data required" });
+    }
+
+    // Same ownership rule as the push route: the company must be paired to this user.
+    const companyResult = await pool.query(
+      `
+      SELECT c.id
+      FROM app_test.companies c
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = c.id
+      WHERE cpt.user_id = $1
+        AND cpt.is_used = TRUE
+        AND ${companyMatchSql("$2", "$3")}
+      ORDER BY c.id DESC
+      LIMIT 1
+      `,
+      [userId, company, requestedCompanyId(req)]
+    );
+    const companyId = companyResult.rows[0]?.id;
+    if (!companyId) {
+      return res.status(400).json({ status: "error", message: `Company '${company}' not found` });
+    }
+
+    const rawJson = JSON.parse(JSON.stringify(invoice_data));
+    const lineItems = Array.isArray(rawJson.line_items) ? rawJson.line_items : [];
+    const hasContent =
+      String(rawJson.customer_name || "").trim() ||
+      lineItems.some((item) => String(item?.item_name || "").trim());
+    if (!hasContent) {
+      return res.status(400).json({
+        status: "error",
+        message: "Enter a customer or at least one item before saving a draft."
+      });
+    }
+
+    const fields = [
+      rawJson.customer_name || "",
+      rawJson.customer_gstin || rawJson.gstin || "",
+      rawJson.invoice_date || "",
+      rawJson.godown_name ?? "Main Location",
+      rawJson,
+      userId
+    ];
+
+    let draftId;
+    if (invoice_id) {
+      const updated = await pool.query(
+        `
+        UPDATE app_test.sales_invoice_extractions
+        SET customer_name = $1, gstin = $2, invoice_date = $3, godown_name = $4,
+            raw_json = $5, user_id = $6, updated_at = NOW()
+        WHERE id = $7 AND company_id = $8 AND sync_status = 'draft'
+        RETURNING id
+        `,
+        [...fields, invoice_id, companyId]
+      );
+      if (updated.rows.length === 0) {
+        return res.status(409).json({
+          status: "error",
+          message: "This invoice is no longer a draft, so it can't be saved as one."
+        });
+      }
+      draftId = updated.rows[0].id;
+    } else {
+      // invoice_no stays NULL: drafts must not collide with the (company, invoice_no) unique rule.
+      const inserted = await pool.query(
+        `
+        INSERT INTO app_test.sales_invoice_extractions
+          (company_id, company_name, customer_name, gstin, invoice_no, invoice_date,
+           godown_name, raw_json, sync_status, error_count, last_error, user_id,
+           print_requested, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, 'draft', 0, NULL, $8, FALSE, NOW(), NOW())
+        RETURNING id
+        `,
+        [companyId, company.trim(), fields[0], fields[1], fields[2], fields[3], rawJson, userId]
+      );
+      draftId = inserted.rows[0].id;
+    }
+
+    return res.status(200).json({
+      status: "success",
+      message: "Draft saved",
+      invoice_id: draftId,
+      company_id: companyId,
+      sync_status: "draft"
+    });
+  } catch (err) {
+    console.error("POST /sales-invoices/draft error:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
 });
 
 router.get("/sales-invoices", async (req, res) => {
@@ -633,6 +788,68 @@ router.get("/sales-invoices", async (req, res) => {
     });
   }
 });
+/*
+  GET /sales-invoices/:id/print-status
+  Polled by the Create Sales Invoice screen after "Send to Tally". Reports the
+  push result plus, when print was requested, whether the voucher has been
+  read back from Tally yet (print_status: fetching | ready | failed) and the
+  vouchers.id to feed to GET /api/v1/voucher/:id/pdf.
+*/
+router.get("/sales-invoices/:id/print-status", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const invoiceId = Number(req.params.id);
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+      return res.status(400).json({ status: "error", message: "Invalid invoice id" });
+    }
+
+    // Same ownership rule as the push route: the caller must be paired to the
+    // invoice's company.
+    const result = await pool.query(
+      `
+      SELECT s.id, s.sync_status, s.error_message, s.print_requested,
+             s.print_status, s.print_error, s.tally_voucher_number, s.voucher_row_id
+      FROM app_test.sales_invoice_extractions s
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = s.company_id
+      WHERE s.id = $1
+        AND cpt.user_id = $2
+        AND cpt.is_used = TRUE
+      LIMIT 1
+      `,
+      [invoiceId, userId]
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      return res.status(404).json({ status: "error", message: "Invoice not found" });
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: {
+        invoice_id: row.id,
+        sync_status: row.sync_status,
+        error_message: row.error_message,
+        print_requested: row.print_requested,
+        print_status: row.print_status,
+        print_error: row.print_error,
+        voucher_number: row.tally_voucher_number,
+        voucher_row_id: row.voucher_row_id
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
 router.delete("/sales-invoice-delete", async (req, res) => {
   try {
     const userId = req.session
@@ -1279,7 +1496,7 @@ router.post("/sales-invoices/retry-batch", async (req, res) => {
       `
       SELECT id
       FROM app_test.sales_invoice_extractions
-      WHERE id = ANY($1) AND company_id = $2
+      WHERE id = ANY($1) AND company_id = $2 AND sync_status <> 'draft'
       `,
       [invoice_ids, companyId]
     );

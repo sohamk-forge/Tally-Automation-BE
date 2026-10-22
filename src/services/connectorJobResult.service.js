@@ -9,6 +9,7 @@
 // Requiring CREATED > 0 alone graded every alter job as failed even when
 // Tally had accepted it.
 import { storeLedgerEmbedding } from "./ledgerEmbedding.js";
+import { parseLastVoucherId } from "./voucherUpsert.service.js";
 
 function resolveTallyOutcome(responseXml, connectorError = null) {
   let finalStatus = "failed";
@@ -213,6 +214,52 @@ export async function processConnectorJobResult(client, job) {
           [finalStatus, response_xml || null, errorMessage, payload.invoice_id]
         );
 
+        // "Send to Tally and print" (manual Create screen only — print_requested
+        // is never set by bulk uploads): remember Tally's LASTVCHID so the
+        // finalize worker can read the voucher back. connector.routes.js
+        // enqueues that worker after this transaction commits.
+        if (finalStatus === "success") {
+          // An alter leaves the voucher's master id unchanged, so Tally may not
+          // return a new LASTVCHID; fall back to the one already stored.
+          const altered = await client.query(
+            `
+            UPDATE app_test.sales_invoice_extractions
+            SET tally_alter_pending = FALSE
+            WHERE id = $1 AND tally_alter_pending = TRUE
+            RETURNING tally_master_id
+            `,
+            [payload.invoice_id]
+          );
+          const lastVchId =
+            parseLastVoucherId(response_xml) || altered.rows[0]?.tally_master_id || null;
+          if (lastVchId) {
+            // Every successful push keeps its voucher ID: the post-invoice
+            // refresh job reads the voucher back with it to update balances.
+            await client.query(
+              `UPDATE app_test.sales_invoice_extractions SET tally_master_id = $1 WHERE id = $2`,
+              [lastVchId, payload.invoice_id]
+            );
+            await client.query(
+              `
+              UPDATE app_test.sales_invoice_extractions
+              SET print_status = 'fetching', print_error = NULL
+              WHERE id = $1 AND print_requested = TRUE
+              `,
+              [payload.invoice_id]
+            );
+          } else {
+            await client.query(
+              `
+              UPDATE app_test.sales_invoice_extractions
+              SET print_status = 'failed',
+                  print_error = 'Tally did not return a voucher ID for this invoice'
+              WHERE id = $1 AND print_requested = TRUE
+              `,
+              [payload.invoice_id]
+            );
+          }
+        }
+
         console.log(`✅ Sales Invoice ${payload.invoice_id} marked ${finalStatus}`);
         break;
       }
@@ -245,6 +292,17 @@ export async function processConnectorJobResult(client, job) {
           `,
           [finalStatus, response_xml || null, errorMessage, payload.invoice_id]
         );
+
+        // Kept so the post-invoice refresh job can read the voucher back.
+        if (finalStatus === "success") {
+          const lastVchId = parseLastVoucherId(response_xml);
+          if (lastVchId) {
+            await client.query(
+              `UPDATE app_test.invoice_extractions SET tally_master_id = $1 WHERE id = $2`,
+              [lastVchId, payload.invoice_id]
+            );
+          }
+        }
 
         console.log(`✅ Purchase Invoice ${payload.invoice_id} marked ${finalStatus}`);
         break;

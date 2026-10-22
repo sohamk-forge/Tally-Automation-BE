@@ -46,6 +46,10 @@ import "./workers/pushInvoice.worker.js";
 
 import "./workers/pushSalesInvoice.worker.js";
 
+import "./workers/finalizeSalesPrint.worker.js";
+
+import "./workers/postInvoiceRefresh.worker.js";
+
 import "./workers/pushAlterStockItem.worker.js";
 
 import "./workers/stockAlert.worker.js";

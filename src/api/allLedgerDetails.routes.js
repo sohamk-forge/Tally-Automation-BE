@@ -34,23 +34,44 @@ router.get("/", async (req, res) => {
 
       `
       SELECT
-        ledger_name,
-        parent_group,
-        gst_number,
-        state,
-        opening_balance,
-        closing_balance,
-        address,
-        primary_phone_number,
-        email,
-        pan_number,
-        gst_registration_type
+        l.ledger_name,
+        l.parent_group,
+        l.primary_group,
+        l.gst_number,
+        l.state,
+        l.opening_balance,
+        l.closing_balance,
+        l.address,
+        l.primary_phone_number,
+        l.email,
+        l.pan_number,
+        l.gst_registration_type,
+        COALESCE(t.txn_count, 0) AS txn_count
 
-      FROM ${DB_SCHEMA}.all_ledger_details
+      FROM ${DB_SCHEMA}.all_ledger_details l
 
-      WHERE company_id = $1 AND deleted_at IS NULL
+      -- Vouchers touching each ledger (as party or any ledger leg), the same match
+      -- LedgerDetail uses, so the list count equals the rows shown on the detail page.
+      LEFT JOIN (
+        SELECT x.k, COUNT(DISTINCT x.id)::int AS txn_count
+        FROM (
+          SELECT v.id, LOWER(TRIM(v.party_ledger_name)) AS k
+          FROM ${DB_SCHEMA}.vouchers v
+          WHERE v.company_id = $1 AND v.deleted_at IS NULL AND v.is_optional IS NOT TRUE
+          UNION ALL
+          SELECT v.id, LOWER(TRIM(e->>'LEDGERNAME'))
+          FROM ${DB_SCHEMA}.vouchers v
+          CROSS JOIN LATERAL jsonb_array_elements(v.ledger_entries) e
+          WHERE v.company_id = $1 AND v.deleted_at IS NULL AND v.is_optional IS NOT TRUE
+            AND jsonb_typeof(v.ledger_entries) = 'array'
+        ) x
+        WHERE x.k IS NOT NULL
+        GROUP BY x.k
+      ) t ON t.k = LOWER(TRIM(l.ledger_name))
 
-      ORDER BY ledger_name ASC
+      WHERE l.company_id = $1 AND l.deleted_at IS NULL
+
+      ORDER BY l.ledger_name ASC
       `,
 
       [companyId]

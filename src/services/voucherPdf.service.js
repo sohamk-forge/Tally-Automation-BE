@@ -426,12 +426,14 @@ const total = toNumber(row.debit_amount) || toNumber(row.credit_amount);
 
     return {
       ...base,
-      supplierInvoiceNo: pick(firstEntry, ["supplier_invoice_no", "reference"], ""),
+      // The vouchers row's own GST columns (filled by voucher sync) back up the
+      // ledger-entry fields, which Tally's export usually leaves empty.
+      supplierInvoiceNo: pick(firstEntry, ["supplier_invoice_no", "reference"], row.supplier_invoice_no || ""),
       buyerOrderNo: pick(firstEntry, ["buyer_order_no"], ""),
       supplierOrBuyerName: row.party_ledger_name || "",
       supplierOrBuyerAddress: pick(firstEntry, ["address"], ""),
-      gstin: pick(firstEntry, ["gstin", "party_gstin"], ""),
-      placeOfSupply: pick(firstEntry, ["place_of_supply"], companyInfo.state),
+      gstin: pick(firstEntry, ["gstin", "party_gstin"], row.party_gstin || ""),
+      placeOfSupply: pick(firstEntry, ["place_of_supply"], row.place_of_supply || companyInfo.state),
       items,
       additionalCharges,
       roundOff,

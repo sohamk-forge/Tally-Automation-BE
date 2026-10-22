@@ -1679,6 +1679,7 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
       <FETCH>VOUCHERNUMBER</FETCH>
       <FETCH>REFERENCE</FETCH>
       <FETCH>DATE</FETCH>
+      <FETCH>MASTERID</FETCH>
      </COLLECTION>
     </TDLMESSAGE>
    </TDL>
@@ -1704,7 +1705,7 @@ export const getVoucherNumberByMasterIdXML = (company, masterId) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
@@ -1796,6 +1797,116 @@ export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
       </TDL>
     </DESC>
     <DATA></DATA>
+  </BODY>
+</ENVELOPE>
+`;
+}
+
+// ---------------------------------------------------------------------------
+// Single-voucher fetches by master ID (LASTVCHID from the import response).
+// Used by "send to Tally and print" to pull the just-created Sales voucher
+// back so the existing voucher PDF can be rendered from the vouchers table.
+// fromDate/toDate are optional YYYYMMDD strings that pin the period.
+// ---------------------------------------------------------------------------
+const escapeXmlText = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const periodVariables = (fromDate, toDate) =>
+  fromDate && toDate
+    ? `<SVFROMDATE TYPE="Date">${fromDate}</SVFROMDATE>
+        <SVTODATE TYPE="Date">${toDate}</SVTODATE>`
+    : "";
+
+// Same collection and FETCH list as getLedgerVouchersXML, plus the master ID
+// filter and MASTERID/GUID/ALTERID so the row can be upserted by GUID.
+export function getLedgerVoucherByMasterIdXML(company, masterId, fromDate, toDate) {
+  const id = String(masterId).replace(/\D/g, "");
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>LedgerVoucherByMasterId</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${periodVariables(fromDate, toDate)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formulae" NAME="MasterIdMatch">$MasterID = ${id}</SYSTEM>
+          <COLLECTION NAME="LedgerVoucherByMasterId" ISMODIFY="No">
+            <TYPE>Voucher</TYPE>
+            <FILTERS>MasterIdMatch</FILTERS>
+            <FETCH>
+              DATE, VOUCHERTYPENAME, VOUCHERNUMBER, PARTYLEDGERNAME, NARRATION,
+              REFERENCE, REFERENCEDATE, PARTYGSTIN, PLACEOFSUPPLY,
+              ISCANCELLED, ISOPTIONAL, GUID, MASTERID, ALTERID,
+              ALLLEDGERENTRIES.LIST
+            </FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+}
+
+// Same dispatch/delivery fields as getSalesInvoiceDetailsXML for one voucher.
+export function getSalesInvoiceDetailsByMasterIdXML(company, masterId, fromDate, toDate) {
+  const id = String(masterId).replace(/\D/g, "");
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>SalesInvoiceDetailsByMasterId</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${periodVariables(fromDate, toDate)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formulae" NAME="MasterIdMatch">$MasterID = ${id}</SYSTEM>
+          <COLLECTION NAME="SalesInvoiceDetailsByMasterId" ISMODIFY="No">
+            <TYPE>Voucher</TYPE>
+            <FILTERS>MasterIdMatch</FILTERS>
+            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+            <NATIVEMETHOD>Date</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+            <NATIVEMETHOD>Reference</NATIVEMETHOD>
+            <NATIVEMETHOD>ReferenceDate</NATIVEMETHOD>
+            <NATIVEMETHOD>OtherReference</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicDueDateOfPymt</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicPurchaseOrderNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicOrderDate</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicOrderRef</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipDeliveryNote</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShippingDate</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipDocumentNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShippedBy</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipVesselNo</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipVesselDate</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipDestination</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicFinalDestination</NATIVEMETHOD>
+            <NATIVEMETHOD>BasicShipDeliveryTerms</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
   </BODY>
 </ENVELOPE>
 `;

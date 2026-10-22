@@ -420,22 +420,6 @@ const worker = new Worker(
         console.log(`✏️ Voucher ${voucherId} master names repaired to Tally spelling`, guard.repairs);
       }
       xml = guard.xml;
-      let xml = await runPythonForXml(payload);
-
-      // Payment / Receipt / Contra had no master check at all: a party or
-      // bank ledger missing from the target Tally company went straight in
-      // and came back as "Referenced master is missing". Block it here.
-      const guard = await guardVoucherXml({ companyId: voucher.company_id, xml });
-      if (!guard.ok) {
-        const message = `${formatGuardMessage(guard)} (blocked before reaching Tally)`;
-        console.warn(`⚠️ Voucher ${voucherId} blocked by XML master guard: ${message}`);
-        await setStatusForIds(memberIds, "FAILED", message);
-        return { voucherId, status: "failed", error: message };
-      }
-      if (guard.repairs.length) {
-        console.log(`✏️ Voucher ${voucherId} master names repaired to Tally spelling`, guard.repairs);
-      }
-      xml = guard.xml;
 
       // Route to the correct user's connector. user_id is stored
       // directly on the voucher row (set in voucher.routes.js at

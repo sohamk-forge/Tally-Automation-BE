@@ -8,6 +8,8 @@ import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
 import { resolveConnectorForCompany, getTallyStatusForKey, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
+import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
+import { safeEnqueuePostInvoiceRefresh } from "../queues/postInvoiceRefresh.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
@@ -412,6 +414,54 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     );
   }
 }
+
+    // =========================================
+    // SALES PRINT CHAIN
+    // Manual Create Sales Invoice only: connectorJobResult flagged the row
+    // print_status = 'fetching' (and committed it) when print was requested.
+    // =========================================
+    if (job.job_type === "sales_invoice" && job.payload?.invoice_id) {
+      try {
+        const { rows } = await pool.query(
+          `
+          SELECT id FROM ${DB_SCHEMA}.sales_invoice_extractions
+          WHERE id = $1 AND print_requested = TRUE AND print_status = 'fetching'
+          `,
+          [job.payload.invoice_id]
+        );
+        if (rows.length > 0) {
+          await safeEnqueueSalesPrint(rows[0].id);
+        }
+      } catch (chainError) {
+        console.error(
+          `⚠️ Failed to chain sales print for job ${jobId}:`,
+          chainError.message
+        );
+      }
+    }
+
+    // =========================================
+    // POST-INVOICE REFRESH
+    // A sales / purchase voucher is now in Tally: read it back and move the
+    // ledger / group balances so every page reflects it. The worker re-checks
+    // sync_status, so a failed push is skipped there.
+    // =========================================
+    if (
+      (job.job_type === "sales_invoice" || job.job_type === "purchase_invoice") &&
+      job.payload?.invoice_id
+    ) {
+      try {
+        await safeEnqueuePostInvoiceRefresh(
+          job.job_type === "sales_invoice" ? "sales" : "purchase",
+          job.payload.invoice_id
+        );
+      } catch (chainError) {
+        console.error(
+          `⚠️ Failed to queue post-invoice refresh for job ${jobId}:`,
+          chainError.message
+        );
+      }
+    }
 
     return res.status(200).json({
       status: "success",

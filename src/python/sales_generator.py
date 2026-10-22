@@ -256,7 +256,21 @@ tm.set("xmlns:UDF", "TallyUDF")
 
 vch = sub(tm, "VOUCHER")
 vch.set("VCHTYPE", "Sales")
-vch.set("ACTION",  "Create")
+alter_voucher_number = str(invoice.get("alter_voucher_number") or "").strip()
+alter_voucher_date   = str(invoice.get("alter_voucher_date") or "").strip()
+if alter_voucher_number and alter_voucher_date:
+    # Update the voucher already in Tally instead of creating a second one.
+    # This Tally resolves the existing voucher by its current date + number
+    # (verified live: REMOTEID/GUID/Master ID are ignored and cause a Create).
+    vch.set("DATE",     alter_voucher_date)
+    vch.set("TAGNAME",  "Voucher Number")
+    vch.set("TAGVALUE", alter_voucher_number)
+    vch.set("ACTION",   "Alter")
+else:
+    vch.set("ACTION",  "Create")
+
+if alter_voucher_number and alter_voucher_date:
+    sub(vch, "VOUCHERNUMBER", alter_voucher_number)
 
 sub(vch, "DATE",            date)
 sub(vch, "VCHSTATUSDATE",   date)

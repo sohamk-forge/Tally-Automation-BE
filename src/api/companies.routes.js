@@ -111,6 +111,43 @@ router.get("/", async (req, res) => {
 });
 
 /* =========================================
+   BALANCES VERSION (current user only)
+   Bumped each time a posted invoice moves the ledger / group balances. The frontend
+   polls this and refetches the Ledger, Dashboard and LedgerDetail pages when it changes.
+========================================= */
+router.get("/:id/balances-version", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ status: "error", message: "No profile found for this account" });
+    }
+
+    const companyId = Number(req.params.id);
+    if (!Number.isInteger(companyId)) {
+      return res.status(400).json({ status: "error", message: "Invalid company" });
+    }
+
+    const owned = await pool.query(
+      `SELECT 1 FROM ${DB_SCHEMA}.connector_pairing_tokens
+       WHERE company_id = $1 AND user_id = $2 AND is_used = TRUE LIMIT 1`,
+      [companyId, userId]
+    );
+    if (!owned.rows.length) {
+      return res.status(404).json({ status: "error", message: "Company not found" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT version FROM ${DB_SCHEMA}.company_balances_version WHERE company_id = $1`,
+      [companyId]
+    );
+    return res.status(200).json({ status: "success", version: Number(rows[0]?.version || 0) });
+  } catch (err) {
+    console.log("BALANCES VERSION ERROR:", err.message);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
    FINANCIAL-YEAR SUMMARY (current user only)
    The dashboard cards for ONE financial year, read from the profit & loss that the sync stored for that
    year (the dated "PROFIT & LOSS" step keeps one row per financial year).
