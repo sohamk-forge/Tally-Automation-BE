@@ -121,7 +121,9 @@ export function buildPurchaseExcelInvoice(invoiceNo, lines, { purchaseLedger, ve
     hsn_code: l.hsn_code || "",
     rate: billedQty ? roundTo2(billedTaxable / billedQty) : 0,
     amount: billedTaxable,
-    godown_name: l.godown_name || "",
+    // The Excel's Storage Bin / plant column (A-30, AA-19, …) is a bin code,
+    // not a Tally godown — never send it, so Tally books to Main Location.
+    godown_name: "",
     gst_rate: gstRate
   }));
 
@@ -145,7 +147,7 @@ export function buildPurchaseExcelInvoice(invoiceNo, lines, { purchaseLedger, ve
     purchase_ledger: purchaseLedger,
     po_numbers: poNumbers,
     odn_numbers: odnNumbers,
-    godown_name: first.godown_name || "",
+    godown_name: "",
     // Read by pushInvoice.worker.js — non-empty holds the invoice as
     // Needs Review instead of pushing. Cleared when a user saves the
     // invoice from the edit modal (PUT /invoices/:id).

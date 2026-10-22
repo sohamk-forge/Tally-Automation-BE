@@ -147,12 +147,14 @@ function normalizeVoucher(raw) {
       "voucher_no"
     ) || "-";
 
+  // "particulars" (the opposite ledger, set by the route) wins over the
+  // voucher's party ledger, which may be the statement's own ledger.
   const party =
     pick(
       raw,
+      "particulars",
       "party_ledger_name",
       "party",
-      "particulars",
       "partyLedgerName"
     ) || "-";
 
@@ -643,7 +645,7 @@ function detailRowHtml(row) {
    VOUCHER TABLE ROWS
    ========================================================================== */
 
-function buildTableRows(vouchers, mode) {
+function buildTableRows(vouchers, mode, ledgerName) {
   let runningDebit = 0;
   let runningCredit = 0;
 
@@ -721,14 +723,14 @@ function buildTableRows(vouchers, mode) {
                 }
 
                 /*
-                 * Remove duplicate party ledger only.
+                 * Remove the statement's own ledger only.
                  */
                 return (
                   String(row.label || "")
                     .trim()
                     .toLowerCase()
                   !==
-                  String(voucher.party || "")
+                  String(ledgerName || "")
                     .trim()
                     .toLowerCase()
                 );
@@ -737,7 +739,8 @@ function buildTableRows(vouchers, mode) {
 
 
         const particularsSuffix =
-          detailed && detailRows.length
+          detailed && detailRows.length &&
+          voucher.party !== "(as per details)"
             ? " (as per details)"
             : "";
 
@@ -865,7 +868,8 @@ function buildHtml({
     runningCredit,
   } = buildTableRows(
     vouchers,
-    mode
+    mode,
+    ledgerName
   );
 
 

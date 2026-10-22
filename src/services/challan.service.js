@@ -46,8 +46,12 @@ function toNum(v, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
+// Prefixed so a challan number can never be mistaken for (or collide with) a
+// quotation number — both sequences count up from 1.
+const CHALLAN_NO_PREFIX = "DC No. ";
+
 function formatChallanNo(seq) {
-  return String(seq).padStart(CHALLAN_PAD_LENGTH, "0");
+  return `${CHALLAN_NO_PREFIX}${String(seq).padStart(CHALLAN_PAD_LENGTH, "0")}`;
 }
 
 function normalizeMovementType(movementType) {
@@ -181,6 +185,19 @@ function computeTotals(computedItems) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function getOrInitSettings(client, companyId) {
+  // Create the row if it's missing, tolerating a concurrent create: two
+  // challans being created at once for a company's very first challan both
+  // used to try a plain INSERT here and the loser died on the unique key.
+  // After this the row always exists, and the FOR UPDATE below serialises
+  // everyone who then allocates a number.
+  await client.query(
+    `INSERT INTO ${DB_SCHEMA}.challan_settings
+       (company_id, prefix, pad_length, last_number, updated_at)
+     VALUES ($1, '', $2, 0, NOW())
+     ON CONFLICT (company_id) DO NOTHING`,
+    [companyId, CHALLAN_PAD_LENGTH]
+  );
+
   const settingsRes = await client.query(
     `SELECT * FROM ${DB_SCHEMA}.challan_settings
      WHERE company_id = $1
@@ -210,15 +227,9 @@ async function getOrInitSettings(client, companyId) {
     return settingsRes.rows[0];
   }
 
-  const insertRes = await client.query(
-    `INSERT INTO ${DB_SCHEMA}.challan_settings
-       (company_id, prefix, pad_length, last_number, updated_at)
-     VALUES ($1, '', $2, 0, NOW())
-     RETURNING *`,
-    [companyId, CHALLAN_PAD_LENGTH]
-  );
-
-  return insertRes.rows[0];
+  // Unreachable in practice (the row was just ensured above); kept as a clear
+  // failure rather than returning undefined to the caller.
+  throw new Error(`challan_settings row missing for company ${companyId}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -815,7 +826,9 @@ export async function updateChallanStatus(challanId, companyId, status) {
 // to the company so numbers can't collide across tenants.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function markChallansInvoiced(companyId, challanNumbers) {
+// customerName (optional) additionally requires the challan to belong to that
+// customer — used when the caller can't say for sure the number is a challan's.
+export async function markChallansInvoiced(companyId, challanNumbers, customerName = null) {
   const numbers = [...new Set((challanNumbers || []).map((n) => String(n || "").trim()).filter(Boolean))];
   if (!numbers.length) return 0;
 
@@ -823,8 +836,9 @@ export async function markChallansInvoiced(companyId, challanNumbers) {
     `UPDATE ${DB_SCHEMA}.challans
      SET status = 'INVOICED', updated_at = NOW()
      WHERE company_id = $1 AND challan_number = ANY($2)
+       AND ($3::text IS NULL OR LOWER(TRIM(customer_name)) = LOWER(TRIM($3)))
      RETURNING id`,
-    [companyId, numbers]
+    [companyId, numbers, customerName]
   );
 
   return result.rowCount;

@@ -15,6 +15,7 @@ import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { buildLedgerPdf } from "../services/ledger-pdf.service.js";
+import { ledgerSideOf } from "../utils/ledgerSide.js";
 
 const router = express.Router();
 
@@ -251,6 +252,7 @@ router.get("/", async (req, res) => {
         WHERE company_id = $1
           AND DATE(voucher_date) BETWEEN $2 AND $3
           AND deleted_at IS NULL
+          AND is_optional IS NOT TRUE
 
         ORDER BY
           voucher_date ASC,
@@ -294,7 +296,12 @@ router.get("/", async (req, res) => {
     /* Safely prepare vouchers                                                 */
     /* ---------------------------------------------------------------------- */
 
-    const vouchers = matchedRows.map((row) => ({
+    // Stored debit/credit are the party ledger's side; a statement needs
+    // this ledger's own side, as in Tally (see ledgerSide.js).
+    const vouchers = matchedRows.map((row) => {
+      const side = ledgerSideOf(row.ledger_entries_raw, ledgerName);
+
+      return {
       id: row.id,
 
       voucher_date: row.voucher_date,
@@ -305,11 +312,14 @@ router.get("/", async (req, res) => {
 
       party_ledger_name: row.party_ledger_name,
 
+      // Opposite ledger ("(as per details)" when several), as Tally shows.
+      particulars: side?.particulars ?? row.party_ledger_name,
+
       narration: row.narration,
 
-      debit: Number(row.debit) || 0,
+      debit: side ? side.debit : Number(row.debit) || 0,
 
-      credit: Number(row.credit) || 0,
+      credit: side ? side.credit : Number(row.credit) || 0,
 
       company_name: row.company_name,
 
@@ -319,7 +329,8 @@ router.get("/", async (req, res) => {
       ledger_entries: safeParseLedgerEntries(
         row.ledger_entries_raw
       ),
-    }));
+      };
+    });
 
 
     /* ---------------------------------------------------------------------- */

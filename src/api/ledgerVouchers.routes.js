@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
+import { ledgerSideOf } from "../utils/ledgerSide.js";
 const router = express.Router();
 
 /* ===================================================
@@ -151,22 +152,26 @@ AND deleted_at IS NULL
 
       /* =========================================
          PARTY FILTER
+         Exact (case/space-insensitive) ledger match, like Tally — a
+         substring match would pull in e.g. "Idbi Bank OD" for "Idbi Bank".
+         Optional vouchers don't post to ledgers in Tally.
       ========================================= */
-if (
-
+const hasParty =
   party &&
   party !== "undefined" &&
-  party !== "null"
+  party !== "null";
 
-) {
+if (hasParty) {
 
   query +=
 
     `
+    AND is_optional IS NOT TRUE
+
     AND (
 
-      LOWER(party_ledger_name)
-      LIKE LOWER($${paramIndex})
+      LOWER(TRIM(party_ledger_name))
+      = LOWER(TRIM($${paramIndex}))
 
       OR EXISTS (
 
@@ -176,11 +181,11 @@ if (
           ledger_entries
         ) e
 
-        WHERE LOWER(
+        WHERE LOWER(TRIM(
           e->>'LEDGERNAME'
-        )
+        ))
 
-        LIKE LOWER($${paramIndex})
+        = LOWER(TRIM($${paramIndex}))
 
       )
 
@@ -188,7 +193,7 @@ if (
     `;
 
   values.push(
-    `%${party}%`
+    party
   );
 
   paramIndex++;
@@ -229,6 +234,37 @@ if (
       );
 
       /* =========================================
+         PER-LEDGER DEBIT / CREDIT
+         Stored amounts are the party ledger's side; for a ledger
+         statement show the viewed ledger's own side (see ledgerSide.js).
+      ========================================= */
+
+      const rows = hasParty
+
+        ? result.rows.map((row) => {
+
+            const side = ledgerSideOf(
+              row.ledger_entries,
+              party
+            );
+
+            if (!side) {
+              return { ...row, particulars: null };
+            }
+
+            return {
+              ...row,
+              debit_amount: side.debit.toFixed(2),
+              credit_amount: side.credit.toFixed(2),
+              balance: (side.debit - side.credit).toFixed(2),
+              particulars: side.particulars
+            };
+
+          })
+
+        : result.rows;
+
+      /* =========================================
          SUCCESS RESPONSE
       ========================================= */
 
@@ -246,10 +282,10 @@ if (
         toDate,
 
         total:
-          result.rows.length,
+          rows.length,
 
         data:
-          result.rows
+          rows
 
       });
 

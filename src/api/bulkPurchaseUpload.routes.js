@@ -100,6 +100,24 @@ async function getSelectedPurchaseLedger(companyId) {
   return result.rows[0]?.purchase_excel_ledger?.trim() || null;
 }
 
+// A newly onboarded company has no Ledger Mapping (company_ledger_mappings
+// .purchase_ledger) until it's set up; Purchase Excel uploads are blocked
+// until then.
+const PURCHASE_MAPPING_REQUIRED_MESSAGE =
+  "Purchase ledger mapping is not set up for this company. Complete the Ledger Mapping first, then upload.";
+
+async function hasPurchaseLedgerMapping(companyId) {
+  const result = await pool.query(
+    `SELECT purchase_ledger, invoice_parent_group FROM ${DB_SCHEMA}.company_ledger_mappings WHERE company_id = $1`,
+    [companyId]
+  );
+  // The Ledger Mapping screen saves the purchase group as invoice_parent_group
+  // (purchase_ledger is only filled later, from an invoice review) — either
+  // one counts as a completed mapping.
+  const row = result.rows[0];
+  return Boolean(row?.invoice_parent_group?.trim() || row?.purchase_ledger?.trim());
+}
+
 // Only ledgers that really sit under Purchase Accounts are accepted — the
 // list is re-read on the server, never trusted from the browser.
 async function savePurchaseExcelLedger(companyId, requested) {
@@ -171,6 +189,11 @@ router.post(
       if (!(await requireFeature(companyId, FEATURE_KEY, res))) {
         fs.unlink(req.file.path, () => {});
         return;
+      }
+
+      if (!(await hasPurchaseLedgerMapping(companyId))) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ status: "error", message: PURCHASE_MAPPING_REQUIRED_MESSAGE });
       }
 
       // The ledger picked in the upload dialog is saved first; a report
@@ -299,12 +322,13 @@ router.get("/bulk-purchase-upload/purchase-ledgers", verifySession(), async (req
 
     if (!(await requireFeature(companyId, FEATURE_KEY, res))) return;
 
-    const [ledgers, selected] = await Promise.all([
+    const [ledgers, selected, mapped] = await Promise.all([
       listPurchaseLedgers(companyId),
-      getSelectedPurchaseLedger(companyId)
+      getSelectedPurchaseLedger(companyId),
+      hasPurchaseLedgerMapping(companyId)
     ]);
 
-    return res.status(200).json({ status: "success", ledgers, selected });
+    return res.status(200).json({ status: "success", ledgers, selected, mapped });
   } catch (error) {
     console.error("Purchase ledgers list error:", error);
     return res.status(500).json({ status: "error", message: error.message });

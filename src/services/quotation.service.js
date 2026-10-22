@@ -62,8 +62,12 @@ function normalizeDate(v) {
   return trimmed === "" ? null : trimmed;
 }
 
+// Prefixed so a quotation number can never be mistaken for (or collide with) a
+// delivery challan number — both sequences count up from 1.
+const QUOTATION_NO_PREFIX = "Quote:#";
+
 function formatQuotationNo(seq) {
-  return String(seq).padStart(QUOTATION_PAD_LENGTH, "0");
+  return `${QUOTATION_NO_PREFIX}${String(seq).padStart(QUOTATION_PAD_LENGTH, "0")}`;
 }
 
 // versionSeq = 0 -> just the base number (the root/original quotation)
@@ -672,7 +676,9 @@ export async function updateQuotationStatus(quotationId, companyId, status) {
 // (approved) quotations transition — mirrors challan.service.js#markChallansInvoiced.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function markQuotationsPushed(companyId, quotationNumbers) {
+// customerName (optional) additionally requires the quotation to belong to that
+// customer — used when the caller can't say for sure the number is a quotation's.
+export async function markQuotationsPushed(companyId, quotationNumbers, customerName = null) {
   const numbers = [...new Set((quotationNumbers || []).map((n) => String(n || "").trim()).filter(Boolean))];
   if (!numbers.length) return 0;
 
@@ -680,8 +686,9 @@ export async function markQuotationsPushed(companyId, quotationNumbers) {
     `UPDATE ${DB_SCHEMA}.quotations
      SET status = 'PUSHED_TO_TALLY', pushed_to_tally_at = NOW(), updated_at = NOW()
      WHERE company_id = $1 AND quotation_number = ANY($2) AND status = 'FINAL'
+       AND ($3::text IS NULL OR LOWER(TRIM(customer_name)) = LOWER(TRIM($3)))
      RETURNING id`,
-    [companyId, numbers]
+    [companyId, numbers, customerName]
   );
 
   return result.rowCount;

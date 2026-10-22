@@ -449,11 +449,6 @@ function buildHtml(quotation) {
 
   const gstEnabled = quotation.gst_enabled ?? true;
 
-  const versionSeq = Number(quotation.version_seq) || 0;
-  const isRevision = versionSeq > 0;
-
-  const baseNumber = String(quotation_number || "").split(".")[0];
-
   // ----------------------------------------------------------
   // Calculate totals from items
   // ----------------------------------------------------------
@@ -507,16 +502,6 @@ function buildHtml(quotation) {
 
   <div class="doc-title-bar">
     QUOTATION
-    ${
-      isRevision
-        ? `
-          <span class="revision-badge">
-            REVISION ${String(versionSeq).padStart(2, "0")}
-            · OF ${esc(baseNumber)}
-          </span>
-        `
-        : ""
-    }
   </div>
 
   <!-- =====================================================
@@ -724,7 +709,6 @@ function buildHtml(quotation) {
 
   <div class="footer">
     This is a Computer Generated Quotation
-    ${isRevision ? ` (Revision ${String(versionSeq).padStart(2, "0")})` : ""}
   </div>
 
 </div>

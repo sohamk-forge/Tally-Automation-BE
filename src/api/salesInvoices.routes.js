@@ -5,8 +5,7 @@ import { checkCompanyAccess, validateCompanyId } from "../utils/companyAccess.js
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { ownedCompaniesSql } from "../middleware/companyAccess.middleware.js";
 import { salesQueue, getSalesJobId, safeEnqueueSales } from "../queues/sales.queue.js";
-import { markChallansInvoiced } from "../services/challan.service.js";
-import { markQuotationsPushed } from "../services/quotation.service.js";
+import { markBilledDocuments } from "../services/billedDocuments.service.js";
 import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 import { normName, pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
@@ -355,6 +354,17 @@ router.post("/sales-invoices", async (req, res) => {
     } else {
 
       matchedBy = "content";
+      // The challans/quotations an invoice is billed against are part of its
+      // content too: without this, pushing quotation 0003 for the same
+      // customer, date and total as an already-pushed quotation 0002 would
+      // overwrite 0002's invoice row instead of creating a new one. Keyed as
+      // "source:number", sorted by code point (COLLATE "C" in SQL matches JS
+      // sort) so the order the bills were selected in doesn't matter.
+      const billedKeys = (invoice_data.delivery_challans || [])
+        .filter((dc) => dc?.number)
+        .map((dc) => `${dc.source || "challan"}:${dc.number}`)
+        .sort();
+
       // ORDER BY id ASC so we land on the ORIGINAL row, not a duplicate that a
       // previous run may already have created.
       existingInvoice = await pool.query(
@@ -365,6 +375,17 @@ router.post("/sales-invoices", async (req, res) => {
           AND LOWER(TRIM(customer_name)) = LOWER(TRIM($2))
           AND TRIM(invoice_date) = TRIM($3)
           AND (raw_json->>'grand_total')::numeric = $4
+          AND COALESCE((
+            SELECT jsonb_agg(k ORDER BY k COLLATE "C")
+            FROM (
+              SELECT COALESCE(dc->>'source', 'challan') || ':' || (dc->>'number') AS k
+              FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(raw_json->'delivery_challans') = 'array'
+                     THEN raw_json->'delivery_challans' ELSE '[]'::jsonb END
+              ) dc
+              WHERE COALESCE(dc->>'number', '') <> ''
+            ) keys
+          ), '[]'::jsonb) = $5::jsonb
         ORDER BY id ASC
         LIMIT 1
         `,
@@ -372,7 +393,8 @@ router.post("/sales-invoices", async (req, res) => {
           companyId,
           invoice_data.customer_name || "",
           invoice_data.invoice_date || "",
-          cleanInvoiceData.grand_total
+          cleanInvoiceData.grand_total,
+          JSON.stringify(billedKeys)
         ]
       );
 
@@ -479,32 +501,10 @@ router.post("/sales-invoices", async (req, res) => {
     const { jobId, action } = await safeEnqueueSales(invoiceId, userId);
     console.log(`Sales Invoice Queued: ${invoiceId} (job ${jobId}, ${action})`);
 
-    // Whatever delivery challans this invoice was billed against should drop
-    // out of "Bills to be Made" now that they've been invoiced.
-    const deliveryChallanNumbers = (invoice_data.delivery_challans || [])
-      .map((dc) => dc?.number)
-      .filter(Boolean);
-
-    if (deliveryChallanNumbers.length) {
-      try {
-        const marked = await markChallansInvoiced(companyId, deliveryChallanNumbers);
-        console.log(`Marked ${marked} challan(s) as invoiced:`, deliveryChallanNumbers);
-      } catch (markErr) {
-        // Non-fatal — the invoice itself already succeeded and is queued.
-        console.error("Failed to mark challans as invoiced:", markErr.message);
-      }
-
-      // The same "number" list may instead be an approved quotation's
-      // quotation_number (Bills to be Made also queues FINAL quotations) —
-      // this only matches rows in the quotations table, so it's a no-op
-      // whenever the numbers above were real delivery challans.
-      try {
-        const pushed = await markQuotationsPushed(companyId, deliveryChallanNumbers);
-        console.log(`Marked ${pushed} quotation(s) as pushed to Tally:`, deliveryChallanNumbers);
-      } catch (markErr) {
-        console.error("Failed to mark quotations as pushed to Tally:", markErr.message);
-      }
-    }
+    // Whatever delivery challans / approved quotations this invoice was billed
+    // against should drop out of "Bills to be Made" now that they've been
+    // invoiced (see billedDocuments.service.js for the matching rules).
+    await markBilledDocuments(companyId, invoice_data.delivery_challans, invoice_data.customer_name);
 
     return res.status(200).json({
       status: "success",

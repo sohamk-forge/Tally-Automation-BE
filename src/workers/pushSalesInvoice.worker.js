@@ -15,6 +15,7 @@ import { parseXML } from "../services/parser.js";
 import { resolveStateName, normalizeStateName } from "../utils/gstState.js";
 import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 import { SAP_UPLOAD_SOURCE, checkSapSalesInvoice } from "../services/salesSapBilling.js";
+import { guardVoucherXml, buildInvoiceFailure } from "../services/voucherMastersGuard.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -649,7 +650,7 @@ const worker = new Worker(
         }
       }
 
-      const xml = await generateXmlViaQueue("sales", {
+      let xml = await generateXmlViaQueue("sales", {
         ...invoice,
 
         company: row.company_name,
@@ -671,6 +672,25 @@ const worker = new Worker(
       });
 
       console.log("📤 Sales invoice XML generated", logCtx);
+
+      // Final guardrail: check every master the generated XML actually names
+      // (per-line ledger overrides, auto round-off, godowns, blank mappings)
+      // — the checks above only see the invoice JSON. Anything Tally would
+      // reject as "Referenced master is missing" stops here.
+      const guard = await guardVoucherXml({ companyId: row.company_id, xml });
+      if (!guard.ok) {
+        const failure = buildInvoiceFailure(guard);
+        console.error("❌ Sales invoice blocked by XML master guard", { ...logCtx, message: failure.message });
+        await pool.query(
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`,
+          [failure.syncStatus, failure.errorMessage, salesId]
+        );
+        return { salesId, status: "failed", error: failure.message };
+      }
+      if (guard.repairs.length) {
+        console.log("✏️ Master names repaired to Tally spelling", { ...logCtx, repairs: guard.repairs });
+      }
+      xml = guard.xml;
 
       // Routed by company, with userId passed through so
       // resolveConnectorForCompany() can prefer the requesting user's own

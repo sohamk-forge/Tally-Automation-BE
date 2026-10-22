@@ -55,6 +55,9 @@ router.get("/closing-balance", async (req, res) => {
       company,
       stock_value: Math.abs(Number(closing_balance)),
       opening_stock_value: Math.abs(Number(opening_balance)),
+      // Dr-positive: stock in credit (negative stock) comes out negative.
+      // stock_value above stays unsigned for the Inventory pages.
+      stock_value_signed: -(Number(closing_balance) || 0),
       last_synced_at: updated_at,
       source: "database"
     });

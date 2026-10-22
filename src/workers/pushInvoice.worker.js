@@ -12,6 +12,7 @@ import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 import { resolveMappedLedger } from "../services/vendorLedgerMapping.service.js";
 import { checkPurchaseExcelInvoice } from "../services/purchaseExcelBilling.js";
 import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
+import { guardVoucherXml, buildInvoiceFailure } from "../services/voucherMastersGuard.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -440,7 +441,7 @@ const worker = new Worker(
         console.log(`🗺️ No vendor GSTIN — ledger state fallback for "${partyName}":`, ledgerFallback);
       }
 
-      const xml = await generateXmlViaQueue("purchase", {
+      let xml = await generateXmlViaQueue("purchase", {
         ...invoice,
 
         ...(ledgerFallback.state ? { vendor_state: ledgerFallback.state } : {}),
@@ -482,6 +483,24 @@ const worker = new Worker(
 
       console.log(`📤 Purchase invoice XML generated: ${row.invoice_no}`);
       console.log(`🔍 XML:\n${xml}`);
+
+      // Final guardrail: validate every master the generated XML actually
+      // names (per-line ledger overrides, auto round-off, godowns, blank
+      // mappings) — validatePurchaseInvoice only sees the invoice JSON.
+      const guard = await guardVoucherXml({ companyId: row.company_id, xml });
+      if (!guard.ok) {
+        const failure = buildInvoiceFailure(guard);
+        console.warn(`⚠️ Purchase invoice blocked by XML master guard: ${row.invoice_no}`, failure.message);
+        await pool.query(
+          `UPDATE app_test.invoice_extractions SET sync_status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`,
+          [failure.syncStatus, failure.errorMessage, invoiceId]
+        );
+        return { invoiceId, status: "failed", error: failure.message };
+      }
+      if (guard.repairs.length) {
+        console.log(`✏️ Master names repaired to Tally spelling: ${row.invoice_no}`, guard.repairs);
+      }
+      xml = guard.xml;
 
       const connector = await resolveConnectorForCompany(
         row.company_id,

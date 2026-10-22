@@ -1396,40 +1396,37 @@ export const getPurchaseSalesLedgersXML = (company) => `
 
 export const getGodownsXML = (company) => {
 
+  // Collection export of every Godown master (incl. sub-godowns and ones with
+  // no stock). The old "Godown Summary" report only listed godowns it chose to
+  // display, so newly created / nested godowns never reached the cache.
   return `
 <ENVELOPE>
   <HEADER>
-    <TALLYREQUEST>Export Data</TALLYREQUEST>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>List of Godowns</ID>
   </HEADER>
-
   <BODY>
-
-    <EXPORTDATA>
-
-      <REQUESTDESC>
-
-        <REPORTNAME>
-          Godown Summary
-        </REPORTNAME>
-
-        <STATICVARIABLES>
-
-          <SVEXPORTFORMAT>
-            $$SysName:XML
-          </SVEXPORTFORMAT>
-
-          <SVCURRENTCOMPANY>
-            ${company}
-          </SVCURRENTCOMPANY>
-
-        </STATICVARIABLES>
-
-      </REQUESTDESC>
-
-    </EXPORTDATA>
-
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>
+          ${company}
+        </SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>
+          $$SysName:XML
+        </SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="List of Godowns">
+            <TYPE>Godown</TYPE>
+            <FETCH>NAME</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
   </BODY>
-
 </ENVELOPE>
 `;
 
@@ -1689,7 +1686,50 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
  </BODY>
 </ENVELOPE>
   `;
-};export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
+};
+
+// Read-back of the auto-generated voucher number: Tally's import response
+// only carries LASTVCHID (the voucher's master ID), not its number. This
+// looks the voucher up by that master ID, which is unique, unlike Reference.
+export const getVoucherNumberByMasterIdXML = (company, masterId) => {
+  const id = String(masterId).replace(/\D/g, "");
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>VchNumByMasterId</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="MasterIdMatch">
+      $MasterID = ${id}
+     </SYSTEM>
+     <COLLECTION NAME="VchNumByMasterId">
+      <TYPE>Voucher</TYPE>
+      <FILTERS>MasterIdMatch</FILTERS>
+      <FETCH>VOUCHERNUMBER</FETCH>
+      <FETCH>VOUCHERTYPENAME</FETCH>
+      <FETCH>REFERENCE</FETCH>
+      <FETCH>DATE</FETCH>
+      <FETCH>MASTERID</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
+};
+
+export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
   return `
 <ENVELOPE>
   <HEADER>

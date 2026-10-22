@@ -190,6 +190,9 @@ import trendsRouter
 import topSalesLedgersRouter
  from "./api/topSalesLedgers.js";
 
+import cashBankBalanceRouter
+ from "./api/cashBankBalance.routes.js";
+
 import monthlySalesTrendRouter
  from "./api/monthlySalesTrend.js";
 
@@ -637,6 +640,8 @@ app.use("/api/v1/stock", ...requireSessionAndCompany(), stockInHandRoutes);
 app.use("/api/v1/trends", ...requireSessionAndCompany(), trendsRouter);
 
 app.use("/api/v1", ...requireSessionAndCompany(), topSalesLedgersRouter);
+
+app.use("/api/v1", ...requireSessionAndCompany(), cashBankBalanceRouter);
 
 app.use("/api/v1", ...requireSessionAndCompany(), monthlySalesTrendRouter);
 

@@ -31,7 +31,9 @@ router.get("/closing-balance", async (req, res) => {
     });
   }
 
-  const closingBalance = Math.abs(Number(result.rows[0].closing_balance) || 0);
+  // Tally stores Dr as negative; purchases are a Dr balance, so negate to get
+  // a positive figure. A net Cr (returns > purchases) stays negative.
+  const closingBalance = -(Number(result.rows[0].closing_balance) || 0);
 
   return res.status(200).json({
     success: true,

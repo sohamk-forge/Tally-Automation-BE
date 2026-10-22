@@ -11,7 +11,7 @@ async function renderPdf(res, quotation) {
   res.status(200);
   res.set({
     "Content-Type": "application/pdf",
-    "Content-Disposition": `inline; filename="Quotation-${quotation.quotation_number}.pdf"`,
+    "Content-Disposition": `inline; filename="Quotation-${String(quotation.quotation_number).replace(/[^\w.-]+/g, "_")}.pdf"`,
     "Content-Length": pdfBuffer.length,
   });
 

@@ -94,22 +94,89 @@ const clean = (value) => {
     .trim();
 };
 
-const cleanBalance = (value) => {
-  if (!value) return 0;
-  const cleaned = String(value)
-    .replace(/[^\d.-]/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
-  return cleaned.length ? Number(cleaned[cleaned.length - 1]) : 0;
+/* ===================================================
+  TALLY AMOUNTS — signed, negative = Dr, positive = Cr
+  ---------------------------------------------------
+  Tally normally sends a plain signed number ("-9302.13", which
+  fast-xml-parser hands back as a number), but formatted values also
+  occur: Indian grouping ("-1,23,456.00"), an explicit side
+  ("1,234.00 Dr"), or a forex amount ("-$100.00 @ ₹80.00/$ = -₹8000.00",
+  where the LAST figure is the base-currency amount). The old parsers
+  split on commas/symbols and kept only the last chunk, so
+  "-1,23,456.00" became +456 — wrong size AND side.
+=================================================== */
+const parseTallyAmount = (value) => {
+  if (Array.isArray(value)) value = value[0];
+  if (value && typeof value === "object") value = value["#text"] ?? value._ ?? "";
+  if (value === null || value === undefined || value === "") return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+
+  const str = String(value).replace(/,/g, "").trim();
+  const numbers = str.match(/\d+(?:\.\d+)?/g);
+  if (!numbers?.length) return 0;
+  const magnitude = Number(numbers[numbers.length - 1]);
+
+  // An explicit Dr/Cr wins; otherwise a leading minus (currency symbols
+  // may sit between it and the digits) or a minus right before the
+  // last figure means Dr.
+  let negative;
+  if (/\bDr\b/i.test(str)) negative = true;
+  else if (/\bCr\b/i.test(str)) negative = false;
+  else negative = /^-/.test(str) || /-[^\d-]*\d+(?:\.\d+)?\s*$/.test(str);
+  return negative ? -magnitude : magnitude;
 };
 
-const parseAmount = (value) => {
-  if (!value) return 0;
-  const matches = String(value).replace(/,/g, "").match(/-?\d+(\.\d+)?/g);
-  if (!matches?.length) return 0;
-  return Number(matches[matches.length - 1]);
+// Dr/Cr follows the sign of the amount Tally sent — never a fixed side.
+// A zero balance has no side, so it stores NULL instead of "Cr".
+const balanceTypeOf = (amount) => {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.005) return null;
+  return n < 0 ? "Dr" : "Cr";
+/* ===================================================
+  TALLY AMOUNTS — signed, negative = Dr, positive = Cr
+  ---------------------------------------------------
+  Tally normally sends a plain signed number ("-9302.13", which
+  fast-xml-parser hands back as a number), but formatted values also
+  occur: Indian grouping ("-1,23,456.00"), an explicit side
+  ("1,234.00 Dr"), or a forex amount ("-$100.00 @ ₹80.00/$ = -₹8000.00",
+  where the LAST figure is the base-currency amount). The old parsers
+  split on commas/symbols and kept only the last chunk, so
+  "-1,23,456.00" became +456 — wrong size AND side.
+=================================================== */
+const parseTallyAmount = (value) => {
+  if (Array.isArray(value)) value = value[0];
+  if (value && typeof value === "object") value = value["#text"] ?? value._ ?? "";
+  if (value === null || value === undefined || value === "") return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+
+  const str = String(value).replace(/,/g, "").trim();
+  const numbers = str.match(/\d+(?:\.\d+)?/g);
+  if (!numbers?.length) return 0;
+  const magnitude = Number(numbers[numbers.length - 1]);
+
+  // An explicit Dr/Cr wins; otherwise a leading minus (currency symbols
+  // may sit between it and the digits) or a minus right before the
+  // last figure means Dr.
+  let negative;
+  if (/\bDr\b/i.test(str)) negative = true;
+  else if (/\bCr\b/i.test(str)) negative = false;
+  else negative = /^-/.test(str) || /-[^\d-]*\d+(?:\.\d+)?\s*$/.test(str);
+  return negative ? -magnitude : magnitude;
 };
+
+// Dr/Cr follows the sign of the amount Tally sent — never a fixed side.
+// A zero balance has no side, so it stores NULL instead of "Cr".
+const balanceTypeOf = (amount) => {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.005) return null;
+  return n < 0 ? "Dr" : "Cr";
+};
+
+const cleanBalance = parseTallyAmount;
+const parseAmount = parseTallyAmount;
+
+const cleanBalance = parseTallyAmount;
+const parseAmount = parseTallyAmount;
 
 /* ===================================================
   COMPANY ID HELPER
@@ -843,8 +910,10 @@ router.get("/group-summary-bank", async (req, res) => {
       const phoneNumber = clean(ledger?.PHONE || ledger?.PHONENUMBER || ledger?.LEDGERPHONE);
       const primaryPhoneNumber = clean(ledger?.MOBILE || ledger?.MOBILENUMBER || ledger?.LEDGERMOBILE);
       const gstNumber = clean(ledger?.PARTYGSTIN || ledger?.GSTIN);
-      const openingBalanceType = Number(openingBalance) < 0 ? "Dr" : "Cr";
-      const closingBalanceType = Number(closingBalance) < 0 ? "Dr" : "Cr";
+      const openingBalanceType = balanceTypeOf(openingBalance);
+      const closingBalanceType = balanceTypeOf(closingBalance);
+      const openingBalanceType = balanceTypeOf(openingBalance);
+      const closingBalanceType = balanceTypeOf(closingBalance);
 
       const result = await upsertRecord(
         "app_test.bank_accounts", guid, masterId, alterId,
@@ -1633,7 +1702,8 @@ router.get("/payable-debtors", async (req, res) => {
         const reservedNameOf = (g) => g?.["@_RESERVEDNAME"] ?? g?.$?.RESERVEDNAME ?? g?.["@RESERVEDNAME"];
         group =
           group.find(g => reservedNameOf(g) === fallbackLabel) ||
-          group.find(g => parseAmount(g?.CLOSINGBALANCE) !== null) ||
+          group.find(g => parseAmount(g?.CLOSINGBALANCE) !== 0) ||
+          group.find(g => parseAmount(g?.CLOSINGBALANCE) !== 0) ||
           group[0];
       }
 
@@ -1802,8 +1872,12 @@ router.get("/payable-debtors", async (req, res) => {
               clean(ledger?.EMAIL || ledger?.LEDGEREMAIL),
               openingBalance,
               closingBalance,
-              openingBalance < 0 ? "Cr" : "Dr",
-              closingBalance < 0 ? "Cr" : "Dr"
+              // Was `< 0 ? "Cr" : "Dr"` — the reverse of every other sync.
+              balanceTypeOf(openingBalance),
+              balanceTypeOf(closingBalance)
+              // Was `< 0 ? "Cr" : "Dr"` — the reverse of every other sync.
+              balanceTypeOf(openingBalance),
+              balanceTypeOf(closingBalance)
             ],
             [
               "company_id", "company_name", "ledger_name", "parent_group", "address", "state", "country",
@@ -1813,7 +1887,36 @@ router.get("/payable-debtors", async (req, res) => {
             ],
             client
           );
-          
+
+          // Same stale-balance problem as all_ledger_details: a skipped
+          // upsert ("alter_id_not_newer") must still take the new balances.
+          if (result.action === "ignored") {
+            await client.query(
+              `UPDATE app_test.all_parent_groups
+                  SET opening_balance = $1, closing_balance = $2,
+                      opening_balance_type = $3, closing_balance_type = $4,
+                      updated_at = NOW()
+                WHERE company_id = $5 AND ledger_name = $6 AND parent_group = $7`,
+              [openingBalance, closingBalance, balanceTypeOf(openingBalance),
+               balanceTypeOf(closingBalance), companyId, ledgerName, groupName]
+            );
+          }
+
+
+          // Same stale-balance problem as all_ledger_details: a skipped
+          // upsert ("alter_id_not_newer") must still take the new balances.
+          if (result.action === "ignored") {
+            await client.query(
+              `UPDATE app_test.all_parent_groups
+                  SET opening_balance = $1, closing_balance = $2,
+                      opening_balance_type = $3, closing_balance_type = $4,
+                      updated_at = NOW()
+                WHERE company_id = $5 AND ledger_name = $6 AND parent_group = $7`,
+              [openingBalance, closingBalance, balanceTypeOf(openingBalance),
+               balanceTypeOf(closingBalance), companyId, ledgerName, groupName]
+            );
+          }
+
           if (result.action === "inserted") inserted++;
           else if (result.action === "updated") updated++;
           else ignored++;
@@ -1894,17 +1997,39 @@ router.get("/profit-loss-sync", async (req, res) => {
       if (Array.isArray(rawName)) names = rawName;
       else if (rawName) names = [rawName];
 
-      let rawBalance = group?.CLOSINGBALANCE;
-      if (Array.isArray(rawBalance)) rawBalance = rawBalance[0];
-      const balance = Math.abs(Number(rawBalance || 0));
+      // Signed (negative = Dr). Each group is read on its NORMAL side —
+      // incomes are Cr, expenses/purchases/stock are Dr — so a group that
+      // sits on the unusual side (e.g. Direct Expenses in credit after a
+      // reversal) reduces the total instead of being added. Math.abs()
+      // used to add it either way. Groups on their normal side give the
+      // same numbers as before.
+      const signed = parseTallyAmount(group?.CLOSINGBALANCE);
+      const asCredit = signed;  // income groups: Cr is positive
+      const asDebit = -signed;  // expense / purchase / asset groups: Dr is positive
+      // Signed (negative = Dr). Each group is read on its NORMAL side —
+      // incomes are Cr, expenses/purchases/stock are Dr — so a group that
+      // sits on the unusual side (e.g. Direct Expenses in credit after a
+      // reversal) reduces the total instead of being added. Math.abs()
+      // used to add it either way. Groups on their normal side give the
+      // same numbers as before.
+      const signed = parseTallyAmount(group?.CLOSINGBALANCE);
+      const asCredit = signed;  // income groups: Cr is positive
+      const asDebit = -signed;  // expense / purchase / asset groups: Dr is positive
 
-      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) totalSales = balance;
-      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) totalPurchase = balance;
-      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) directExpenses = balance;
-      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) directIncomes = balance;
-      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) stockValue = balance;
-      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) indirectIncome = balance;
-      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) indirectExpenses = balance;
+      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) totalSales = asCredit;
+      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) totalPurchase = asDebit;
+      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) directExpenses = asDebit;
+      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) directIncomes = asCredit;
+      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) stockValue = asDebit;
+      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) indirectIncome = asCredit;
+      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) indirectExpenses = asDebit;
+      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) totalSales = asCredit;
+      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) totalPurchase = asDebit;
+      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) directExpenses = asDebit;
+      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) directIncomes = asCredit;
+      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) stockValue = asDebit;
+      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) indirectIncome = asCredit;
+      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) indirectExpenses = asDebit;
     }
 
     const grossProfit = Number((totalSales - totalPurchase - directExpenses + directIncomes).toFixed(2));
@@ -2757,8 +2882,10 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
       const openingBalance = cleanBalance(ledger?.OPENINGBALANCE);
       const closingBalance = cleanBalance(ledger?.CLOSINGBALANCE);
-      const openingBalanceType = Number(openingBalance) < 0 ? "Dr" : "Cr";
-      const closingBalanceType = Number(closingBalance) < 0 ? "Dr" : "Cr";
+      const openingBalanceType = balanceTypeOf(openingBalance);
+      const closingBalanceType = balanceTypeOf(closingBalance);
+      const openingBalanceType = balanceTypeOf(openingBalance);
+      const closingBalanceType = balanceTypeOf(closingBalance);
 
       const address = Array.isArray(ledger?.["ADDRESS.LIST"]?.ADDRESS)
         ? ledger["ADDRESS.LIST"].ADDRESS.map(a => clean(a)).filter(Boolean).join(", ")
@@ -2800,6 +2927,48 @@ router.get("/all-ledgers-sync", async (req, res) => {
       ];
 
       const result = await upsertRecord("app_test.all_ledger_details", guid, masterId, alterId, data, columns, client);
+
+      // Balances are a point-in-time snapshot (see upsertRecord's
+      // forceOverwrite note): a new voucher changes a ledger's closing
+      // balance — and possibly its Dr/Cr side — without touching the
+      // ledger master's alter_id, so the upsert above skips the row as
+      // "alter_id_not_newer". Always write the latest balances here; the
+      // master fields keep their alter_id gating.
+      if (result.action === "ignored") {
+        await client.query(
+          `UPDATE app_test.all_ledger_details
+              SET opening_balance = $1, closing_balance = $2,
+                  opening_balance_type = $3, closing_balance_type = $4,
+                  updated_at = NOW()
+            WHERE company_id = $5 AND ledger_name = $6
+              AND (opening_balance IS DISTINCT FROM $1::numeric
+                OR closing_balance IS DISTINCT FROM $2::numeric
+                OR opening_balance_type IS DISTINCT FROM $3
+                OR closing_balance_type IS DISTINCT FROM $4)`,
+          [openingBalance, closingBalance, openingBalanceType, closingBalanceType, companyId, ledgerName]
+        );
+      }
+
+      // Balances are a point-in-time snapshot (see upsertRecord's
+      // forceOverwrite note): a new voucher changes a ledger's closing
+      // balance — and possibly its Dr/Cr side — without touching the
+      // ledger master's alter_id, so the upsert above skips the row as
+      // "alter_id_not_newer". Always write the latest balances here; the
+      // master fields keep their alter_id gating.
+      if (result.action === "ignored") {
+        await client.query(
+          `UPDATE app_test.all_ledger_details
+              SET opening_balance = $1, closing_balance = $2,
+                  opening_balance_type = $3, closing_balance_type = $4,
+                  updated_at = NOW()
+            WHERE company_id = $5 AND ledger_name = $6
+              AND (opening_balance IS DISTINCT FROM $1::numeric
+                OR closing_balance IS DISTINCT FROM $2::numeric
+                OR opening_balance_type IS DISTINCT FROM $3
+                OR closing_balance_type IS DISTINCT FROM $4)`,
+          [openingBalance, closingBalance, openingBalanceType, closingBalanceType, companyId, ledgerName]
+        );
+      }
 
       // Written outside upsertRecord on purpose: moving group ABC to a new
       // parent changes the GROUP's alter_id, not the ledger's, so the upsert
@@ -2995,8 +3164,11 @@ router.get("/godown-sync", async (req, res) => {
     let inserted = 0, updated = 0, ignored = 0;
 
     for (const godown of list) {
-      let godownName = godown?.DSPDISPNAME || null;
+      let godownName = godown?.DSPDISPNAME || godown?.$?.NAME || godown?.["@NAME"] || godown?.NAME || null;
+      let godownName = godown?.DSPDISPNAME || godown?.$?.NAME || godown?.["@NAME"] || godown?.NAME || null;
       if (Array.isArray(godownName)) godownName = godownName[0];
+      if (godownName && typeof godownName === "object") godownName = godownName._ || null;
+      if (godownName && typeof godownName === "object") godownName = godownName._ || null;
       godownName = clean(godownName);
       if (!godownName) { ignored++; continue; }
 

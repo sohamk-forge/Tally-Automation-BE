@@ -107,7 +107,55 @@ async function getTopSellingItems(companyId, yearStart, yearEnd) {
     }
   }
 
-  const allItems = [...itemMap.values()].sort(
+  return [...itemMap.values()];
+}
+
+/* ===================================================
+   ITEM -> STOCK GROUP (stock_group_summary)
+   Items missing from the summary land in "Ungrouped".
+=================================================== */
+const UNGROUPED = "Ungrouped";
+
+async function getItemGroupMap(companyId) {
+  const result = await pool.query(
+    `SELECT DISTINCT ON (LOWER(TRIM(item_name)))
+            LOWER(TRIM(item_name)) AS item_key, group_name
+     FROM ${DB_SCHEMA}.stock_group_summary
+     WHERE company_id = $1 AND item_name IS NOT NULL
+     ORDER BY LOWER(TRIM(item_name)), updated_at DESC NULLS LAST`,
+    [companyId]
+  );
+
+  return new Map(result.rows.map((r) => [r.item_key, r.group_name || UNGROUPED]));
+}
+
+function rollUpToGroups(items, itemGroupMap) {
+  const groupMap = new Map();
+
+  for (const item of items) {
+    const groupName =
+      itemGroupMap.get(item.item_name.trim().toLowerCase()) || UNGROUPED;
+
+    if (!groupMap.has(groupName)) {
+      groupMap.set(groupName, {
+        item_name: groupName,
+        total_sales: 0,
+        voucher_count: 0,
+        item_count: 0
+      });
+    }
+
+    const group = groupMap.get(groupName);
+    group.total_sales += item.total_sales;
+    group.voucher_count += item.voucher_count;
+    group.item_count++;
+  }
+
+  return [...groupMap.values()];
+}
+
+function rankTop(rows) {
+  const allItems = [...rows].sort(
     (a, b) => b.total_sales - a.total_sales
   );
 
@@ -121,6 +169,7 @@ async function getTopSellingItems(companyId, yearStart, yearEnd) {
     item_name: item.item_name,
     total_sales: Number(item.total_sales.toFixed(2)),
     voucher_count: item.voucher_count,
+    ...(item.item_count !== undefined && { item_count: item.item_count }),
     percentage:
       grandTotal > 0
         ? Number(((item.total_sales / grandTotal) * 100).toFixed(2))
@@ -141,6 +190,8 @@ router.get("/top-sales-ledgers", async (req, res) => {
   try {
     const companyId = req.query.company_id;
     const companyName = req.query.company;
+    // item (default) = top stock items; group = sales rolled up by stock group
+    const groupBy = req.query.group_by === "group" ? "group" : "item";
 
     if (!companyId && !companyName) {
       return res.status(400).json({
@@ -163,12 +214,17 @@ router.get("/top-sales-ledgers", async (req, res) => {
 
     const { id, name: company, yearStart, yearEnd, fyLabel } = companyInfo;
 
-    const { topItems, grandTotal, totalVoucherCount } =
-       await getTopSellingItems(id, yearStart, yearEnd);
+    const items = await getTopSellingItems(id, yearStart, yearEnd);
+    const rows = groupBy === "group"
+      ? rollUpToGroups(items, await getItemGroupMap(id))
+      : items;
+
+    const { topItems, grandTotal, totalVoucherCount } = rankTop(rows);
 
     return res.status(200).json({
       status: "success",
       source: "database",
+      group_by: groupBy,
       company_id: id,
       company,
       financial_year: fyLabel,

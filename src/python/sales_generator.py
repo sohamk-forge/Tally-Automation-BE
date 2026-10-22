@@ -381,7 +381,12 @@ if abs(round_off) >= 0.01:
 # the Despatch Doc No. fields, and not related to REFERENCE/REFERENCEDATE).
 delivery_challans = invoice.get("delivery_challans") or []
 for dc in delivery_challans:
-    dc_no   = str(dc.get("number") or dc.get("challan_no") or dc.get("dc_no") or "").strip()
+    # Approved quotations ride along in the same list (see Bills to be Made)
+    # but aren't delivery notes — their numbers would print as a bogus
+    # "Delivery Note No." that can even match a real challan's number.
+    if dc.get("source") == "quotation":
+        continue
+    dc_no   =str(dc.get("number") or dc.get("challan_no") or dc.get("dc_no") or "").strip()
     dc_date = parse_date(dc.get("date") or dc.get("challan_date") or dc.get("dc_date"))
     if not dc_no and not dc_date:
         continue

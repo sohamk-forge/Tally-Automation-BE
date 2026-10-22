@@ -55,7 +55,7 @@ router.get("/:id/pdf", async (req, res) => {
     // inline = opens in browser tab; swap to attachment; ... to force download
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="Challan-${challan.challan_number || challan.id}.pdf"`
+      `inline; filename="Challan-${String(challan.challan_number || challan.id).replace(/[^\w.-]+/g, "_")}.pdf"`
     );
     return res.status(200).send(Buffer.from(pdfBytes));
   } catch (err) {
