@@ -1,3 +1,5 @@
+import { escapeXml, tallyDate, tallyId, tdlText } from "../utils/xml.js";
+
   export const getCompaniesXML = () => {
 
 
@@ -85,7 +87,7 @@
         <STATICVARIABLES>
 
           <SVCURRENTCOMPANY>
-            ${company}
+            ${escapeXml(company)}
           </SVCURRENTCOMPANY>
 
           <SVEXPORTFORMAT>
@@ -143,7 +145,7 @@ export const getLedgerDetailsXML = (
 
     <SUBTYPE>Ledger</SUBTYPE>
 
-    <ID TYPE="Name">${ledgerName}</ID>
+    <ID TYPE="Name">${escapeXml(ledgerName)}</ID>
 
   </HEADER>
 
@@ -154,7 +156,7 @@ export const getLedgerDetailsXML = (
       <STATICVARIABLES>
 
         <SVCURRENTCOMPANY>
-          ${company}
+          ${escapeXml(company)}
         </SVCURRENTCOMPANY>
 
         <SVEXPORTFORMAT>
@@ -213,7 +215,7 @@ export const getGroupSummaryCRXML = (company) => {
 
       <STATICVARIABLES>
 
-        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
 
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 
@@ -336,7 +338,7 @@ export const getGroupSummaryCRXML = (company) => {
         <STATICVARIABLES>
 
           <SVCURRENTCOMPANY>
-            ${company}
+            ${escapeXml(company)}
           </SVCURRENTCOMPANY>
 
           <SVEXPORTFORMAT>
@@ -441,7 +443,7 @@ export const getGroupSummaryCRXML = (company) => {
         <DESC>
 
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
 
@@ -574,7 +576,7 @@ export const getGroupSummaryCRXML = (company) => {
               <STATICVARIABLES>
 
                   <SVCURRENTCOMPANY>
-                      ${company}
+                      ${escapeXml(company)}
                   </SVCURRENTCOMPANY>
 
                   <SVEXPORTFORMAT>
@@ -582,11 +584,11 @@ export const getGroupSummaryCRXML = (company) => {
                   </SVEXPORTFORMAT>
 
                   <SVFROMDATE TYPE="Date">
-                      ${fromDate}
+                      ${tallyDate(fromDate)}
                   </SVFROMDATE>
 
                   <SVTODATE TYPE="Date">
-                      ${toDate}
+                      ${tallyDate(toDate)}
                   </SVTODATE>
 
               </STATICVARIABLES>
@@ -687,7 +689,7 @@ export const getGroupSummaryCRXML = (company) => {
         </SVEXPORTFORMAT>
 
         <SVCURRENTCOMPANY>
-          ${company}
+          ${escapeXml(company)}
         </SVCURRENTCOMPANY>
 
       </STATICVARIABLES>
@@ -757,7 +759,7 @@ export const getGroupBalanceXML = (
         </SUBTYPE>
 
         <ID TYPE="Name">
-            ${groupName}
+            ${escapeXml(groupName)}
         </ID>
 
     </HEADER>
@@ -773,7 +775,7 @@ export const getGroupBalanceXML = (
                 </SVEXPORTFORMAT>
 
                 <SVCURRENTCOMPANY>
-                    ${company}
+                    ${escapeXml(company)}
                 </SVCURRENTCOMPANY>
 
             </STATICVARIABLES>
@@ -842,7 +844,7 @@ export const getAllParentGroupDetailsXML = (
       <STATICVARIABLES>
 
         <SVCURRENTCOMPANY>
-          ${company}
+          ${escapeXml(company)}
         </SVCURRENTCOMPANY>
 
         <SVEXPORTFORMAT>
@@ -864,7 +866,7 @@ export const getAllParentGroupDetailsXML = (
             </TYPE>
 
             <CHILDOF>
-              ${groupName}
+              ${escapeXml(groupName)}
             </CHILDOF>
 
             <FETCH>
@@ -966,15 +968,15 @@ export const getProfitLossXML = (
       <STATICVARIABLES>
 
         <SVCURRENTCOMPANY>
-          ${company}
+          ${escapeXml(company)}
         </SVCURRENTCOMPANY>
 
         <SVFROMDATE TYPE="Date">
-          ${fromDate}
+          ${tallyDate(fromDate)}
         </SVFROMDATE>
 
         <SVTODATE TYPE="Date">
-          ${toDate}
+          ${tallyDate(toDate)}
         </SVTODATE>
 
         <SVEXPORTFORMAT>
@@ -994,6 +996,7 @@ export const getProfitLossXML = (
             <FETCH>
               Name,
               Parent,
+              OpeningBalance,
               ClosingBalance
             </FETCH>
 
@@ -1017,7 +1020,11 @@ export const getProfitLossXML = (
             OR
             $$IsEqual:$Name:"Indirect Incomes"
             OR
+            $$IsEqual:$Name:"Stock-in-Hand"
+            OR
             $$IsEqual:$Name:"Stock-in-hand"
+            OR
+            $$IsEqual:$Name:"Stock in Hand"
 
           </SYSTEM>
 
@@ -1056,7 +1063,43 @@ const gstRateMethods = (objectType) => `
 <METHOD>CGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCGST].GSTRate</METHOD>
 <METHOD>SGSTRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsSGST].GSTRate</METHOD>
 <METHOD>CessRate:$(${objectType},$Name).GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCess].GSTRate</METHOD>
-<METHOD>GSTApplicable:$GSTDetails[Last].Applicability</METHOD>`;
+<METHOD>GSTApplicable:$GSTDetails[Last].Applicability</METHOD>
+<METHOD>GSTSrc:$GSTDetails[Last].SrcOfGSTDetails</METHOD>`;
+
+// Company-level default GST rate. Items/groups whose GST source is "As per
+// Company/Stock Group" store 0 in their own GSTDetails and take the rate set
+// on the company, so the sync needs it to resolve the effective rate.
+export const getCompanyDefaultGstRateXML = (company) => {
+  return `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>CompanyDefaultGst</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          ${GST_DUTY_HEAD_FORMULAE}
+          <COLLECTION NAME="CompanyDefaultGst">
+            <TYPE>Company</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <METHOD>IGSTRate:$GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsIGST].GSTRate</METHOD>
+            <METHOD>CGSTRate:$GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsCGST].GSTRate</METHOD>
+            <METHOD>SGSTRate:$GSTDetails[Last].StateWiseDetails[1].RateDetails[1,@@IsSGST].GSTRate</METHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+};
 
 export const getStockGroupSummaryXML = (company) => {
   return `
@@ -1070,7 +1113,7 @@ export const getStockGroupSummaryXML = (company) => {
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
       <TDL>
@@ -1108,7 +1151,7 @@ export const getStockGroupGSTXML = (company) => {
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
       <TDL>
@@ -1165,7 +1208,7 @@ export const getUnitsXML = (company) => {
                 </SVEXPORTFORMAT>
 
                 <SVCURRENTCOMPANY>
-                    ${company}
+                    ${escapeXml(company)}
                 </SVCURRENTCOMPANY>
 
             </STATICVARIABLES>
@@ -1246,7 +1289,7 @@ export const getAllLedgersXML = (company) => {
 
       <STATICVARIABLES>
 
-        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
 
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 
@@ -1350,7 +1393,7 @@ export const getPurchaseSalesLedgersXML = (company) => `
         <DESC>
 
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
 
@@ -1411,7 +1454,7 @@ export const getGodownsXML = (company) => {
     <DESC>
       <STATICVARIABLES>
         <SVCURRENTCOMPANY>
-          ${company}
+          ${escapeXml(company)}
         </SVCURRENTCOMPANY>
         <SVEXPORTFORMAT>
           $$SysName:XML
@@ -1443,7 +1486,7 @@ export const getSalesGroupXML = (company) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
@@ -1483,7 +1526,7 @@ export const getPurchaseGroupXML = (company) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
@@ -1523,7 +1566,7 @@ export const getStockInHandXML = (company) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
@@ -1554,13 +1597,13 @@ export const getCompanyDetailsXML = (company) => {
         <TALLYREQUEST>Export</TALLYREQUEST>
         <TYPE>Object</TYPE>
         <SUBTYPE>Company</SUBTYPE>
-        <ID TYPE="Name">${company}</ID>
+        <ID TYPE="Name">${escapeXml(company)}</ID>
     </HEADER>
 
     <BODY>
         <DESC>
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
 
@@ -1591,7 +1634,7 @@ export const getCompanyGSTDetailsXML = (company) => {
         <DESC>
 
             <STATICVARIABLES>
-                <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+                <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             </STATICVARIABLES>
 
@@ -1635,7 +1678,7 @@ export const getProfitLossReportXML = (company) => {
           </SVEXPORTFORMAT>
 
           <SVCURRENTCOMPANY>
-            ${company}
+            ${escapeXml(company)}
           </SVCURRENTCOMPANY>
 
         </STATICVARIABLES>
@@ -1665,13 +1708,13 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
     <TDLMESSAGE>
      <SYSTEM TYPE="Formulae" NAME="RefMatch">
-      $VoucherTypeName = "Sales" AND $Reference = "${referenceNo}"
+      $VoucherTypeName = "Sales" AND $Reference = "${tdlText(referenceNo)}"
      </SYSTEM>
      <COLLECTION NAME="SalesRefCheck">
       <TYPE>Voucher</TYPE>
@@ -1693,7 +1736,7 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
 // only carries LASTVCHID (the voucher's master ID), not its number. This
 // looks the voucher up by that master ID, which is unique, unlike Reference.
 export const getVoucherNumberByMasterIdXML = (company, masterId) => {
-  const id = String(masterId).replace(/\D/g, "");
+  const id = tallyId(masterId);
   return `
 <ENVELOPE>
  <HEADER>
@@ -1705,7 +1748,7 @@ export const getVoucherNumberByMasterIdXML = (company, masterId) => {
  <BODY>
   <DESC>
    <STATICVARIABLES>
-    <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
    </STATICVARIABLES>
    <TDL>
@@ -1742,9 +1785,9 @@ export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>
-        <SVFROMDATE TYPE="Date">${fromDate}</SVFROMDATE>
-        <SVTODATE TYPE="Date">${toDate}</SVTODATE>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+        <SVFROMDATE TYPE="Date">${tallyDate(fromDate)}</SVFROMDATE>
+        <SVTODATE TYPE="Date">${tallyDate(toDate)}</SVTODATE>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
       <TDL>
@@ -1808,22 +1851,16 @@ export function getSalesInvoiceDetailsXML(company, fromDate, toDate) {
 // back so the existing voucher PDF can be rendered from the vouchers table.
 // fromDate/toDate are optional YYYYMMDD strings that pin the period.
 // ---------------------------------------------------------------------------
-const escapeXmlText = (value) =>
-  String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
 const periodVariables = (fromDate, toDate) =>
   fromDate && toDate
-    ? `<SVFROMDATE TYPE="Date">${fromDate}</SVFROMDATE>
-        <SVTODATE TYPE="Date">${toDate}</SVTODATE>`
+    ? `<SVFROMDATE TYPE="Date">${tallyDate(fromDate)}</SVFROMDATE>
+        <SVTODATE TYPE="Date">${tallyDate(toDate)}</SVTODATE>`
     : "";
 
 // Same collection and FETCH list as getLedgerVouchersXML, plus the master ID
 // filter and MASTERID/GUID/ALTERID so the row can be upserted by GUID.
 export function getLedgerVoucherByMasterIdXML(company, masterId, fromDate, toDate) {
-  const id = String(masterId).replace(/\D/g, "");
+  const id = tallyId(masterId);
   return `
 <ENVELOPE>
   <HEADER>
@@ -1835,7 +1872,7 @@ export function getLedgerVoucherByMasterIdXML(company, masterId, fromDate, toDat
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${periodVariables(fromDate, toDate)}
       </STATICVARIABLES>
@@ -1862,7 +1899,7 @@ export function getLedgerVoucherByMasterIdXML(company, masterId, fromDate, toDat
 
 // Same dispatch/delivery fields as getSalesInvoiceDetailsXML for one voucher.
 export function getSalesInvoiceDetailsByMasterIdXML(company, masterId, fromDate, toDate) {
-  const id = String(masterId).replace(/\D/g, "");
+  const id = tallyId(masterId);
   return `
 <ENVELOPE>
   <HEADER>
@@ -1874,7 +1911,7 @@ export function getSalesInvoiceDetailsByMasterIdXML(company, masterId, fromDate,
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        <SVCURRENTCOMPANY>${escapeXmlText(company)}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${periodVariables(fromDate, toDate)}
       </STATICVARIABLES>

@@ -3,7 +3,7 @@ import IORedis from "ioredis";
 import axios from "axios";
 
 import pool from "../db/index.js";
-import { SYNC_STEP_COUNT } from "../config/syncSteps.js";
+import { SYNC_STEP_COUNT, SYNC_STEP_LABELS } from "../config/syncSteps.js";
 import { failConnectorJobBusinessRecord } from "../services/connectorJobResult.service.js";
 import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
 import { CONNECTOR_WAIT_TIMEOUT_MS, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
@@ -348,9 +348,9 @@ const worker = new Worker(
       FINAL SUMMARY LOG
     =============================================== */
 
-    if (results.length !== SYNC_STEP_COUNT) {
+    if (results.map((r) => r.step).join("|") !== SYNC_STEP_LABELS.join("|")) {
       console.warn(
-        `⚠️ Sync ran ${results.length} steps but src/config/syncSteps.js says ${SYNC_STEP_COUNT} — update SYNC_STEP_COUNT so the progress loader's "x / N" is right.`
+        `⚠️ Sync ran ${results.length} steps but src/config/syncSteps.js lists ${SYNC_STEP_COUNT} — update SYNC_STEP_LABELS so the progress loader's "x / N" and current step are right.`
       );
     }
 

@@ -5,6 +5,7 @@ import {
   getQuotationById,
   createQuotation,
   createQuotationVersion,
+  updateQuotation,
   getQuotationVersions,
   peekNextQuotationNumber,
   updateQuotationStatus,
@@ -109,6 +110,22 @@ router.post("/:id/version", async (req, res) => {
     console.error("POST /quotation/:id/version error:", err);
     const status = /not found/i.test(err.message) ? 404 : /required/i.test(err.message) ? 400 : 500;
     res.status(status).json({ success: false, message: err.message || "Failed to create quotation version" });
+  }
+});
+
+// "Save" when editing: overwrites this quotation in place (no new version).
+router.put("/:id", async (req, res) => {
+  try {
+    const companyId = req.body.companyId || req.headers["x-company-id"];
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: "companyId is required" });
+    }
+    const quotation = await updateQuotation(req.params.id, companyId, req.body);
+    res.json({ success: true, data: quotation });
+  } catch (err) {
+    console.error("PUT /quotation/:id error:", err);
+    const status = /not found/i.test(err.message) ? 404 : /required/i.test(err.message) ? 400 : 500;
+    res.status(status).json({ success: false, message: err.message || "Failed to update quotation" });
   }
 });
 

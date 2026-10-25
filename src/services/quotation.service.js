@@ -91,6 +91,7 @@ function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
     item_name:        String(item.item_name || "").trim(),
     godown_name:      String(item.godown_name || "").trim() || null,
     bin:              String(item.bin || "").trim() || null,
+    narration:        String(item.narration || "").trim() || null,
     hsn_code:         String(item.hsn_code   || "").trim() || null,
     unit:             String(item.unit || "").trim() || null,
     qty,
@@ -227,18 +228,18 @@ async function insertItems(client, quotationId, computedItems) {
         quotation_id, item_name, godown_name, bin, hsn_code, unit,
         qty, rate, gst_rate, discount_percent,
         taxable_amount, cgst_amount, sgst_amount, igst_amount,
-        line_total, sort_order
+        line_total, sort_order, narration
       ) VALUES (
         $1,$2,$3,$4,$5,$6,
         $7,$8,$9,$10,
         $11,$12,$13,$14,
-        $15,$16
+        $15,$16,$17
       ) RETURNING *`,
       [
         quotationId, it.item_name, it.godown_name, it.bin, it.hsn_code, it.unit,
         it.qty, it.rate, it.gst_rate, it.discount_percent,
         it.taxable_amount, it.cgst_amount, it.sgst_amount, it.igst_amount,
-        it.line_total, idx,
+        it.line_total, idx, it.narration,
       ]
     );
     inserted.push(res.rows[0]);
@@ -462,6 +463,78 @@ export async function createQuotationVersion(quotationId, companyId, data = {}) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: updateQuotation
+//
+// Overwrites an existing quotation/version in place (same id and number) —
+// the "Save" path when editing, as opposed to createQuotationVersion.
+// Line items are replaced wholesale and totals recomputed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function updateQuotation(quotationId, companyId, data = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const srcRes = await client.query(
+      `SELECT * FROM ${DB_SCHEMA}.quotations WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+      [quotationId, companyId]
+    );
+    if (!srcRes.rows.length) throw new Error("Quotation not found");
+    const source = srcRes.rows[0];
+
+    const items = data.items;
+    if (!items || !items.length) throw new Error("At least one item is required");
+    for (const [i, item] of items.entries()) {
+      if (!item.item_name) throw new Error(`Item at index ${i} is missing item_name`);
+    }
+
+    const customer_name    = data.customer_name    ?? source.customer_name;
+    const customer_gstin   = data.customer_gstin   ?? source.customer_gstin;
+    const customer_address = data.customer_address ?? source.customer_address;
+    const terms_conditions = data.terms_conditions ?? source.terms_conditions;
+    const supply_type      = data.supply_type || "intrastate";
+    const quotation_date   = normalizeDate(data.quotation_date) || source.quotation_date;
+    const valid_until      = normalizeDate(data.valid_until)    ?? source.valid_until;
+
+    const gstEnabled    = await getGstEnabled(client, companyId);
+    const computedItems = items.map((it) => computeItem(it, supply_type, gstEnabled));
+    const totals        = computeTotals(computedItems);
+
+    const updRes = await client.query(
+      `UPDATE ${DB_SCHEMA}.quotations SET
+         quotation_date = $1, valid_until = $2,
+         customer_name = $3, customer_gstin = $4, customer_address = $5,
+         sub_total = $6, total_cgst = $7, total_sgst = $8, total_igst = $9,
+         total_tax = $10, grand_total = $11, terms_conditions = $12
+       WHERE id = $13 AND company_id = $14
+       RETURNING *`,
+      [
+        quotation_date, valid_until,
+        customer_name, customer_gstin, customer_address,
+        totals.sub_total, totals.total_cgst, totals.total_sgst, totals.total_igst,
+        totals.total_tax, totals.grand_total, terms_conditions,
+        quotationId, companyId,
+      ]
+    );
+
+    await client.query(
+      `DELETE FROM ${DB_SCHEMA}.quotation_items WHERE quotation_id = $1`,
+      [quotationId]
+    );
+    const insertedItems = await insertItems(client, quotationId, computedItems);
+
+    await client.query("COMMIT");
+    return { ...updRes.rows[0], items: insertedItems, gst_enabled: gstEnabled };
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC: getQuotationVersions
 // Full history for a quotation family, oldest (0001) first.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -539,6 +612,7 @@ export async function getAllQuotations(companyId, filters = {}) {
              'item_name',         qi.item_name,
              'godown_name',       qi.godown_name,
              'bin',               qi.bin,
+             'narration',         qi.narration,
              'hsn_code',          qi.hsn_code,
              'unit',              qi.unit,
              'qty',               qi.qty,

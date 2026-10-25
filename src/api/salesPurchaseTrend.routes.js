@@ -3,6 +3,7 @@ import pool from "../db/index.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 import { resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
+import { bucketVouchers } from "../services/trendBuckets.js";
 const router = express.Router();
 
 // Id-only: names aren't unique, so callers resolve a name to the caller's own
@@ -57,88 +58,33 @@ async function getCompanyInfo(companyId, fyStart) {
   };
 }
 
+// One row per voucher with what it posted to Sales Accounts / Purchase Accounts (ex-GST, credit and
+// debit notes netted) — the P&L basis, so the chart adds up to the Total sales / Total purchase tiles.
+// Whole-voucher totals were used before: they include GST and counted quotations as sales.
+// Non-accounting documents (quotations, orders, delivery / receipt notes) are left out, as Tally does.
 async function fetchVouchersFromDB(companyId, yearStart, yearEnd) {
   const result = await pool.query(
-    // ledger_entries is a large JSON blob per voucher (MBs over the network),
-    // and getVoucherAmount only needs it when both debit and credit are 0 —
-    // so only fetch it for those rows, and only for sales/purchase vouchers.
-    `SELECT voucher_date, voucher_type, debit_amount, credit_amount,
-            CASE WHEN COALESCE(debit_amount, 0) = 0 AND COALESCE(credit_amount, 0) = 0
-                 THEN ledger_entries END AS ledger_entries
-       FROM ${DB_SCHEMA}.vouchers
-      WHERE company_id = $1
-        AND DATE(voucher_date) >= $2
-        AND DATE(voucher_date) < $3
-        AND (LOWER(voucher_type) LIKE '%sales%' OR LOWER(voucher_type) LIKE '%purchase%')`,
+    `SELECT v.voucher_date,
+            COALESCE(SUM(CASE WHEN l.primary_group = 'Sales Accounts'
+                              THEN (e->>'AMOUNT')::numeric END), 0) AS sales_amount,
+            COALESCE(SUM(CASE WHEN l.primary_group = 'Purchase Accounts'
+                              THEN -(e->>'AMOUNT')::numeric END), 0) AS purchase_amount
+       FROM ${DB_SCHEMA}.vouchers v
+       CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(v.ledger_entries) = 'array' THEN v.ledger_entries ELSE '[]'::jsonb END) e
+       JOIN ${DB_SCHEMA}.all_ledger_details l
+         ON l.company_id = v.company_id AND l.ledger_name = e->>'LEDGERNAME' AND l.deleted_at IS NULL
+      WHERE v.company_id = $1
+        AND v.deleted_at IS NULL
+        AND v.is_optional IS NOT TRUE
+        AND DATE(v.voucher_date) >= $2
+        AND DATE(v.voucher_date) < $3
+        AND l.primary_group IN ('Sales Accounts', 'Purchase Accounts')
+        AND LOWER(v.voucher_type) !~ '(quotation|order|delivery|receipt note|rejection|memorandum)'
+      GROUP BY v.id, v.voucher_date`,
     [companyId, yearStart, yearEnd]
   );
   return result.rows;
-}
-
-function getVoucherAmount(v) {
-  const debit = Math.abs(Number(v.debit_amount) || 0);
-  if (debit > 0) return debit;
-
-  const credit = Math.abs(Number(v.credit_amount) || 0);
-  if (credit > 0) return credit;
-
-  const entries = Array.isArray(v.ledger_entries) ? v.ledger_entries : [];
-  let amount = 0;
-  for (const e of entries) {
-    amount += Math.abs(parseFloat(e?.AMOUNT) || 0);
-  }
-  return amount / 2;
-}
-
-function getBucketKey(dateObj, period) {
-  const d = dateObj;
-
-  if (period === "day") return d.toISOString().split("T")[0];
-
-  if (period === "month") {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-  }
-
-  if (period === "year") {
-    return `${d.getFullYear()}-01-01`;
-  }
-
-  if (period === "week") {
-    const day = d.getDay() || 7;
-    const monday = new Date(d);
-    monday.setDate(d.getDate() - day + 1);
-    return monday.toISOString().split("T")[0];
-  }
-
-  return d.toISOString().split("T")[0];
-}
-
-function bucketVouchers(vouchers, period) {
-  const buckets = {};
-
-  for (const v of vouchers) {
-    const d = new Date(v.voucher_date);
-    if (isNaN(d.getTime())) continue;
-
-    const voucherType = (v.voucher_type || "").toString().toLowerCase();
-    const isSales = voucherType.includes("sales");
-    const isPurchase = voucherType.includes("purchase");
-    if (!isSales && !isPurchase) continue;
-
-    const amount = getVoucherAmount(v);
-    const key = getBucketKey(d, period);
-
-    if (!buckets[key]) {
-      buckets[key] = { period_start: key, sales_total: 0, purchase_total: 0 };
-    }
-
-    if (isSales) buckets[key].sales_total += amount;
-    if (isPurchase) buckets[key].purchase_total += amount;
-  }
-
-  return Object.values(buckets)
-    .map((b) => ({ ...b, net: b.sales_total - b.purchase_total }))
-    .sort((a, b) => new Date(a.period_start) - new Date(b.period_start));
 }
 
 router.get("/sales-purchase", async (req, res) => {

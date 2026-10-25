@@ -327,6 +327,16 @@ const STYLE = `
 
   .narration-block strong { color: #333; }
 
+  .narration-block .terms-list {
+    margin: 4px 0 0;
+    padding-left: 18px;
+  }
+
+  .narration-block .terms-list li {
+    padding-left: 2px;
+    margin-bottom: 2px;
+  }
+
   /* =========================================================
      SIGNATURE
      ========================================================= */
@@ -377,6 +387,21 @@ const STYLE = `
 // Item Rows
 // ─────────────────────────────────────────────────────────────
 
+// One numbered point per line of the terms text. Any "1." / "-" / "•" the
+// user typed themselves is stripped so the list doesn't double-number.
+function buildTermsList(text) {
+  const points = String(text || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim().replace(/^(?:\d+[.)]\s*|[-•*]\s+)/, "").trim())
+    .filter(Boolean);
+
+  if (!points.length) return "";
+
+  return `<ol class="terms-list">${points
+    .map((p) => `<li>${esc(p)}</li>`)
+    .join("")}</ol>`;
+}
+
 function buildItemRows(items = [], gstEnabled = true) {
   return items
     .map((it, idx) => {
@@ -397,10 +422,14 @@ function buildItemRows(items = [], gstEnabled = true) {
                 ? `<div class="item-sub">Bin: ${esc(it.bin)}</div>`
                 : ""
             }
+            ${
+              it.narration
+                ? `<div class="item-sub" style="white-space:pre-line">${esc(it.narration)}</div>`
+                : ""
+            }
           </td>
           <td>${esc(it.hsn_code || "-")}</td>
           <td class="num">${formatQty(amt.qty)}</td>
-          <td>${esc(it.unit || "-")}</td>
           <td class="num">${amt.rate.toFixed(2)}</td>
           <td class="num">
             ${
@@ -563,7 +592,7 @@ function buildHtml(quotation) {
        ===================================================== -->
 
   <div class="party-block">
-    <div class="section-label">Bill To</div>
+    <div class="section-label">Quotation To</div>
     <div class="name">${esc(customer_name || "-")}</div>
     ${
       customer_address
@@ -584,14 +613,13 @@ function buildHtml(quotation) {
   <table class="items">
     <colgroup>
       <col style="width:5%">
-      <col style="width:24%">
+      <col style="width:${gstEnabled ? "28%" : "32%"}">
       <col style="width:10%">
-      <col style="width:8%">
-      <col style="width:8%">
-      <col style="width:11%">
       <col style="width:9%">
+      <col style="width:12%">
+      <col style="width:8%">
       ${gstEnabled ? `<col style="width:9%">` : ""}
-      <col style="width:${gstEnabled ? "16%" : "25%"}">
+      <col style="width:${gstEnabled ? "19%" : "24%"}">
     </colgroup>
 
     <thead>
@@ -600,7 +628,6 @@ function buildHtml(quotation) {
         <th>Description of Goods</th>
         <th>HSN/SAC</th>
         <th class="num">Quantity</th>
-        <th>Unit</th>
         <th class="num">Rate</th>
         <th class="num">Disc %</th>
         ${gstEnabled ? `<th class="num">GST %</th>` : ""}
@@ -613,7 +640,7 @@ function buildHtml(quotation) {
         buildItemRows(items, gstEnabled) ||
         `
           <tr>
-            <td colspan="${gstEnabled ? 9 : 8}" style="text-align:center;color:#9ca3af;padding:16px;">
+            <td colspan="${gstEnabled ? 8 : 7}" style="text-align:center;color:#9ca3af;padding:16px;">
               No items
             </td>
           </tr>
@@ -680,7 +707,7 @@ function buildHtml(quotation) {
       ? `
         <div class="narration-block">
           <strong>Terms & Conditions:</strong>
-          ${esc(terms_conditions)}
+          ${buildTermsList(terms_conditions)}
         </div>
       `
       : ""

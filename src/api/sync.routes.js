@@ -18,6 +18,7 @@
       getAllParentGroupDetailsXML,
       getProfitLossXML,
         getStockGroupSummaryXML,
+        getCompanyDefaultGstRateXML,
         getStockGroupGSTXML,
           getAllLedgersXML,
             getPurchaseSalesLedgersXML,
@@ -29,12 +30,14 @@
     } from "../services/xmlBuilder.js";
     import { parseXML, parseXMLKeepText } from "../services/parser.js";
 import { buildDeliveryNotes } from "../services/voucherUpsert.service.js";
+import { parseTallyAmount } from "../utils/tallyAmount.js";
+import { computeProfitLoss } from "../services/profitLossCalc.js";
     import {
       createAuditLog
     } from "../utils/createAuditLog.js";
   import { syncProfitLossSummary } from "../services/profitLossSummarySync.service.js";
     import { safeEnqueueSync } from "../queues/sync.queue.js";
-    import { SYNC_STEP_COUNT } from "../config/syncSteps.js";
+    import { SYNC_STEP_COUNT, SYNC_STEP_LABELS } from "../config/syncSteps.js";
 
 
 
@@ -106,26 +109,7 @@ const clean = (value) => {
   split on commas/symbols and kept only the last chunk, so
   "-1,23,456.00" became +456 — wrong size AND side.
 =================================================== */
-const parseTallyAmount = (value) => {
-  if (Array.isArray(value)) value = value[0];
-  if (value && typeof value === "object") value = value["#text"] ?? value._ ?? "";
-  if (value === null || value === undefined || value === "") return 0;
-  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
-
-  const str = String(value).replace(/,/g, "").trim();
-  const numbers = str.match(/\d+(?:\.\d+)?/g);
-  if (!numbers?.length) return 0;
-  const magnitude = Number(numbers[numbers.length - 1]);
-
-  // An explicit Dr/Cr wins; otherwise a leading minus (currency symbols
-  // may sit between it and the digits) or a minus right before the
-  // last figure means Dr.
-  let negative;
-  if (/\bDr\b/i.test(str)) negative = true;
-  else if (/\bCr\b/i.test(str)) negative = false;
-  else negative = /^-/.test(str) || /-[^\d-]*\d+(?:\.\d+)?\s*$/.test(str);
-  return negative ? -magnitude : magnitude;
-};
+// parseTallyAmount lives in utils/tallyAmount.js so it can be unit-tested.
 
 // Dr/Cr follows the sign of the amount Tally sent — never a fixed side.
 // A zero balance has no side, so it stores NULL instead of "Cr".
@@ -1902,44 +1886,15 @@ router.get("/profit-loss-sync", async (req, res) => {
     const groups = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP || [];
     const list = Array.isArray(groups) ? groups : [groups];
 
-    let totalSales = 0, totalPurchase = 0, directExpenses = 0, directIncomes = 0;
-    let stockValue = 0, indirectIncome = 0, indirectExpenses = 0;
-
-    for (const group of list) {
-      let rawName =
-        group?.["LANGUAGENAME.LIST"]?.[0]?.["NAME.LIST"]?.[0]?.NAME ||
-        group?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
-        group?.NAME;
-
-      let names = [];
-      if (Array.isArray(rawName)) names = rawName;
-      else if (rawName) names = [rawName];
-
-      // Signed (negative = Dr). Each group is read on its NORMAL side —
-      // incomes are Cr, expenses/purchases/stock are Dr — so a group that
-      // sits on the unusual side (e.g. Direct Expenses in credit after a
-      // reversal) reduces the total instead of being added. Math.abs()
-      // used to add it either way. Groups on their normal side give the
-      // same numbers as before.
-      const signed = parseTallyAmount(group?.CLOSINGBALANCE);
-      const asCredit = signed;  // income groups: Cr is positive
-      const asDebit = -signed;  // expense / purchase / asset groups: Dr is positive
-
-      if (names.some(n => n === "Sales Accounts" || n?.includes("Sales"))) totalSales = asCredit;
-      else if (names.some(n => n === "Purchase Accounts" || n?.includes("Purchase"))) totalPurchase = asDebit;
-      else if (names.some(n => n === "Direct Expenses" || n?.includes("Direct Expenses"))) directExpenses = asDebit;
-      else if (names.some(n => n === "Direct Incomes" || n?.includes("Direct Incomes"))) directIncomes = asCredit;
-      else if (names.some(n => n === "Stock-in-hand" || n?.includes("Stock-in-hand"))) stockValue = asDebit;
-      else if (names.some(n => n === "Indirect Incomes" || n?.includes("Indirect Income"))) indirectIncome = asCredit;
-      else if (names.some(n => n === "Indirect Expenses" || n?.includes("Indirect Expense"))) indirectExpenses = asDebit;
-    }
-
-    const grossProfit = Number((totalSales - totalPurchase - directExpenses + directIncomes).toFixed(2));
-    const netProfit = Number((grossProfit + indirectIncome - indirectExpenses).toFixed(2));
-    const profitMargin = totalSales > 0 ? Number(((netProfit / totalSales) * 100).toFixed(2)) : 0;
+    // Pure calculation lives in services/profitLossCalc.js (unit-tested).
+    const {
+      totalSales, totalPurchase, directExpenses, directIncomes, stockValue, openingStock,
+      indirectIncome, indirectExpenses, grossProfit, netProfit, profitMargin
+    } = computeProfitLoss(list);
+    console.log(`P&L SYNC groups returned: ${list.length}; closingStock=${stockValue} openingStock=${openingStock}`);
 
     const profitLossData = {
-      totalSales, totalPurchase, directExpenses, directIncomes, stockValue,
+      totalSales, totalPurchase, directExpenses, directIncomes, stockValue, openingStock,
       indirectIncome, indirectExpenses, grossProfit, netProfit, profitMargin
     };
 
@@ -2018,6 +1973,23 @@ router.get("/stock-group-summary-sync", async (req, res) => {
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     const parsed = await parseXML(responseXML);
 
+    // Company-level default GST rate, for items/groups whose GST source is
+    // "As per Company/Stock Group" (their own stored rate is 0). Best effort:
+    // a failure just leaves those items at 0 as before.
+    let companyGst = { igst: 0, cgst: 0, sgst: 0 };
+    try {
+      const cgXml = await sendToTallyViaConnector(companyId, getCompanyDefaultGstRateXML(company), "sync", userId);
+      const cg = (await parseXML(cgXml))?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
+      const c0 = Array.isArray(cg) ? cg[0] : cg;
+      companyGst = {
+        igst: parseFloat(c0?.IGSTRATE) || 0,
+        cgst: parseFloat(c0?.CGSTRATE) || 0,
+        sgst: parseFloat(c0?.SGSTRATE) || 0,
+      };
+    } catch (e) {
+      console.log("COMPANY DEFAULT GST FETCH FAILED:", e.message);
+    }
+
     // Taken only now that Tally has answered: nothing is held open during the connector wait.
     client = await pool.connect();
     await client.query("BEGIN");
@@ -2093,6 +2065,17 @@ router.get("/stock-group-summary-sync", async (req, res) => {
           sgstRate = parseFloat(groupGst.sgst_rate) || 0;
           if (!hsnCode) hsnCode = groupGst.hsn_code || null;
         }
+      }
+
+      // Still nothing, and the item's GST source in Tally is "As per
+      // Company/Stock Group": the effective rate is the company's own.
+      if (
+        !igstRate && !cgstRate && !sgstRate && itemGstApplicable &&
+        /as per company/i.test(String(item?.GSTSRC || ""))
+      ) {
+        igstRate = companyGst.igst;
+        cgstRate = companyGst.cgst;
+        sgstRate = companyGst.sgst;
       }
 
       // Belt-and-braces: an item explicitly Not Applicable is never taxed,
@@ -3038,13 +3021,29 @@ router.get("/godown-sync", async (req, res) => {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    const rawGodowns = parsed?.ENVELOPE?.DSPACCNAME || [];
+    // getGodownsXML is a Collection export (DATA > COLLECTION > GODOWN); the
+    // old "Godown Summary" report shape (ENVELOPE > DSPACCNAME) is kept as a
+    // fallback.
+    const rawGodowns =
+      parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GODOWN ||
+      parsed?.ENVELOPE?.DSPACCNAME ||
+      [];
     const list = Array.isArray(rawGodowns) ? rawGodowns : [rawGodowns];
 
     let inserted = 0, updated = 0, ignored = 0;
 
     for (const godown of list) {
-      let godownName = godown?.DSPDISPNAME || godown?.$?.NAME || godown?.["@NAME"] || godown?.NAME || null;
+      // The parser drops XML attributes (<GODOWN NAME="...">), so a Collection
+      // export's name is only reachable via LANGUAGENAME.LIST > NAME.LIST > NAME.
+      const langNames = godown?.["LANGUAGENAME.LIST"];
+      const langList = Array.isArray(langNames) ? langNames[0] : langNames;
+      let godownName =
+        godown?.DSPDISPNAME ||
+        godown?.$?.NAME ||
+        godown?.["@NAME"] ||
+        godown?.NAME ||
+        langList?.["NAME.LIST"]?.NAME ||
+        (typeof godown === "string" ? godown : null);
       if (Array.isArray(godownName)) godownName = godownName[0];
       if (godownName && typeof godownName === "object") godownName = godownName._ || null;
       godownName = clean(godownName);
@@ -3190,6 +3189,9 @@ function formatSyncJob(job) {
     error: job.error_message,
     steps,
     totalSteps: SYNC_STEP_COUNT,
+    // The step in progress: steps are only recorded once finished, so a slow one
+    // (ALL LEDGERS saves row by row) would otherwise leave the loader looking frozen.
+    currentStep: job.status === "running" ? SYNC_STEP_LABELS[steps.length] ?? null : null,
     isStuck,
     message:
       job.status === "completed" ? "Synchronization completed successfully." :

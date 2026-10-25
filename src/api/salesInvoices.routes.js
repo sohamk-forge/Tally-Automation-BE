@@ -688,6 +688,79 @@ router.post("/sales-invoices/draft", async (req, res) => {
   }
 });
 
+// Last rate this customer was billed for an item (most recent non-draft
+// invoice). Falls back to the item's most recent rate across all customers.
+router.get("/sales-invoices/last-rate", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+    const companyId = validateCompanyId(req.query.company_id);
+    const customer = String(req.query.customer_name || "").trim().toLowerCase();
+    const item = String(req.query.item_name || "").trim().toLowerCase();
+    if (!companyId || !item) {
+      return res.status(400).json({ status: "error", message: "company_id and item_name required" });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT rate, (cust = $2) AS same_customer FROM (
+        -- invoices created in this app
+        SELECT (li->>'rate')::numeric AS rate,
+               LOWER(TRIM(s.customer_name)) AS cust,
+               s.created_at AS at
+        FROM app_test.sales_invoice_extractions s,
+             jsonb_array_elements(
+               CASE WHEN jsonb_typeof(s.raw_json->'line_items') = 'array'
+                    THEN s.raw_json->'line_items' ELSE '[]'::jsonb END
+             ) li
+        WHERE s.company_id = $1
+          AND s.sync_status <> 'draft'
+          AND LOWER(TRIM(li->>'item_name')) = $3
+          AND COALESCE((li->>'rate')::numeric, 0) > 0
+        UNION ALL
+        -- sales vouchers synced from Tally; RATE looks like "58.80/Mtr."
+        SELECT NULLIF(REPLACE(SUBSTRING(alloc->>'RATE' FROM '^[0-9.,]+'), ',', ''), '')::numeric,
+               LOWER(TRIM(v.party_ledger_name)),
+               v.voucher_date
+        FROM app_test.vouchers v,
+             jsonb_array_elements(
+               CASE WHEN jsonb_typeof(v.ledger_entries) = 'array'
+                    THEN v.ledger_entries ELSE '[]'::jsonb END
+             ) e,
+             jsonb_array_elements(
+               CASE jsonb_typeof(e->'INVENTORYALLOCATIONS.LIST')
+                    WHEN 'array' THEN e->'INVENTORYALLOCATIONS.LIST'
+                    WHEN 'object' THEN jsonb_build_array(e->'INVENTORYALLOCATIONS.LIST')
+                    ELSE '[]'::jsonb END
+             ) alloc
+        WHERE v.company_id = $1
+          AND v.voucher_type ILIKE 'sales%'
+          AND v.deleted_at IS NULL
+          AND COALESCE(v.is_cancelled, false) = false
+          AND LOWER(TRIM(alloc->>'STOCKITEMNAME')) = $3
+      ) h
+      WHERE rate > 0
+      ORDER BY (cust = $2) DESC, at DESC
+      LIMIT 1
+      `,
+      [companyId, customer, item]
+    );
+
+    res.json({
+      status: "success",
+      rate: rows[0] ? Number(rows[0].rate) : null,
+      same_customer: rows[0] ? rows[0].same_customer : false,
+    });
+  } catch (err) {
+    console.error("LAST RATE ERROR:", err);
+    res.status(500).json({ status: "error", message: "Failed to fetch last rate" });
+  }
+});
+
 router.get("/sales-invoices", async (req, res) => {
   try {
     const userId = req.session

@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test:dashboard": "node --test --test-force-exit ../tests/dashboard/dashboard.test.mjs",
     "test:gst": "node --test --test-force-exit --test-concurrency=1 ../tests/gst/gstr1Builder.test.mjs ../tests/gst/portalAndReturns.test.mjs ../tests/gst/gstr1Pipeline.e2e.test.mjs ../tests/gst/imsPipeline.e2e.test.mjs ../tests/gst/gstr3bPipeline.e2e.test.mjs ../tests/gst/wholeFlow.e2e.test.mjs",
     "migrate:latest": "knex migrate:latest",
     "migrate:rollback": "knex migrate:rollback",
