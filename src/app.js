@@ -58,6 +58,8 @@ import "./workers/pushVoucher.worker.js";
 
 import "./workers/journalVoucher.worker.js";
 
+import "./workers/stockJournal.worker.js";
+
 import "./workers/bulkSalesV2.worker.js";
 
 import "./workers/bulkPurchase.worker.js";
@@ -179,6 +181,9 @@ import voucherRoutes
 
 import journalVoucherRoutes
   from "./api/journalVoucher.routes.js";
+
+import stockJournalRoutes
+  from "./api/stockJournal.routes.js";
 
 import salesAccountRoutes
  from "./api/salesAccount.routes.js";
@@ -405,6 +410,17 @@ app.use(
   "/api",
   ...requireSessionAndCompany(),
   journalVoucherRoutes
+);
+
+
+/* =================================
+   STOKE-JOURNAL APIs
+================================= */
+
+app.use(
+  "/api",
+  ...requireSessionAndCompany(),
+  stockJournalRoutes
 );
 
 /* =================================
