@@ -76,7 +76,10 @@ router.post("/push/journal-voucher", async (req, res) => {
       Number.isNaN(Date.parse(voucher_date)) ||
       new Date(voucher_date).toISOString().slice(0, 10) !== voucher_date
     ) {
-      return badRequest(res, "voucher_date must be a valid date (YYYY-MM-DD)");
+      return res.status(400).json({
+  success: false,
+  message: "voucher_date must be a valid date (YYYY-MM-DD)"
+});
     }
 
     if (!ALLOWED_VOUCHER_TYPES.includes(voucher_type)) {
@@ -338,28 +341,53 @@ if (voucher_date < periodStart || voucher_date > periodEnd) {
       voucherId = voucherResult.rows[0].id;
 
       for (const entry of cleanEntries) {
-        await client.query(
-          `
-          INSERT INTO ${DB_SCHEMA}.push_journal_voucher_entries
-          (
-            voucher_id,
-            ledger_name,
-            amount,
-            entry_type,
-            description,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-          `,
-          [
-            voucherId,
-            entry.ledgerName,
-            entry.amount,
-            entry.type,
-            entry.description
-          ]
-        );
+        
+await client.query(
+  `INSERT INTO ${DB_SCHEMA}.push_stock_journal_entries
+   (
+     stock_journal_id,
+     stock_item_name,
+     quantity,
+     unit,
+     from_godown,
+     to_godown,
+     rate,
+     from_unit,
+     from_quantity,
+     from_rate,
+     to_unit,
+     to_quantity,
+     to_rate,
+     created_at,
+     updated_at
+   )
+   VALUES (
+     $1, $2, $3, $4, $5, $6, $7,
+     $8, $9, $10, $11, $12, $13, NOW(), NOW()
+   )`,
+  [
+    stockJournalId,
+    entry.stock_item_name,
+
+    // Legacy fields: retain source-side values.
+    entry.from_quantity,
+    entry.from_unit,
+    entry.from_godown,
+    entry.to_godown,
+    entry.from_rate,
+
+    // Source values.
+    entry.from_unit,
+    entry.from_quantity,
+    entry.from_rate,
+
+    // Destination values.
+    entry.to_unit,
+    entry.to_quantity,
+    entry.to_rate
+  ]
+);
+
       }
 
       await client.query("COMMIT");

@@ -72,13 +72,24 @@ new Worker(
         );
       }
 
-      const xml = createStockJournalXML({
-        company: journal.company_name,
-        voucherDate: journal.voucher_date,
-        voucherNumber: journal.voucher_number,
-        narration: journal.narration,
-        entries: entryResult.rows
-      });
+  const xml = await createStockJournalXML({
+  company: journal.company_name,
+  voucherDate: journal.voucher_date,
+  voucherNumber: journal.voucher_number,
+  narration: journal.narration,
+  entries: entryResult.rows
+});
+
+if (typeof xml !== "string" || !xml.trim()) {
+  throw new Error(
+    "Stock Journal XML generation failed: XML is empty or invalid"
+  );
+}
+
+console.log("[STOCK JOURNAL] Generated XML length:", xml.length);
+console.log("[STOCK JOURNAL] XML preview:", xml.slice(0, 500));
+
+      
 
       const connector = await resolveConnectorForCompany(
         journal.company_id,
