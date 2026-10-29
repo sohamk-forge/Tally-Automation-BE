@@ -1,4 +1,3 @@
-
 import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
@@ -8,6 +7,23 @@ import { stockJournalQueue } from "../queues/stockJournal.queue.js";
 
 const router = express.Router();
 
+const normalizeName = (value) =>
+  String(value ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const validQuantity = (value) =>
+  Number.isFinite(value) &&
+  value > 0 &&
+  Math.abs(value * 1000 - Math.round(value * 1000)) < 1e-8;
+
+const validRate = (value) =>
+  Number.isFinite(value) &&
+  value >= 0 &&
+  Math.abs(value * 100 - Math.round(value * 100)) < 1e-8;
+
 router.post("/push/stock-journal", async (req, res) => {
   const {
     company_id,
@@ -16,10 +32,10 @@ router.post("/push/stock-journal", async (req, res) => {
     voucher_number,
     narration,
     entries,
-  } = req.body;
+  } = req.body ?? {};
 
   try {
-    // 1. Resolve authenticated user.
+    // 1. Authenticate user
     const userId = await resolveUserId(req);
 
     if (!userId) {
@@ -29,7 +45,7 @@ router.post("/push/stock-journal", async (req, res) => {
       });
     }
 
-    // 2. Validate company ID.
+    // 2. Validate company
     const companyId = Number(company_id);
 
     if (!Number.isInteger(companyId) || companyId <= 0) {
@@ -46,16 +62,31 @@ router.post("/push/stock-journal", async (req, res) => {
       });
     }
 
-    if (
-      !(await assertCompanyRefs(req, res, {
-        ids: [companyId],
-        names: [company],
-      }))
-    ) {
-      return;
+    const hasCompanyAccess = await assertCompanyRefs(req, res, {
+      ids: [companyId],
+      names: [company],
+    });
+
+    if (!hasCompanyAccess) return;
+
+    const companyResult = await pool.query(
+      `SELECT name, financial_year_start, financial_year_end
+       FROM ${DB_SCHEMA}.companies
+       WHERE id = $1
+       LIMIT 1`,
+      [companyId]
+    );
+
+    const companyRecord = companyResult.rows[0];
+
+    if (!companyRecord) {
+      return res.status(404).json({
+        success: false,
+        message: `Company not found: ${companyId}`,
+      });
     }
 
-    // 3. Validate voucher date.
+    // 3. Validate voucher date
     if (
       typeof voucher_date !== "string" ||
       !/^\d{4}-\d{2}-\d{2}$/.test(voucher_date) ||
@@ -68,59 +99,29 @@ router.post("/push/stock-journal", async (req, res) => {
       });
     }
 
-    // 4. Fetch company details once.
-    const companyResult = await pool.query(
-      `SELECT name, financial_year_start, financial_year_end
-       FROM ${DB_SCHEMA}.companies
-       WHERE id = $1
-       LIMIT 1`,
-      [companyId]
-    );
-
-    const companyRecord = companyResult.rows[0];
-
-    if (!companyRecord?.name) {
-      return res.status(404).json({
-        success: false,
-        message: `Company not found: ${companyId}`,
-      });
-    }
-
-    const companyName = companyRecord.name;
-
-    // 5. Validate the company's financial year.
-    const parseFinancialYear = (value) => {
-      const year = String(value ?? "").trim();
-      return /^\d{4}$/.test(year) ? Number(year) : null;
-    };
-
-    const startYear = parseFinancialYear(
-      companyRecord.financial_year_start
-    );
-
-    const endYear = parseFinancialYear(
-      companyRecord.financial_year_end
-    );
+    // Indian financial year: 1 April to 31 March
+    const startYear = Number(companyRecord.financial_year_start);
+    const endYear = Number(companyRecord.financial_year_end);
 
     if (
-      startYear === null ||
-      endYear === null ||
+      !Number.isInteger(startYear) ||
+      !Number.isInteger(endYear) ||
+      startYear < 1900 ||
       endYear !== startYear + 1
     ) {
       return res.status(500).json({
         success: false,
-        message: "Company financial year is missing or invalid.",
+        message: "Company financial year is missing or invalid",
       });
     }
 
-    // Indian financial-year convention: 1 April to 31 March.
     const periodStart = `${startYear}-04-01`;
     const periodEnd = `${endYear}-03-31`;
 
     if (voucher_date < periodStart || voucher_date > periodEnd) {
       return res.status(400).json({
         success: false,
-        message: "Voucher date is outside the company's accounting period.",
+        message: "Voucher date is outside the company's accounting period",
         voucher_date,
         allowed_period: {
           start: periodStart,
@@ -129,7 +130,7 @@ router.post("/push/stock-journal", async (req, res) => {
       });
     }
 
-    // 6. Validate the entries array.
+    // 4. Validate entries
     if (!Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({
         success: false,
@@ -139,62 +140,51 @@ router.post("/push/stock-journal", async (req, res) => {
 
     const cleanEntries = [];
 
-    const validQuantity = (value) =>
-      Number.isFinite(value) &&
-      value > 0 &&
-      Math.abs(value * 1000 - Math.round(value * 1000)) < 1e-8;
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
 
-    const validRate = (value) =>
-      Number.isFinite(value) &&
-      value >= 0 &&
-      Math.abs(value * 100 - Math.round(value * 100)) < 1e-8;
-
-    for (const entry of entries) {
-      const stockItemName = String(
-        entry?.stock_item_name ?? ""
-      ).trim();
-
-      const fromGodown = String(
-        entry?.from_godown ?? ""
-      ).trim();
-
-      const toGodown = String(
-        entry?.to_godown ?? ""
-      ).trim();
-
-      const fromUnit = String(
-        entry?.from_unit ?? ""
-      ).trim();
-
-      const toUnit = String(
-        entry?.to_unit ?? ""
-      ).trim();
-
-      const fromQuantity = Number(entry?.from_quantity);
-      const toQuantity = Number(entry?.to_quantity);
-
-      const fromRate = Number(entry?.from_rate);
-      const toRate = Number(entry?.to_rate);
-
-      if (
-        !stockItemName ||
-        !fromGodown ||
-        !toGodown ||
-        !fromUnit ||
-        !toUnit
-      ) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
         return res.status(400).json({
           success: false,
-          message:
-            "Stock item, both godowns, and both units are required",
+          message: `Entry ${i}: must be a valid object`,
         });
       }
 
-      if (fromGodown.toLowerCase() === toGodown.toLowerCase()) {
+      const stockItemName = String(
+        entry.stock_item_name ?? ""
+      ).trim();
+
+      const fromGodown = String(
+        entry.from_godown ?? ""
+      ).trim();
+
+      const toGodown = String(
+        entry.to_godown ?? ""
+      ).trim();
+
+      const fromQuantity = Number(entry.from_quantity);
+      const toQuantity = Number(entry.to_quantity);
+      const fromRate = Number(entry.from_rate);
+      const toRate = Number(entry.to_rate);
+
+      const missingFields = [];
+
+      if (!stockItemName) missingFields.push("stock_item_name");
+      if (!fromGodown) missingFields.push("from_godown");
+      if (!toGodown) missingFields.push("to_godown");
+
+      if (missingFields.length > 0) {
         return res.status(400).json({
           success: false,
-          message:
-            "Source and destination godowns must be different",
+          message: `Entry ${i}: required fields are missing`,
+          missing_fields: missingFields,
+        });
+      }
+
+      if (normalizeName(fromGodown) === normalizeName(toGodown)) {
+        return res.status(400).json({
+          success: false,
+          message: `Entry ${i}: source and destination godowns must be different`,
         });
       }
 
@@ -204,40 +194,136 @@ router.post("/push/stock-journal", async (req, res) => {
       ) {
         return res.status(400).json({
           success: false,
-          message:
-            "Source and destination quantities must be positive with at most 3 decimal places",
+          message: `Entry ${i}: quantities must be positive with at most 3 decimal places`,
         });
       }
 
       if (!validRate(fromRate) || !validRate(toRate)) {
         return res.status(400).json({
           success: false,
-          message:
-            "Source and destination rates must be non-negative with at most 2 decimal places",
+          message: `Entry ${i}: rates must be non-negative with at most 2 decimal places`,
         });
       }
 
       cleanEntries.push({
         stock_item_name: stockItemName,
         from_godown: fromGodown,
-        from_unit: fromUnit,
+        to_godown: toGodown,
         from_quantity: fromQuantity,
         from_rate: fromRate,
-        to_godown: toGodown,
-        to_unit: toUnit,
         to_quantity: toQuantity,
         to_rate: toRate,
       });
     }
 
-    // 7. Initialize the client BEFORE any client.query() calls.
+    // 5. Fetch stock items and godowns for this company
+    const [stockItemsResult, godownsResult] = await Promise.all([
+      pool.query(
+        `SELECT item_name, unit
+         FROM ${DB_SCHEMA}.stock_group_summary
+         WHERE company_id = $1`,
+        [companyId]
+      ),
+
+      pool.query(
+        `SELECT godown_name
+         FROM ${DB_SCHEMA}.godown_details
+         WHERE company_id = $1`,
+        [companyId]
+      ),
+    ]);
+
+    // IMPORTANT:
+    // stock_group_summary uses item_name, NOT name.
+    // Example: item_name = "Hard Disk", unit = "Pcs".
+    const stockItemMap = new Map();
+
+    for (const row of stockItemsResult.rows) {
+      const key = normalizeName(row.item_name);
+
+      if (key && !stockItemMap.has(key)) {
+        stockItemMap.set(key, {
+          name: row.item_name,
+          unit: String(row.unit ?? "").trim(),
+        });
+      }
+    }
+
+    const godownSet = new Set(
+      godownsResult.rows.map((row) =>
+        normalizeName(row.godown_name)
+      )
+    );
+
+    // 6. Validate stock item and godown names
+    const masterErrors = [];
+
+    for (let i = 0; i < cleanEntries.length; i += 1) {
+      const entry = cleanEntries[i];
+
+      if (!stockItemMap.has(normalizeName(entry.stock_item_name))) {
+        masterErrors.push({
+          entry_index: i,
+          field: "stock_item_name",
+          value: entry.stock_item_name,
+          message: `Stock item '${entry.stock_item_name}' was not found for this company.`,
+        });
+      }
+
+      if (!godownSet.has(normalizeName(entry.from_godown))) {
+        masterErrors.push({
+          entry_index: i,
+          field: "from_godown",
+          value: entry.from_godown,
+          message: `Source godown '${entry.from_godown}' was not found for this company.`,
+        });
+      }
+
+      if (!godownSet.has(normalizeName(entry.to_godown))) {
+        masterErrors.push({
+          entry_index: i,
+          field: "to_godown",
+          value: entry.to_godown,
+          message: `Destination godown '${entry.to_godown}' was not found for this company.`,
+        });
+      }
+    }
+
+    if (masterErrors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Stock Journal master validation failed. No voucher was created.",
+        errors: masterErrors,
+      });
+    }
+
+    // 7. Automatically retrieve the stock item's unit
+    for (const entry of cleanEntries) {
+      const masterItem = stockItemMap.get(
+        normalizeName(entry.stock_item_name)
+      );
+
+      if (!masterItem?.unit) {
+        return res.status(400).json({
+          success: false,
+          message: `Unit is missing for stock item '${entry.stock_item_name}'.`,
+        });
+      }
+
+      // Use the same master unit for both source and destination.
+      entry.unit = masterItem.unit;
+      entry.from_unit = masterItem.unit;
+      entry.to_unit = masterItem.unit;
+    }
+
+    // 8. Save header and entries in a database transaction
     const client = await pool.connect();
     let stockJournalId;
 
     try {
       await client.query("BEGIN");
 
-      // 8. Insert Stock Journal header.
       const header = await client.query(
         `INSERT INTO ${DB_SCHEMA}.push_stock_journals
          (
@@ -257,7 +343,7 @@ router.post("/push/stock-journal", async (req, res) => {
          RETURNING id`,
         [
           companyId,
-          companyName,
+          companyRecord.name,
           voucher_date,
           voucher_number || null,
           narration || null,
@@ -267,7 +353,6 @@ router.post("/push/stock-journal", async (req, res) => {
 
       stockJournalId = header.rows[0].id;
 
-      // 9. Insert each entry with separate source and destination values.
       for (const entry of cleanEntries) {
         await client.query(
           `INSERT INTO ${DB_SCHEMA}.push_stock_journal_entries
@@ -290,29 +375,22 @@ router.post("/push/stock-journal", async (req, res) => {
            )
            VALUES (
              $1, $2, $3, $4, $5, $6, $7,
-             $8, $9, $10, $11, $12, $13,
-             NOW(), NOW()
+             $8, $9, $10, $11, $12, $13, NOW(), NOW()
            )`,
           [
-            stockJournalId,
-            entry.stock_item_name,
-
-            // Existing columns retained for compatibility.
-            entry.from_quantity,
-            entry.from_unit,
-            entry.from_godown,
-            entry.to_godown,
-            entry.from_rate,
-
-            // New source-side fields.
-            entry.from_unit,
-            entry.from_quantity,
-            entry.from_rate,
-
-            // New destination-side fields.
-            entry.to_unit,
-            entry.to_quantity,
-            entry.to_rate,
+            stockJournalId,       // $1
+            entry.stock_item_name, // $2
+            entry.from_quantity,   // $3: legacy quantity
+            entry.unit,            // $4: legacy unit
+            entry.from_godown,     // $5
+            entry.to_godown,       // $6
+            entry.from_rate,       // $7: legacy rate
+            entry.from_unit,       // $8
+            entry.from_quantity,   // $9
+            entry.from_rate,       // $10
+            entry.to_unit,         // $11
+            entry.to_quantity,     // $12
+            entry.to_rate,         // $13
           ]
         );
       }
@@ -325,7 +403,7 @@ router.post("/push/stock-journal", async (req, res) => {
       client.release();
     }
 
-    // 10. Queue the Stock Journal for Tally processing.
+    // 9. Queue the voucher after the database transaction commits
     try {
       const job = await stockJournalQueue.add(
         "push-stock-journal",
@@ -373,6 +451,10 @@ router.post("/push/stock-journal", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to create Stock Journal",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
   }
 });
