@@ -16,6 +16,21 @@ import { assertImsOpen } from "./imsPortal.service.js";
 // IMS sections fetched. Credit/debit-note section codes are as GSTN names
 // them; a section the portal rejects is reported as a warning, not a failure.
 export const IMS_SECTIONS = ["B2B", "B2BA", "B2BDN", "B2BCN"];
+
+// WhiteBooks rejects B2BDN / B2BCN as "Invalid Section" (IMS0001). GSTN's own
+// IMS names the note sections DN and CN, so those go first and the old codes
+// stay as a fallback. Override per section with IMS_SECTION_CODES, e.g.
+// IMS_SECTION_CODES={"B2BDN":["DN"],"B2BCN":["CN"]} once the right codes are confirmed.
+const DEFAULT_SECTION_CODES = { B2BDN: ["DN", "B2BDN"], B2BCN: ["CN", "B2BCN"] };
+export function sectionCodes(section, env = process.env) {
+  try {
+    const override = env.IMS_SECTION_CODES ? JSON.parse(env.IMS_SECTION_CODES)[section] : null;
+    if (Array.isArray(override) && override.length) return override;
+  } catch { /* bad JSON in env: use defaults */ }
+  return DEFAULT_SECTION_CODES[section] || [section];
+}
+const isNoRecords = (err) => err.errorCode === "RET11416" || /RET11416/.test(err.message || "");
+const isInvalidSection = (err) => err.errorCode === "IMS0001" || /IMS0001|Invalid Section/i.test(err.message || "");
 const ACTIONS = new Set(["A", "R", "P"]);
 
 const yyyymm = (mmyyyy) => `${String(mmyyyy).slice(2)}${String(mmyyyy).slice(0, 2)}`;
@@ -71,17 +86,47 @@ export async function loadPurchases(companyId, fromDate, toDate) {
            v.is_cancelled, v.is_optional
     FROM ${DB_SCHEMA}.vouchers v
     LEFT JOIN LATERAL (
-      SELECT gst_number FROM ${DB_SCHEMA}.all_ledger_details a
+      SELECT gst_number, parent_group FROM ${DB_SCHEMA}.all_ledger_details a
       WHERE a.company_id = v.company_id AND a.deleted_at IS NULL
         AND lower(regexp_replace(a.ledger_name, '\\s+', ' ', 'g')) = lower(regexp_replace(v.party_ledger_name, '\\s+', ' ', 'g'))
       LIMIT 1
     ) l ON true
     WHERE v.company_id = $1 AND v.deleted_at IS NULL
       AND v.voucher_date BETWEEN $2 AND $3
-      AND v.voucher_type ~* 'purchase|debit\\s*note' AND v.voucher_type !~* 'order'
+      AND v.voucher_type ~* 'purchase|debit\\s*note' AND v.voucher_type !~* 'order|quotation'
+      -- a debit note to a customer is a sales-side document (GSTR-1), not a purchase return
+      AND NOT (v.voucher_type ~* 'debit\\s*note' AND COALESCE(l.parent_group, '') ~* 'debtor')
     `,
     [companyId, fromDate, toDate]
   );
+  return rows;
+}
+
+// GSTN registered names by supplier GSTIN, kept for the life of the process so a re-fetch doesn't repeat the lookups.
+const gstnNames = new Map();
+
+/**
+ * Put a supplier name on every IMS row from the GSTN taxpayer search (WhiteBooks /public/search): the trade name,
+ * else the legal name. If that lookup fails for a GSTIN, fall back to the party's name in your books; with neither
+ * the name stays blank. A failed lookup never blocks the fetch.
+ */
+export async function addSupplierNames(rows, purchaseRows, config) {
+  const books = new Map();
+  for (const p of purchaseRows) if (p.gstin && p.party_ledger_name && !books.has(p.gstin)) books.set(p.gstin, p.party_ledger_name);
+  const todo = [...new Set(rows.map((r) => r.stin).filter(Boolean))].filter((s) => !gstnNames.has(s));
+  for (let i = 0; i < todo.length; i += 5) {
+    await Promise.all(todo.slice(i, i + 5).map(async (s) => {
+      try {
+        const t = await whitebooks.searchTaxpayer({ gstin: s, ...config });
+        gstnNames.set(s, { name: t.tradeName || t.legalName || null, legal: t.legalName || null });
+      } catch { /* leave it out of the cache so the next fetch tries again */ }
+    }));
+  }
+  for (const r of rows) {
+    const g = gstnNames.get(r.stin);
+    if (g?.name) { r.supplier = g.name; r.supplierLegal = g.legal; r.supplierSource = "gstn"; }
+    else if (books.has(r.stin)) { r.supplier = books.get(r.stin); r.supplierSource = "books"; }
+  }
   return rows;
 }
 
@@ -107,24 +152,38 @@ export async function refreshIms({ companyId, gstin, retPeriod, frequency, ipAdd
   const warnings = [];
   const imsRows = [];
   for (const section of IMS_SECTIONS) {
-    try {
-      const list = await whitebooks.getImsInvoices({
-        gstin, section, txn: session.txn, gstUsername: session.gstUsername,
-        ipAddress: config.ipAddress || ipAddress, ...config,
-      });
-      for (const inv of list) {
-        imsRows.push({
-          ...inv,
-          section,
-          inum: inv.inum ?? inv.nt_num,
-          idt: inv.idt ?? inv.nt_dt,
-          src: portalRecord(inv), // echoed back on save with only the action changed
+    // Try each portal code for this section; only "Invalid Section" moves on to the next one.
+    let lastErr = null;
+    let done = false;
+    for (const portalSection of sectionCodes(section)) {
+      try {
+        const list = await whitebooks.getImsInvoices({
+          gstin, section: portalSection, retPeriod: period.retPeriod, txn: session.txn, gstUsername: session.gstUsername,
+          ipAddress: config.ipAddress || ipAddress, ...config,
         });
+        for (const inv of list) {
+          imsRows.push({
+            ...inv,
+            section,
+            portalSection,
+            inum: inv.inum ?? inv.nt_num,
+            idt: inv.idt ?? inv.nt_dt,
+            src: portalRecord(inv), // echoed back on save with only the action changed
+          });
+        }
+        done = true;
+        break;
+      } catch (err) {
+        if (err.code === 401) throw err;
+        // An incomplete or unreadable invoice list must never become a shorter list.
+        if (err.imsFatal) throw httpError(502, err.message);
+        // "No records found" just means this section is empty, not a failure.
+        if (isNoRecords(err)) { done = true; break; }
+        lastErr = err;
+        if (!isInvalidSection(err)) break;
       }
-    } catch (err) {
-      if (err.code === 401) throw err;
-      warnings.push(`Couldn't read the ${section} section from IMS: ${err.message}`);
     }
+    if (!done && lastErr) warnings.push(`Couldn't read the ${section} section from IMS: ${lastErr.message}`);
   }
   if (warnings.length === IMS_SECTIONS.length) {
     throw httpError(502, `Couldn't read IMS from the GST portal. ${warnings[0]}`);
@@ -138,6 +197,7 @@ export async function refreshIms({ companyId, gstin, retPeriod, frequency, ipAdd
   const purchases = purchaseRows.map(normalizePurchase).filter(Boolean);
 
   const { rows, usedVoucherIds } = matchIms(imsRows, purchases);
+  await addSupplierNames(rows, purchaseRows, config);
   const periodKey = yyyymm(period.retPeriod);
   for (const r of rows) r.inPeriod = !r.rtnprd || yyyymm(r.rtnprd) <= periodKey;
 
@@ -177,7 +237,7 @@ export async function getImsRun({ companyId, gstin, period }) {
   const { rows } = await pool.query(
     `
     SELECT id, gstin, return_period, ret_period, to_char(from_date,'YYYY-MM-DD') AS from_date, to_char(to_date,'YYYY-MM-DD') AS to_date,
-           stage, rows, decisions, only_in_books, warnings, stats, fetched_at, save_ref_id, save_status, gen2b_ref_id, gen2b_status, gstr2b, verified_at
+           stage, rows, decisions, decision_reasons, only_in_books, warnings, stats, fetched_at, save_ref_id, save_status, gen2b_ref_id, gen2b_status, gstr2b, verified_at
     FROM ${DB_SCHEMA}.gst_ims_runs WHERE company_id = $1 AND gstin = $2 AND return_period = $3
     `,
     [companyId, gstin, period]
@@ -189,28 +249,39 @@ export async function getImsRun({ companyId, gstin, period }) {
  * Record the user's actions. decisions: [{ key, action: "A"|"R"|"P"|null }]
  * (null clears the override and falls back to the proposal).
  */
-export async function setImsDecisions({ companyId, gstin, period, decisions }) {
+export async function setImsDecisions({ companyId, gstin, period, decisions, userId = null }) {
   const run = await getImsRun({ companyId, gstin, period });
   if (!run) throw httpError(404, "Fetch IMS invoices for this period first");
   if (["SAVE_PENDING", "GEN2B_PENDING"].includes(run.stage)) throw httpError(409, "Wait for the IMS save / 2B generation in progress to finish");
   await assertImsOpen({ companyId, gstin, period });
   const rowByKey = new Map(run.rows.map((r) => [r.key, r]));
   const merged = { ...(run.decisions || {}) };
+  const reasons = { ...(run.decision_reasons || {}) };
   for (const d of decisions || []) {
     const row = rowByKey.get(d.key);
     if (!row) throw httpError(400, `Unknown IMS invoice ${d.key}`);
-    if (d.action == null) { delete merged[d.key]; continue; }
+    if (d.action == null) { delete merged[d.key]; delete reasons[d.key]; continue; }
     if (!ACTIONS.has(d.action)) throw httpError(400, `Action must be A, R or P`);
     if (d.action === "P" && row.pendingBlocked) throw httpError(400, `GSTN doesn't allow 'pending' for invoice ${row.inum} — accept or reject it`);
+    // Overriding the system's proposal needs a recorded reason.
+    if (row.proposed && d.action !== row.proposed) {
+      const reason = String(d.reason || "").trim();
+      if (reason.length < 3) {
+        throw httpError(400, `Say why invoice ${row.inum} (${row.supplier || row.stin}) is ${d.action === "A" ? "accepted" : d.action === "R" ? "rejected" : "left pending"} when the proposal was ${row.proposed === "A" ? "accept" : row.proposed === "R" ? "reject" : "pending"}`);
+      }
+      reasons[d.key] = { reason, at: new Date().toISOString(), by: userId || null, proposed: row.proposed };
+    } else {
+      delete reasons[d.key];
+    }
     merged[d.key] = d.action;
   }
   const stats = computeStats(run.rows, merged, run.only_in_books || []);
   // Any change after a save means the portal no longer reflects it.
   await pool.query(
     `UPDATE ${DB_SCHEMA}.gst_ims_runs
-     SET decisions = $4, stats = $5, stage = 'FETCHED', updated_at = now()
+     SET decisions = $4, decision_reasons = $6, stats = $5, stage = 'FETCHED', updated_at = now()
      WHERE company_id = $1 AND gstin = $2 AND return_period = $3`,
-    [companyId, gstin, period, JSON.stringify(merged), JSON.stringify(stats)]
+    [companyId, gstin, period, JSON.stringify(merged), JSON.stringify(stats), JSON.stringify(reasons)]
   );
   return getImsRun({ companyId, gstin, period });
 }

@@ -76,9 +76,10 @@ export function setOffLiability(liability, credit) {
  * @param {Array}  input.inwardExempt  [{ inter: boolean, value }] purchases with no tax
  * @param {object} [input.openingCredit] electronic credit ledger balance { iamt, camt, samt, csamt } (0 until read from the portal)
  * @param {object} [input.itcFrom2b]    verified GSTR-2B comparison (imsPortal.compare2b) — its 2B figures replace the IMS totals
+ * @param {Array}  [input.inwardRcm]     reverse-charge purchases from the books [{ taxable, igst, cgst, sgst, cess, voucherNumber }] (rcm.js)
  * @param {string} [input.imsStage]     stage of the IMS run, to warn when 2B wasn't regenerated and verified
  */
-export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, imsRows, inwardExempt = [], openingCredit = null, itcFrom2b = null, imsStage = null }) {
+export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, imsRows, inwardExempt = [], openingCredit = null, itcFrom2b = null, imsStage = null, inwardRcm = [] }) {
   const issues = [];
   const issue = (severity, code, message) => issues.push({ severity, code, message });
 
@@ -137,8 +138,14 @@ export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, ims
       issue("warning", "GSTR2B_NOT_VERIFIED", "IMS actions haven't been saved, GSTR-2B regenerated and verified — ITC here is what you accepted in IMS, which GSTN may not match");
     }
   }
-  const itcNet = Object.fromEntries(HEADS.map((h) => [h, r2(itcAvl[h] - itcRevFromNotes[h])]));
-  if (HEADS.some((h) => itcNet[h] < 0)) {
+  // Reverse charge: tax is a cash liability in 3.1(d); the matching ITC goes in 4(A)(3).
+  const rcm = inwardRcm.reduce((a, x) => ({
+    txval: a.txval + x.taxable, iamt: a.iamt + x.igst, camt: a.camt + x.cgst, samt: a.samt + x.sgst, csamt: a.csamt + x.cess,
+  }), { txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 });
+  const rcmTax = { iamt: r2(rcm.iamt), camt: r2(rcm.camt), samt: r2(rcm.samt), csamt: r2(rcm.csamt) };
+  const itcOther = Object.fromEntries(HEADS.map((h) => [h, r2(itcAvl[h] - itcRevFromNotes[h])]));
+  const itcNet = Object.fromEntries(HEADS.map((h) => [h, r2(itcOther[h] + rcmTax[h])]));
+  if (HEADS.some((h) => itcOther[h] < 0)) {
     issue("error", "ITC_NEGATIVE", "Supplier credit notes exceed this period's ITC — the excess has to be paid as a reversal; review the IMS credit notes");
   }
 
@@ -146,8 +153,18 @@ export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, ims
   const inward = inwardExempt.reduce((a, x) => { if (x.inter) a.inter += x.value; else a.intra += x.value; return a; }, { inter: 0, intra: 0 });
 
   // Items the books can't tell us — reported as zero, flagged once.
-  issue("warning", "RCM_NOT_COVERED", "Inward supplies under reverse charge (3.1(d) and ITC in 4(A)(3)) aren't read from the books yet — reported as zero");
+  if (inwardRcm.length) {
+    issue("warning", "RCM_FROM_BOOKS", `${inwardRcm.length} reverse-charge purchase(s) read from the books (${inwardRcm.slice(0, 5).map((x) => x.voucherNumber).join(", ")}${inwardRcm.length > 5 ? ", …" : ""}): ₹${r2(rcmTax.iamt + rcmTax.camt + rcmTax.samt + rcmTax.csamt).toLocaleString("en-IN")} tax goes to 3.1(d), paid in cash, with ITC in 4(A)(3). Review them`);
+  } else {
+    issue("warning", "RCM_NONE_DETECTED", "No reverse-charge purchases were found (ledgers named RCM / Reverse Charge). If you had any — freight (GTA), legal, rent or other services from unregistered or notified suppliers — 3.1(d) and 4(A)(3) are understated");
+  }
   if (osupDet.txval < 0) issue("error", "OUTWARD_NEGATIVE", "Credit notes exceed this period's taxable sales — 3.1(a) can't be negative");
+  else {
+    const negHeads = [["IGST", osupDet.iamt], ["CGST", osupDet.camt], ["SGST", osupDet.samt], ["cess", osupDet.csamt]].filter(([, v]) => r2(v) < 0);
+    if (negHeads.length) {
+      issue("warning", "NEGATIVE_HEAD", `Credit notes exceed the output tax of this period on ${negHeads.map(([h, v]) => `${h} by ₹${Math.abs(r2(v)).toLocaleString("en-IN")}`).join(", ")}. Nothing is payable on that head and the excess is not paid out; GSTN may not accept a negative figure in 3.1(a), so consider reporting those credit notes in a later period`);
+    }
+  }
 
   const payload = {
     gstin,
@@ -156,7 +173,7 @@ export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, ims
       osup_det: round(osupDet),
       osup_zero: { txval: 0, iamt: 0, csamt: 0 },
       osup_nil_exmp: { txval: r2(nilExempt) },
-      isup_rev: { txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 },
+      isup_rev: round(rcm),
       osup_nongst: { txval: 0 },
     },
     inter_sup: {
@@ -168,13 +185,15 @@ export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, ims
       itc_avl: [
         { ty: "IMPG", iamt: 0, camt: 0, samt: 0, csamt: 0 },
         { ty: "IMPS", iamt: 0, camt: 0, samt: 0, csamt: 0 },
-        { ty: "ISRC", iamt: 0, camt: 0, samt: 0, csamt: 0 },
+        { ty: "ISRC", ...round(rcmTax) },
         { ty: "ISD", iamt: 0, camt: 0, samt: 0, csamt: 0 },
-        { ty: "OTH", ...round(itcAvl) },
+        // GSTN auto-drafts 4(A)(5) from GSTR-2B already NET of the supplier credit notes, so that is what goes here;
+        // the credit notes are not entered again in 4(B)(2) (that double-reduced ITC and showed as a variance on the portal).
+        { ty: "OTH", ...round(itcOther) },
       ],
       itc_rev: [
         { ty: "RUL", iamt: 0, camt: 0, samt: 0, csamt: 0 },
-        { ty: "OTH", ...round(itcRevFromNotes) },
+        { ty: "OTH", iamt: 0, camt: 0, samt: 0, csamt: 0 },
       ],
       itc_net: itcNet,
       itc_inelg: [
@@ -197,12 +216,21 @@ export function buildGstr3b({ gstin, retPeriod, outward, outwardBlocked = 0, ims
     Object.fromEntries(HEADS.map((h) => [h, Math.max(0, liability[h])])),
     credit
   );
+  // Reverse-charge tax is paid in cash only (it cannot be set off by ITC).
+  if (rcmTax.iamt + rcmTax.camt + rcmTax.samt + rcmTax.csamt > 0) {
+    payment.cash = {
+      ipd: r2(payment.cash.ipd + rcmTax.iamt), cpd: r2(payment.cash.cpd + rcmTax.camt),
+      spd: r2(payment.cash.spd + rcmTax.samt), cspd: r2(payment.cash.cspd + rcmTax.csamt),
+    };
+    payment.cashTotal = r2(payment.cashTotal + rcmTax.iamt + rcmTax.camt + rcmTax.samt + rcmTax.csamt);
+  }
 
   const errorCount = issues.filter((i) => i.severity === "error").length;
   return {
     payload,
     liability,
-    itc: { available: round(itcAvl), reversed: round(itcRevFromNotes), net: itcNet, openingCredit: openingCredit || null, creditUsed: credit },
+    // available / reversed: 2B invoices and supplier credit notes, for information; allOther is what 4(A)(5) carries (their difference).
+    itc: { available: round(itcAvl), reversed: round(itcRevFromNotes), allOther: itcNet, net: itcNet, openingCredit: openingCredit || null, creditUsed: credit },
     payment,
     issues,
     stats: {

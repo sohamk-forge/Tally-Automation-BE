@@ -77,7 +77,7 @@ export function summarizePayload(payload) {
   }
   if (payload.doc_issue) {
     const t = blank("DOC_ISSUE");
-    for (const d of payload.doc_issue.doc_det_new || []) for (const s of d.docs || []) t.ttl_rec += num(s.net_issue);
+    for (const d of payload.doc_issue.doc_det || payload.doc_issue.doc_det_new || []) for (const s of d.docs || []) t.ttl_rec += num(s.net_issue);
     out.push(t);
   }
   return out.map(finish);

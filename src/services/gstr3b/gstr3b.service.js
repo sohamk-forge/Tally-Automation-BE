@@ -7,11 +7,13 @@
 
 import pool from "../../db/index.js";
 import { DB_SCHEMA } from "../../config/db.js";
-import { resolvePeriod, loadInputs } from "../gstr1/gstr1Prepare.service.js";
+import { resolvePeriod, loadInputs, companyFyIssue } from "../gstr1/gstr1Prepare.service.js";
 import { buildGstr1 } from "../gstr1/gstr1Builder.js";
 import { getImsRun, finalAction, loadPurchases } from "../ims/ims.service.js";
 import { normalizePurchase } from "../ims/imsMatcher.js";
 import { buildGstr3b } from "./gstr3bBuilder.js";
+import { lateness } from "../gstDeadlines.js";
+import { rcmFromPurchases } from "./rcm.js";
 
 function httpError(code, message) {
   const err = new Error(message);
@@ -50,15 +52,27 @@ export async function prepareGstr3b({ companyId, gstin, retPeriod, frequency, cr
 
   // Table 5: purchases in the period that carry no tax.
   const supplierState = gstin.slice(0, 2);
-  const inwardExempt = (await loadPurchases(companyId, period.fromDate, period.toDate))
+  const purchaseRows = await loadPurchases(companyId, period.fromDate, period.toDate);
+  const inwardRcm = rcmFromPurchases(purchaseRows);
+  // A reverse-charge purchase posts its input and output tax side by side, so its tax nets to zero in the books —
+  // it is reported in 3.1(d) / 4(A)(3), never as a nil-rated inward supply.
+  const rcmIds = new Set(inwardRcm.map((r) => r.voucherId));
+  const inwardExempt = purchaseRows
     .map(normalizePurchase)
-    .filter((p) => p && p.kind === "PURCHASE" && p.taxable > 0 && p.igst + p.cgst + p.sgst + p.cess === 0)
+    .filter((p) => p && p.kind === "PURCHASE" && !rcmIds.has(p.voucherId) && p.taxable > 0 && p.igst + p.cgst + p.sgst + p.cess === 0)
     .map((p) => ({ inter: !!p.gstin && p.gstin.slice(0, 2) !== supplierState, value: p.taxable }));
 
   // Once GSTR-2B is regenerated and verified, its figures are the ITC (2B is
   // what GSTN checks 3B against); until then, the invoices accepted in IMS.
   const itcFrom2b = ims?.stage === "VERIFIED" ? ims.gstr2b?.verification : null;
-  const result = buildGstr3b({ gstin, retPeriod: period.retPeriod, outward: g1.invoices, outwardBlocked, imsRows, inwardExempt, itcFrom2b, imsStage: ims?.stage || null });
+  const result = buildGstr3b({ gstin, retPeriod: period.retPeriod, outward: g1.invoices, outwardBlocked, imsRows, inwardExempt, inwardRcm, itcFrom2b, imsStage: ims?.stage || null });
+
+  const { rows: [co] } = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
+  const fyIssue = companyFyIssue(co?.name, period.financialYear);
+  if (fyIssue) {
+    result.issues.push(fyIssue);
+    result.stats.warnings += 1;
+  }
 
   await pool.query(
     `
@@ -85,5 +99,17 @@ export async function getGstr3bRun({ companyId, gstin, period }) {
     `,
     [companyId, gstin, period]
   );
-  return rows[0] || null;
+  const run = rows[0];
+  if (!run) return null;
+  // Frequency lives on the GSTR-1 run for the same period.
+  const { rows: [r1] } = await pool.query(
+    `SELECT frequency FROM ${DB_SCHEMA}.gst_gstr1_runs WHERE company_id = $1 AND gstin = $2 AND return_period = $3`,
+    [companyId, gstin, period]
+  );
+  run.deadline = lateness({
+    form: "GSTR3B", retPeriod: run.ret_period, frequency: r1?.frequency || "MONTHLY", gstin,
+    cashLiability: run.stats?.cashPayable, isNil: !!run.stats?.isNil,
+    asOf: run.stage === "FILED" && run.filed_at ? run.filed_at : new Date(),
+  });
+  return run;
 }

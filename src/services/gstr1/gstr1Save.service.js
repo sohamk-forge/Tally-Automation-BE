@@ -57,6 +57,11 @@ export function collectPortalErrors(report) {
     if (node.ctin) here.ctin = node.ctin;
     if (node.inum || node.nt_num) here.doc = node.inum || node.nt_num;
     if (node.hsn_sc) here.hsn = node.hsn_sc;
+    // GSTN puts an HSN error on the wrapper object that holds the rejected row(s) in hsn_b2b / hsn_b2c.
+    if (!here.hsn && (node.error_msg || node.error_cd)) {
+      const codes = [...(node.hsn_b2b || []), ...(node.hsn_b2c || [])].map((r) => r?.hsn_sc).filter(Boolean);
+      if (codes.length) here.hsn = codes.join(", ");
+    }
     if (node.error_msg || node.error_cd) {
       out.push({ section: here.section || null, ctin: here.ctin || null, doc: here.doc || null, hsn: here.hsn || null, code: node.error_cd || null, message: node.error_msg || "Rejected by GSTN" });
     }

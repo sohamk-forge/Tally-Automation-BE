@@ -71,6 +71,31 @@ export function getWhiteBooksConfig() {
   return config;
 }
 
+/**
+ * Refuse an irreversible filing when the server looks like a dev/test setup
+ * (non-production NODE_ENV, or a test/nonprod DB name or schema) but is
+ * pointed at a live WhiteBooks host. Sandbox hosts and mock mode are fine;
+ * GST_ALLOW_LIVE_FROM_NONPROD=true is the explicit override.
+ */
+export function assertSafeForLiveFiling(explicitEnv) {
+  // Without an explicit env, judge by the mode and URL this process is actually using.
+  const env = explicitEnv || process.env;
+  const mock = explicitEnv ? String(env.GST_MOCK_MODE || "true").toLowerCase() === "true" : MOCK_MODE;
+  if (mock) return;
+  const url = String((explicitEnv ? env.WHITEBOOKS_BASE_URL : BASE_URL) || "");
+  if (/sandbox/i.test(url)) return;
+  const nonProd = [
+    env.NODE_ENV && env.NODE_ENV !== "production" ? `NODE_ENV=${env.NODE_ENV}` : null,
+    /test|nonprod|dev|staging/i.test(env.DB_NAME || "") ? `DB_NAME=${env.DB_NAME}` : null,
+    /test|nonprod|dev|staging/i.test(env.DB_SCHEMA || "") ? `DB_SCHEMA=${env.DB_SCHEMA}` : null,
+  ].filter(Boolean);
+  if (!nonProd.length) return;
+  if (String(env.GST_ALLOW_LIVE_FROM_NONPROD || "").toLowerCase() === "true") return;
+  const err = new Error(`Filing blocked: this server looks like a non-production setup (${nonProd.join(", ")}) but WHITEBOOKS_BASE_URL is a live host. Use the sandbox URL, or set GST_ALLOW_LIVE_FROM_NONPROD=true if this really is the production filing server.`);
+  err.code = 409;
+  throw err;
+}
+
 function extractWhiteBooksError(data) {
   if (data?.status_cd === "0" || data?.error) {
     const parts = [data.status_desc, data.error?.errorMessage].filter(Boolean);
@@ -188,9 +213,12 @@ export async function verifyOtpAndGetToken({
   // so a token in the body is stored if present but never required.
   const authToken = data.authtoken || data.auth_token || data.data?.authtoken || data.data?.auth_token || null;
   const refId = data.refid || data.ref_id || data.data?.refid || data.data?.ref_id || null;
+  // If WhiteBooks issues a txn of its own at verify, later calls must use that one (as with refreshtoken).
+  const issuedTxn = data.txn || data.header?.txn || data.data?.txn || data.data?.header?.txn || null;
   return {
     authToken,
     refId,
+    txn: issuedTxn,
     expiresAt: resolveExpiry(data.expiry ?? data.expires_at ?? data.data?.expiry),
     raw: data,
   };
@@ -408,18 +436,113 @@ const loadImsSample = () => {
  * action; empty = all.
  * Returns the section's rows: [{ stin, inum, idt, val, txval, iamt, camt, samt, cess, rtnprd, action, ispendactblocked, hash, ... }]
  */
-export async function getImsInvoices({ gstin, section, status = "", txn, gstUsername, ipAddress, clientId, clientSecret, whitebooksEmail }) {
-  if (MOCK_MODE) {
-    // The sample from the WhiteBooks collection (B2B only).
-    if (section !== "B2B") return [];
-    return loadImsSample().data.b2b.map((r) => ({ ...r, action: mockImsActions.get(imsKeyOf(gstin, r)) || r.action }));
+export async function getImsInvoices({ gstin, section, status = "", retPeriod, txn, gstUsername, ipAddress, clientId, clientSecret, whitebooksEmail }) {
+  const headers = authHeaders({ gstin, gstUsername, ipAddress, txn, clientId, clientSecret });
+  const call = (path, query) => (MOCK_MODE
+    ? mockImsCall(gstin, section, path, query)
+    : callWhiteBooks(path, { query: { ...query, email: whitebooksEmail }, headers }));
+
+  const first = await call("/ims/invoices", { gstin, section, status });
+  const token = first?.data?.token ?? first?.token ?? null;
+  if (token) return getImsLargeSection({ call, gstin, section, retPeriod, token });
+
+  const rows = imsRowsOf(first, section);
+  if (rows) return rows;
+  // Neither rows nor a token nor a "no records" error: never read that as an empty section.
+  throw imsFatal(`IMS ${section}: the portal's answer wasn't recognised (keys: ${Object.keys(first?.data ?? first ?? {}).join(", ") || "none"})`);
+}
+
+const imsFatal = (message) => Object.assign(new Error(message), { imsFatal: true });
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The rows of one IMS section out of a response body (the invoice list or a large-file chunk), or null when not recognisable. */
+function imsRowsOf(body, section) {
+  const d = body?.data ?? body;
+  if (Array.isArray(d)) return d;
+  if (!d || typeof d !== "object") return null;
+  const hit = d[section.toLowerCase()] ?? d[section] ?? d[section.toUpperCase()];
+  if (Array.isArray(hit)) return hit;
+  const arrays = Object.values(d).filter(Array.isArray);
+  return arrays.length === 1 ? arrays[0] : null;
+}
+
+export const imsRowsOfForTest = imsRowsOf; // exercised directly by the tests
+
+/**
+ * More than 500 invoices in a section: the portal answers with a token instead of rows.
+ * /ims/getfile turns it into { fc (file count), ek, urls: [{ ul, ic (invoices in the file), hash }] },
+ * and /all/largefile returns each file. Everything must arrive, or this throws:
+ * a partial invoice list would hide ITC decisions.
+ */
+async function getImsLargeSection({ call, gstin, section, retPeriod, token }) {
+  const tries = MOCK_MODE ? 3 : 6;
+  const waitMs = MOCK_MODE ? 0 : 5000;
+  let details = null;
+  for (let i = 0; i < tries; i++) {
+    const res = await call("/ims/getfile", { gstin, token });
+    const d = res?.data ?? res;
+    if (Array.isArray(d?.urls) && d.urls.length) { details = d; break; }
+    if (i < tries - 1) await sleep(waitMs); // not ready yet
   }
-  const data = await callWhiteBooks("/ims/invoices", {
-    query: { gstin, section, email: whitebooksEmail, status },
-    headers: authHeaders({ gstin, gstUsername, ipAddress, txn, clientId, clientSecret }),
-  });
-  const d = data.data || {};
-  return d[section.toLowerCase()] || d[section] || [];
+  if (!details) throw imsFatal(`IMS ${section}: the portal didn't make the invoice file available (token ${token}); try again in a few minutes`);
+
+  const urls = details.urls;
+  if (details.fc != null && Number(details.fc) !== urls.length) {
+    throw imsFatal(`IMS ${section}: the portal announced ${details.fc} file(s) but listed ${urls.length}`);
+  }
+  const merged = new Map();
+  for (const [i, u] of urls.entries()) {
+    const res = await call("/all/largefile", { url: u.ul ?? u.url, ek: details.ek, gstin, returnperiod: retPeriod });
+    const chunk = imsRowsOf(res, section);
+    if (!chunk) throw imsFatal(`IMS ${section}: file ${i + 1} of ${urls.length} wasn't recognised`);
+    for (const r of chunk) merged.set(r.hash || `${r.stin}|${r.inum ?? r.nt_num}|${r.idt ?? r.nt_dt}|${r.rtnprd}`, r);
+  }
+  const expected = urls.reduce((n, u) => n + Number(u.ic ?? NaN), 0);
+  if (Number.isFinite(expected) && merged.size !== expected) {
+    throw imsFatal(`IMS ${section}: the portal says ${expected} invoice(s) but ${merged.size} arrived`);
+  }
+  return [...merged.values()];
+}
+
+/** Mock portal for /ims/invoices, /ims/getfile and /all/largefile, answering in the portal's shapes. */
+const mockLargeTokens = new Map(); // token -> { section, rows }
+function mockImsCall(gstin, section, path, query) {
+  const key = section.toLowerCase();
+  if (path === "/ims/invoices") {
+    const own = mockPortal.ims.get(gstin);
+    let rows;
+    if (own) rows = mockImsSection(gstin, section, own);
+    // The sample from the WhiteBooks collection (B2B only).
+    else rows = section === "B2B" ? loadImsSample().data.b2b.map((r) => ({ ...r, action: mockImsActions.get(imsKeyOf(gstin, r)) || r.action })) : [];
+    if (rows.length > (mockControl.imsLargeThreshold ?? 500)) {
+      const token = `MOCKIMSTOKEN-${crypto.randomBytes(4).toString("hex")}`;
+      mockLargeTokens.set(token, { section, rows });
+      return { status_cd: "1", data: { token, est: "1" } };
+    }
+    return { status_cd: "1", data: { [key]: rows } };
+  }
+  const entry = mockLargeTokens.get(query.token) || null;
+  if (path === "/ims/getfile") {
+    if (!entry) throw mockWbError("Invalid token.", "IMS0004");
+    if (mockControl.imsFileNotReady) { mockControl.imsFileNotReady -= 1; return { status_cd: "1", data: { fc: 0 } }; }
+    const size = mockControl.imsChunkSize || 500;
+    const files = [];
+    for (let i = 0; i < entry.rows.length; i += size) files.push(entry.rows.slice(i, i + size));
+    const urls = files.map((f, i) => ({ ul: `https://mock.gst.example/ims/${query.token}/${i}`, ic: f.length + (mockControl.imsCountSkew || 0), hash: `mockhash${i}` }));
+    return { status_cd: "1", data: { fc: urls.length + (mockControl.imsFileCountSkew || 0), ek: "mock-ek", urls } };
+  }
+  if (path === "/all/largefile") {
+    const m = /\/ims\/(MOCKIMSTOKEN-[0-9a-f]+)\/(\d+)$/.exec(query.url || "");
+    const e = m && mockLargeTokens.get(m[1]);
+    if (!e) throw mockWbError("File not found.", "FO8000");
+    const idx = Number(m[2]);
+    if (mockControl.imsBadChunk === idx) throw mockWbError("File not available.", "FO8001");
+    const size = mockControl.imsChunkSize || 500;
+    let chunk = e.rows.slice(idx * size, idx * size + size);
+    if (mockControl.imsOverlap && idx > 0) chunk = [e.rows[idx * size - 1], ...chunk]; // a record repeated across two files
+    return { status_cd: "1", data: { [e.section.toLowerCase()]: chunk } };
+  }
+  throw new Error(`mock portal: unknown IMS path ${path}`);
 }
 
 /** Headers for calls that write a return: auth headers + gstin / ret_period. */
@@ -436,6 +559,33 @@ const mockRefs = new Map();
 const mockFiledReturns = []; // returns filed through the mock, reported back by mock rettrack
 const mock3b = new Map(); // `${gstin}|${retPeriod}` -> { payload, offset, filed }
 const mockImsActions = new Map(); // `${gstin}|${stin}|${inum}|${idt}` -> action saved on the mock portal
+
+/**
+ * Per-taxpayer data for the mock portal (tests only; ignored outside mock mode):
+ *   ims:     gstin -> { B2B: [...], B2BA: [...], B2BDN: [...], B2BCN: [...] } the records the portal holds
+ *   ledgers: gstin -> { itc: {igst,cgst,sgst,cess}, cash: {...} } electronic ledger balances
+ */
+export const mockPortal = { ims: new Map(), ledgers: new Map() };
+
+const mockWbError = (msg, errorCode) => {
+  const err = new Error(`WhiteBooks: ${msg} (${errorCode})`);
+  err.errorCode = errorCode;
+  err.details = { status_cd: "0", error: { error_cd: errorCode, message: msg } };
+  return err;
+};
+
+/**
+ * One section as the live portal answers it: the note sections are called DN / CN
+ * (the old B2BDN / B2BCN names are refused with IMS0001 unless a test says otherwise),
+ * and an empty section is an error (RET11416), not an empty list.
+ */
+function mockImsSection(gstin, section, own) {
+  const NOTE_CODES = { DN: "B2BDN", CN: "B2BCN" };
+  if ((section === "B2BDN" || section === "B2BCN") && !mockControl.imsAcceptLegacyNoteCodes) throw mockWbError("Invalid Section.", "IMS0001");
+  const list = own[NOTE_CODES[section] || section] || [];
+  if (!list.length) throw mockWbError("No records found with requested parameters.", "RET11416");
+  return list.map((r) => ({ ...r, action: mockImsActions.get(imsKeyOf(gstin, r)) || r.action }));
+}
 
 /**
  * PUT /gstr1/retsave — upload the GSTR-1 data. Processing is asynchronous:
@@ -523,6 +673,14 @@ export function resetMockControl() {
     tamperSummary: null, // (sec_sum) => sec_sum
     proceedOutcome: "P",
     fileError: null, // message -> the filing call fails with it (e.g. wrong OTP)
+    imsAcceptLegacyNoteCodes: false, // true: the mock also accepts the B2BDN / B2BCN section names
+    imsLargeThreshold: 500, // a section with more records than this comes back as a token + files, as on the portal
+    imsChunkSize: 500, // records per file
+    imsFileNotReady: 0, // getfile answers "not ready" this many times first
+    imsBadChunk: null, // index of a file the portal fails to serve
+    imsCountSkew: 0, // added to each file's announced invoice count (a lying portal)
+    imsFileCountSkew: 0, // added to the announced file count
+    imsOverlap: false, // each file repeats the last record of the one before
     imsSaveOutcome: "P", // ims/status after a save: "P" | "PE" | "ER"
     imsRejectInums: [], // with "PE": these invoice numbers are rejected
     imsErrorReport: null,
@@ -622,8 +780,10 @@ export async function getNewReturnStatus({ gstin, retPeriod, referenceId, return
     const code = mockRefs.get(`${referenceId}:outcome`) || "P";
     return { statusCode: code, errorReport: code === "P" ? null : { error_msg: "Proceed to file failed (mock)" }, raw: { status_cd: "1", data: { status_cd: code } } };
   }
-  const data = await callWhiteBooks("/all/newretstatus", {
-    query: { gstin, returnperiod: retPeriod, refid: referenceId, rettype: returnType, email: whitebooksEmail },
+  // /all/newretstatus answers GEN4040 for a proceed-to-file reference on the live account; /gstr/retstatus
+  // (the call used for save status) returns {form_typ:"R1", status_cd:"P", action:"Proceed to File"} for it.
+  const data = await callWhiteBooks("/gstr/retstatus", {
+    query: { gstin, returnperiod: retPeriod, refid: referenceId, email: whitebooksEmail },
     headers: authHeaders({ gstin, gstUsername, ipAddress, txn, clientId, clientSecret }),
   });
   const d = data?.data ?? {};
@@ -689,9 +849,12 @@ const yyyymm = (mmyyyy) => `${String(mmyyyy).slice(2)}${String(mmyyyy).slice(0, 
  */
 export function buildImsSaveBody(gstin, records) {
   const invdata = {};
-  for (const { section, src, action } of records) {
+  for (const { section, src, action, amounts, prevStatus } of records) {
     const key = String(section).toLowerCase();
-    (invdata[key] ||= []).push({ ...src, action });
+    // WhiteBooks' documented record: identifying fields + txval/iamt/camt/samt/cess + action + prev_status.
+    // The portal's `hash` isn't part of it (sending it, and omitting the amounts, gave IMSSAV005 "Schema validation failure").
+    const { hash, ...ident } = src;
+    (invdata[key] ||= []).push({ ...ident, ...amounts, action, ...(prevStatus ? { prev_status: prevStatus } : {}) });
   }
   return { rtin: gstin, reqtyp: "SAVE", invdata };
 }
@@ -798,12 +961,19 @@ function mockGstr2b(gstin, retPeriod) {
   const add = (t, r) => { t.txval += r.txval; t.igst += r.iamt; t.cgst += r.camt; t.sgst += r.samt; t.cess += r.cess; };
   const avl = zero();
   const rej = zero();
+  const cn = zero();
   const cpsumm = new Map();
-  for (const r of loadImsSample().data.b2b) {
+  const own = mockPortal.ims.get(gstin);
+  // The taxpayer's own records when a test supplied them (invoices, amendments, debit notes add ITC; credit notes reduce it), else the sample.
+  const source = own
+    ? ["B2B", "B2BA", "B2BDN", "B2BCN"].flatMap((sec) => (own[sec] || []).map((r) => ({ sec, r })))
+    : loadImsSample().data.b2b.map((r) => ({ sec: "B2B", r }));
+  for (const { sec, r } of source) {
     if (yyyymm(r.rtnprd) > yyyymm(retPeriod)) continue;
     const action = mockImsActions.get(imsKeyOf(gstin, r)) || r.action || "N";
     if (action === "P") continue;
     if (action === "R") { add(rej, r); continue; }
+    if (sec === "B2BCN") { add(cn, r); continue; }
     add(avl, r);
     const c = cpsumm.get(r.stin) || { ctin: r.stin, supprd: r.rtnprd, ttldocs: 0, ...zero() };
     c.ttldocs += 1; add(c, r);
@@ -813,7 +983,10 @@ function mockGstr2b(gstin, retPeriod) {
   let data = {
     gstin, rtnprd: retPeriod, version: "1.0", gendt: new Date().toLocaleDateString("en-GB").replace(/\//g, "-"),
     itcsumm: {
-      itcavl: { nonrevsup: { ...round({ igst: avl.igst, cgst: avl.cgst, sgst: avl.sgst, cess: avl.cess }), b2b: round(avl) } },
+      itcavl: {
+        nonrevsup: { ...round({ igst: avl.igst, cgst: avl.cgst, sgst: avl.sgst, cess: avl.cess }), b2b: round(avl) },
+        ...(own ? { othersup: { cdnr: round({ igst: cn.igst, cgst: cn.cgst, sgst: cn.sgst, cess: cn.cess }) } } : {}),
+      },
       itcrej: { nonrevsup: { ...round({ igst: rej.igst, cgst: rej.cgst, sgst: rej.sgst, cess: rej.cess }), b2b: round(rej) } },
     },
     cpsumm: { b2b: [...cpsumm.values()].map(round) },
@@ -969,7 +1142,7 @@ export async function getGstr3bSummary({ gstin, retPeriod, txn, gstUsername, ipA
  */
 export async function getLedgerBalances({ gstin, retPeriod, txn, gstUsername, ipAddress, clientId, clientSecret, whitebooksEmail }) {
   if (MOCK_MODE) {
-    const b = mockControl.ledgerBalance || { itc: heads4(), cash: heads4() };
+    const b = mockPortal.ledgers.get(gstin) || mockControl.ledgerBalance || { itc: heads4(), cash: heads4() };
     return { itc: { ...heads4(), ...b.itc }, cash: { ...heads4(), ...b.cash }, raw: { status_cd: "1" } };
   }
   const data = await callWhiteBooks("/ledgers/bal", {
@@ -992,7 +1165,7 @@ export async function getLedgerBalances({ gstin, retPeriod, txn, gstUsername, ip
 /** PUT /gstr3b/retoffset — pay the liability from the credit and cash ledgers. Irreversible. */
 export async function offsetGstr3bLiability({ gstin, retPeriod, body, txn, gstUsername, ipAddress, clientId, clientSecret, whitebooksEmail }) {
   if (MOCK_MODE) {
-    const bal = mockControl.ledgerBalance?.cash || heads4();
+    const bal = (mockPortal.ledgers.get(gstin) || mockControl.ledgerBalance)?.cash || heads4();
     const need = body.pdcash.reduce((a, p) => ({ igst: a.igst + p.ipd + (p.i_intrpd || 0), cgst: a.cgst + p.cpd + (p.c_intrpd || 0) + (p.c_lfeepd || 0), sgst: a.sgst + p.spd + (p.s_intrpd || 0) + (p.s_lfeepd || 0), cess: a.cess + p.cspd + (p.cs_intrpd || 0) }), heads4());
     const short = Object.keys(need).find((h) => need[h] - (bal[h] || 0) > 0.005);
     if (short || mockControl.offsetError) {

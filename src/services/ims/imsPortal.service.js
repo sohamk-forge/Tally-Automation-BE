@@ -102,7 +102,11 @@ export async function saveImsToPortal({ companyId, gstin, period, ipAddress }) {
   try {
     const { referenceId } = await whitebooks.saveImsActions({
       ...ctx, retPeriod: run.ret_period,
-      records: changes.map(({ row, action }) => ({ section: row.section, src: row.src, action })),
+      records: changes.map(({ row, action }) => ({
+        section: row.portalSection || row.section, src: row.src, action,
+        amounts: { txval: row.txval, iamt: row.iamt, camt: row.camt, samt: row.samt, cess: row.cess },
+        prevStatus: row.portalAction, // the action the portal shows now ("N" = none yet)
+      })),
     });
     await updateRun(companyId, gstin, period, {
       save_ref_id: referenceId,
@@ -171,6 +175,14 @@ export async function generateGstr2b({ companyId, gstin, period, ipAddress }) {
       gen2b_status: { status: "SUBMITTED", referenceId, submittedAt: new Date().toISOString() },
     });
   } catch (err) {
+    // GSTN refuses an on-demand 2B when the IMS actions haven't changed since the last generation (IMS2005):
+    // the 2B on the portal is already current, so re-read it and verify instead of treating this as a failure.
+    if (/IMS2005|no changes/i.test(err.message) && run.gstr2b) {
+      await updateRun(companyId, gstin, period, {
+        gen2b_status: { status: "UP_TO_DATE", message: "GSTR-2B is already up to date — there are no new IMS changes to apply", checkedAt: new Date().toISOString() },
+      });
+      return fetchAndVerify({ companyId, gstin, period, run, ctx, acceptDifferences: run.stage === "VERIFIED" });
+    }
     // Back to SAVED: the actions are on the portal; generation can be retried
     // (GSTN only allows on-demand 2B once the period's 2B exists — after the 14th).
     await updateRun(companyId, gstin, period, { stage: "SAVED", gen2b_status: { status: "SUBMIT_FAILED", message: err.message, failedAt: new Date().toISOString() } });

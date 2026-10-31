@@ -6,6 +6,7 @@ import { ledgerQueue } from "../queues/ledger.queue.js";
 
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { partyGstinProblem } from "../utils/partyGstin.js";
 
 const router = express.Router();
 
@@ -87,6 +88,19 @@ router.post(
       }
 
       const company = companyResult.rows[0];
+
+      // A mistyped or self-referencing GSTIN is cheap to stop here and
+      // expensive to find at return time.
+      if (data.gstin) {
+        const { rows: [own] } = await pool.query(
+          `SELECT gstin FROM ${DB_SCHEMA}.company_details WHERE company_id = $1 LIMIT 1`,
+          [companyId]
+        );
+        const problem = partyGstinProblem({ gstin: data.gstin, pan: data.pan, ownGstin: own?.gstin });
+        if (problem) {
+          return res.status(400).json({ status: "error", message: problem });
+        }
+      }
 
       console.log("✅ COMPANY SELECTED:", {
         companyId: company.id,

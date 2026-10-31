@@ -43,7 +43,7 @@ const SECTION_KIND = {
   B2BCNA: "DEBIT_NOTE",
 };
 
-function lineRole(name) {
+export function lineRole(name) {
   const n = String(name || "");
   if (/round/i.test(n)) return "roundoff";
   if (/\b(tds|tcs)\b/i.test(n)) return "ignore";
@@ -100,8 +100,20 @@ export function normalizePurchase(row) {
 
 const imsKey = (i) => `${i.section}|${i.stin}|${normDoc(i.inum)}|${i.idt}`;
 
+/** Edit distance between two GSTINs, counting an adjacent swap as one edit. Different lengths: Infinity. */
+export function gstinDistance(a, b) {
+  if (a.length !== b.length) return Infinity;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === b[i]) continue;
+    if (i + 1 < a.length && a[i] === b[i + 1] && a[i + 1] === b[i]) i++;
+    d++;
+  }
+  return d;
+}
+
 /**
- * @param {Array} imsInvoices  [{ section, stin, inum, idt, txval, iamt, camt, samt, cess, val, rtnprd, action, ispendactblocked, hash, ... }]
+ * @param {Array} imsInvoices [{ section, stin, inum, idt, txval, iamt, camt, samt, cess, val, rtnprd, action, ispendactblocked, hash, ... }]
  * @param {Array} purchases    normalizePurchase() results
  * @returns {{ rows: Array, onlyInBooks: Array }}
  */
@@ -116,7 +128,9 @@ export function matchIms(imsInvoices, purchases) {
   }
 
   const compare = (inv, p) => {
-    const tol = Math.max(1, num(inv.val) * 0.001);
+    // Rounding between the supplier's lines and our voucher is a rupee or a few; 0.1% of the value is that on a small
+    // invoice but thousands of rupees on a large one, which would hide a real difference. Cap it.
+    const tol = Math.max(1, Math.min(25, num(inv.val) * 0.001));
     const diffs = {
       taxable: r2(num(inv.txval) - p.taxable),
       igst: r2(num(inv.iamt) - p.igst),
@@ -133,7 +147,22 @@ export function matchIms(imsInvoices, purchases) {
   };
 
   const invs = imsInvoices.map((i) => ({ ...i, key: imsKey(i), day: dayNo(i.idt), wantKind: SECTION_KIND[i.section] || "PURCHASE" }));
-  const candidatesFor = (inv) => (byGstin.get(String(inv.stin).toUpperCase()) || []).filter((p) => p.kind === inv.wantKind);
+  // A GSTIN mistyped in the books (e.g. two letters swapped) orphans every
+  // voucher of that supplier. When the exact GSTIN has no vouchers, fall back
+  // to a books GSTIN within edit distance 2 (same state code) and say so.
+  const resolved = new Map();
+  const resolveGstin = (stin) => {
+    const g = String(stin).toUpperCase();
+    if (resolved.has(g)) return resolved.get(g);
+    let out = { key: g, fuzzy: false };
+    if (!byGstin.has(g)) {
+      const near = [...byGstin.keys()].filter((k) => k.slice(0, 2) === g.slice(0, 2) && gstinDistance(k, g) <= 2);
+      if (near.length === 1) out = { key: near[0], fuzzy: true };
+    }
+    resolved.set(g, out);
+    return out;
+  };
+  const candidatesFor = (inv) => (byGstin.get(resolveGstin(inv.stin).key) || []).filter((p) => p.kind === inv.wantKind);
 
   // Pass 1: exact pairs (amounts agree, date within the window), assigned
   // one-to-one, best first (narration hint, then nearest date).
@@ -179,11 +208,13 @@ export function matchIms(imsInvoices, purchases) {
         note = `${near.refMatch ? "Booked as voucher" : "Closest is voucher"} ${near.p.voucherNumber} (${near.p.date}): ${parts.join(", ") || "amounts differ"}`;
       } else {
         status = "NOT_IN_BOOKS";
-        note = byGstin.has(String(inv.stin).toUpperCase())
+        note = byGstin.has(resolveGstin(inv.stin).key)
           ? "Supplier is in your books, but no purchase voucher matches this invoice"
           : "No purchase voucher from this supplier GSTIN in your books";
       }
     }
+    const rg = resolveGstin(inv.stin);
+    if (rg.fuzzy) note += ` · books carry GSTIN ${rg.key} for this supplier, not ${inv.stin} — correct the ledger GSTIN`;
 
     // Proposed action per the rule: match -> accept, otherwise pending.
     let proposed = status === "MATCHED" ? "A" : "P";

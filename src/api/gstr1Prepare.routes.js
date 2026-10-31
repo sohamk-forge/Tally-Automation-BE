@@ -157,7 +157,7 @@ router.post("/proceed", async (req, res) => {
     const args = periodArgs(req.body, res);
     if (!args) return;
     const userId = await resolveUserId(req).catch(() => null);
-    return res.json({ status: "success", data: await proceedToFile({ ...args, acceptDifferences: req.body.acceptDifferences === true, ipAddress: clientIp(req), userId }) });
+    return res.json({ status: "success", data: await proceedToFile({ ...args, acceptDifferences: req.body.acceptDifferences === true, proceedAnyway: req.body.proceedAnyway === true, acknowledgeWarnings: req.body.acknowledgeWarnings === true, ipAddress: clientIp(req), userId }) });
   } catch (err) {
     return fail(res, err, "PROCEED");
   }

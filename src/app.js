@@ -20,6 +20,7 @@ initSupertokens();
 ================================= */
 
 import "./cron/dailySync.cron.js";
+import "./cron/gstSessionRefresh.cron.js";
 
 
 

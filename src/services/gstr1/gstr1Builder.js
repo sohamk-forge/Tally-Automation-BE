@@ -18,7 +18,9 @@ export const normName = (s) => String(s || "").replace(/\s+/g, " ").trim().toLow
 const asArray = (v) => (Array.isArray(v) ? v : v && typeof v === "object" ? [v] : []);
 
 // GSTR-1 invoice numbers: max 16 chars of letters, digits, "/" and "-".
-const INUM_RE = /^(?=.{1,16}$)([/\-0]*[a-zA-Z0-9/\-]*[a-zA-Z1-9]+[a-zA-Z0-9/\-]*)$/;
+// One invoice at or above this share of the period's taxable sales is flagged.
+const LARGE_INVOICE_SHARE = 0.25;
+const INUM_RE =/^(?=.{1,16}$)([/\-0]*[a-zA-Z0-9/\-]*[a-zA-Z1-9]+[a-zA-Z0-9/\-]*)$/;
 
 /** B2CL threshold: ₹2.5 lakh before 1 Aug 2024, ₹1 lakh from then on. */
 const b2clThreshold = (isoDate) => (isoDate >= "2024-08-01" ? 100000 : 250000);
@@ -335,6 +337,33 @@ export function buildGstr1({ supplierGstin, period, vouchers, ledgers, items, ov
     });
   }
 
+  // One GSTIN on several ledgers: branches of one entity may share it, but a
+  // separate institution keyed under it would never reach the buyer's 2B.
+  const ledgersByGstin = new Map();
+  for (const inv of invoices) {
+    if (!inv.ctin) continue;
+    const set = ledgersByGstin.get(inv.ctin) || new Set();
+    set.add(inv.partyName);
+    ledgersByGstin.set(inv.ctin, set);
+  }
+  for (const [ctin, names] of ledgersByGstin) {
+    if (names.size > 1) {
+      issue("warning", "SHARED_GSTIN", `GSTIN ${ctin} is used on ${names.size} ledgers (${[...names].slice(0, 6).join(", ")}${names.size > 6 ? ", …" : ""}). Confirm each is really a branch of the same registered entity, not a separate one with its own GSTIN`, { ctin, ledgers: [...names] });
+    }
+  }
+
+  // A single sale that dominates the period deserves a second look.
+  const salesTotal = invoices.filter((i) => i.kind === "INVOICE").reduce((a, i) => a + i.taxable, 0);
+  if (invoices.length > 1 && salesTotal > 0) {
+    for (const inv of invoices) {
+      if (inv.kind !== "INVOICE") continue;
+      const share = inv.taxable / salesTotal;
+      if (share >= LARGE_INVOICE_SHARE) {
+        issue("warning", "LARGE_INVOICE", `${inv.inum} (${inv.partyName}) is ${(share * 100).toFixed(1)}% of the period's taxable sales (₹${r2(inv.taxable).toLocaleString("en-IN")})${inv.ctin ? "" : " and the buyer is unregistered — confirm the buyer has no GSTIN"}`, { voucherId: inv.voucherId });
+      }
+    }
+  }
+
   if (assumedRates.length) {
     const items = [...new Set(assumedRates.flatMap((a) => a.items))];
     issue("warning", "RATE_ASSUMED",
@@ -484,8 +513,8 @@ function assemblePayload({ supplierGstin, period, invoices, cancelledDocs = [], 
   const DOC_TYPES = { 1: "Invoices for outward supply", 4: "Debit Note", 5: "Credit Note" };
   const docDet = Object.entries(docs)
     .filter(([, list]) => list.length)
-    .map(([docNum, list]) => ({ doc_num: String(docNum), doc_typ: DOC_TYPES[docNum], docs: documentSeries(list) }));
-  if (docDet.length) payload.doc_issue = { doc_det_new: docDet };
+    .map(([docNum, list]) => ({ doc_num: Number(docNum), doc_typ: DOC_TYPES[docNum], docs: documentSeries(list, (g) => issue("warning", "DOC_SERIES_GAP", `${DOC_TYPES[docNum]} series ${g.from}..${g.to}: ${g.missing} number(s) have no voucher and are reported as cancelled in Documents Issued — check they were really never used or were deleted`, { section: "doc_issue" })) }));
+  if (docDet.length) payload.doc_issue = { doc_det: docDet };
 
   return payload;
 }
@@ -494,7 +523,7 @@ function assemblePayload({ supplierGstin, period, invoices, cancelledDocs = [], 
  * Group document numbers into series by prefix ("26-27/06/") and report
  * from / to / total / cancelled / net issued (Table 13).
  */
-function documentSeries(docs) {
+function documentSeries(docs, onGap) {
   const series = new Map();
   for (const { n, cancelled } of docs) {
     const m = /^(.*?)(\d+)$/.exec(n);
@@ -505,8 +534,16 @@ function documentSeries(docs) {
   }
   return [...series.values()].map((list, i) => {
     list.sort((a, b) => a.seq - b.seq || a.n.localeCompare(b.n));
-    const cancel = list.filter((d) => d.cancelled).length;
-    return { num: i + 1, from: list[0].n, to: list[list.length - 1].n, totnum: list.length, cancel, net_issue: list.length - cancel };
+    const from = list[0], to = list[list.length - 1];
+    // GSTN expects every number from first to last to be accounted for: a number
+    // with no voucher (deleted or never issued) is reported as cancelled. A number
+    // used twice still counts as two documents.
+    const distinct = new Set(list.map((d) => d.seq)).size;
+    const missing = to.seq - from.seq + 1 - distinct;
+    const totnum = list.length + missing;
+    const cancel = list.filter((d) => d.cancelled).length + missing;
+    if (missing > 0) onGap?.({ from: from.n, to: to.n, missing });
+    return { num: i + 1, from: from.n, to: to.n, totnum, cancel, net_issue: totnum - cancel };
   });
 }
 
@@ -545,7 +582,7 @@ function summarizeSections(invoices, payload) {
       return { key, label, docs: rows.length, ...round(t), empty: !rows.length };
     }
     if (key === "doc") {
-      const n = (payload.doc_issue?.doc_det_new || []).reduce((a, d) => a + d.docs.reduce((x, s) => x + s.totnum, 0), 0);
+      const n = (payload.doc_issue?.doc_det || payload.doc_issue?.doc_det_new || []).reduce((a, d) => a + d.docs.reduce((x, s) => x + s.totnum, 0), 0);
       return { key, label, docs: n, docsOnly: true, empty: !n };
     }
     if (key === "nil") {

@@ -96,10 +96,14 @@ export async function validateOnPortal({ companyId, gstin, period, ipAddress }) 
  * with a passing HSN check and acceptDifferences (the user saw the summary
  * differences and accepts the portal's figures). Nil return: from PREPARED.
  */
-export async function proceedToFile({ companyId, gstin, period, acceptDifferences = false, ipAddress, userId }) {
+export async function proceedToFile({ companyId, gstin, period, acceptDifferences = false, proceedAnyway = false, acknowledgeWarnings = false, ipAddress, userId }) {
   const run = await requireRun({ companyId, gstin, period });
+  if (run.warning_count > 0 && !acknowledgeWarnings) {
+    throw httpError(409, `GSTR-1 has ${run.warning_count} warning(s) — review them and acknowledge to continue. Filing can't be undone`);
+  }
   const isNil = !!run.stats?.isNil;
   let from;
+  let uncheckedProceed = false;
   if (isNil) {
     if (run.save_status?.status === "SAVED") {
       throw httpError(409, "Data saved earlier is still on the portal — reset the portal data before filing a nil return");
@@ -108,9 +112,14 @@ export async function proceedToFile({ companyId, gstin, period, acceptDifference
   } else if (run.stage === "VALIDATED" || run.stage === "PROCEED_FAILED") {
     from = ["VALIDATED", "PROCEED_FAILED"];
   } else if (run.stage === "SAVED") {
-    if (!run.validation) throw httpError(409, "Validate the return on the portal before proceeding to file");
-    if (!run.validation.hsn?.valid) throw httpError(409, "The HSN summary failed GSTN's validation — fix it, save and validate again");
-    if (!acceptDifferences) throw httpError(409, `The portal summary differs from your books in ${run.validation.summary.mismatches} section(s) — review and accept the differences to continue`);
+    // No recorded result means the portal check itself could not run (the portal errored). That can be
+    // overridden explicitly (and is recorded); a check that ran and failed can't be.
+    uncheckedProceed = !run.validation && proceedAnyway;
+    if (!run.validation && !proceedAnyway) throw httpError(409, "Validate the return on the portal before proceeding to file");
+    if (run.validation) {
+      if (!run.validation.hsn?.valid) throw httpError(409, "The HSN summary failed GSTN's validation — fix it, save and validate again");
+      if (!acceptDifferences) throw httpError(409, `The portal summary differs from your books in ${run.validation.summary.mismatches} section(s) — review and accept the differences to continue`);
+    }
     from = ["SAVED"];
   } else {
     throw httpError(409, `GSTR-1 for ${period} is at stage ${run.stage} — it can't proceed to file now`);
@@ -126,7 +135,9 @@ export async function proceedToFile({ companyId, gstin, period, acceptDifference
       proceed_ref_id: referenceId,
       proceed_status: {
         status: "SUBMITTED", referenceId, isNil, submittedAt: new Date().toISOString(),
-        ...(acceptDifferences && !isNil && run.stage === "SAVED" ? { acceptedDifferences: { by: userId || null, at: new Date().toISOString(), mismatches: run.validation.summary.mismatches } } : {}),
+        ...(run.warning_count > 0 ? { acknowledgedWarnings: { by: userId || null, at: new Date().toISOString(), count: run.warning_count } } : {}),
+        ...(acceptDifferences && !isNil && run.stage === "SAVED" && run.validation ? { acceptedDifferences: { by: userId || null, at: new Date().toISOString(), mismatches: run.validation.summary.mismatches } } : {}),
+        ...(uncheckedProceed ? { uncheckedProceed: { by: userId || null, at: new Date().toISOString(), note: "Portal check (validatehsnsum / retsum) could not run; proceeded on the user's explicit instruction" } } : {}),
       },
     });
   } catch (err) {
@@ -161,9 +172,11 @@ export async function checkProceedStatus({ companyId, gstin, period, ipAddress }
   }
 
   const finalSummary = prev.isNil ? null : await whitebooks.getGstr1Summary({ ...ctx, retPeriod: run.ret_period });
+  // Now that the portal has produced its summary, compare it with what we saved (the check proceed skipped, if it did).
+  const summaryCheck = finalSummary?.sec_sum ? (() => { const c = compareSummary(run.payload, finalSummary.sec_sum); return { mismatches: c.mismatches, rows: c.rows, checkedAt }; })() : null;
   await updateRun(companyId, gstin, period, {
     stage: "READY_TO_FILE",
-    proceed_status: { ...prev, status: "PROCEEDED", portalStatus: statusCode, checkedAt },
+    proceed_status: { ...prev, status: "PROCEEDED", portalStatus: statusCode, checkedAt, ...(summaryCheck ? { summaryCheck } : {}) },
     final_summary: finalSummary,
   });
   return getRun({ companyId, gstin, period });
@@ -197,7 +210,8 @@ export async function fileGstr1({ companyId, gstin, period, pan, evcOtp, ipAddre
   const run = await requireRun({ companyId, gstin, period });
   if (run.stage === "FILED") throw httpError(409, `GSTR-1 for ${period} is already filed (ARN ${run.arn})`);
   if (run.stage !== "READY_TO_FILE") throw httpError(409, "Proceed to file first");
-  if (!/^\d{6}$/.test(String(evcOtp || ""))) throw httpError(400, "Enter the 6-digit EVC OTP");
+  whitebooks.assertSafeForLiveFiling();
+  if (!/^[A-Za-z0-9]{6,8}$/.test(String(evcOtp || ""))) throw httpError(400, "Enter the EVC OTP (6–8 letters or digits)");
   const signatoryPan = cleanPan(pan || run.file_status?.pan);
   const isNil = !!run.proceed_status?.isNil;
   if (!isNil && !run.final_summary) throw httpError(409, "The final portal summary is missing — proceed to file again");

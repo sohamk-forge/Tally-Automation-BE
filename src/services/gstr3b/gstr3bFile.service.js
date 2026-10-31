@@ -135,11 +135,14 @@ export async function saveGstr3bToPortal({ companyId, gstin, period, acknowledge
   if (!run.portal_check.ok && !acknowledgeWarnings) {
     throw httpError(409, "The portal's figures differ or GSTN raised warnings — review and acknowledge them to save");
   }
+  if (run.stats?.warnings > 0 && !acknowledgeWarnings) {
+    throw httpError(409, `GSTR-3B has ${run.stats.warnings} warning(s) — review them and acknowledge to save`);
+  }
   const ctx = await portalContext({ companyId, gstin, ipAddress });
   if (!(await claimStage(companyId, gstin, period, ["PREPARED", "SAVE_FAILED", "SAVED"], "SAVE_PENDING"))) {
     throw httpError(409, "A save is already in progress for this period");
   }
-  const ack = !run.portal_check.ok ? { acknowledgedBy: userId || null, acknowledgedAt: new Date().toISOString() } : {};
+  const ack = (!run.portal_check.ok || run.stats?.warnings > 0) ? { acknowledgedBy: userId || null, acknowledgedAt: new Date().toISOString() } : {};
   try {
     const { referenceId } = await whitebooks.saveGstr3bData({ ...ctx, retPeriod: run.ret_period, payload: run.payload });
     if (referenceId) {
@@ -181,7 +184,9 @@ function liabilitiesOf(summary) {
     transTyp: Number(t.trans_typ),
     ledgerId: t.liab_ldg_id,
     desc: t.trans_desc || null,
-    tax: Object.fromEntries(HEADS.map((h) => [h, num(t[h]?.tx)])),
+    // A head can come out below zero when credit notes exceed that head's output tax; nothing is payable then,
+    // and a negative amount must never reach the offset (retoffset) body.
+    tax: Object.fromEntries(HEADS.map((h) => [h, Math.max(0, num(t[h]?.tx))])),
     interest: Object.fromEntries(HEADS.map((h) => [h, num(t[h]?.intr)])),
     fee: { cgst: num(t.cgst?.fee), sgst: num(t.sgst?.fee) },
   }));
@@ -323,7 +328,8 @@ export async function fileGstr3b({ companyId, gstin, period, pan, evcOtp, ipAddr
   const run = await requireRun({ companyId, gstin, period });
   if (run.stage === "FILED") throw httpError(409, `GSTR-3B for ${period} is already filed (ARN ${run.arn})`);
   if (run.stage !== "READY_TO_FILE") throw httpError(409, "Offset the liability first");
-  if (!/^\d{6}$/.test(String(evcOtp || ""))) throw httpError(400, "Enter the 6-digit EVC OTP");
+  whitebooks.assertSafeForLiveFiling();
+  if (!/^[A-Za-z0-9]{6,8}$/.test(String(evcOtp || ""))) throw httpError(400, "Enter the EVC OTP (6–8 letters or digits)");
   const signatoryPan = cleanPan(pan || run.file_status?.pan);
   if (!run.final_summary) throw httpError(409, "The final portal summary is missing — offset again");
   if (!(await claimStage(companyId, gstin, period, ["READY_TO_FILE"], "FILING"))) throw httpError(409, "Filing is already in progress for this period");

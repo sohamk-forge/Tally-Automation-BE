@@ -64,7 +64,7 @@ router.put("/decisions", async (req, res) => {
     if (!companyId || !gstin || !period || !Array.isArray(decisions)) {
       return res.status(400).json({ status: "error", message: "companyId, gstin, period and decisions are required" });
     }
-    return res.json({ status: "success", data: await setImsDecisions({ companyId, gstin, period, decisions }) });
+    return res.json({ status: "success", data: await setImsDecisions({ companyId, gstin, period, decisions, userId: await resolveUserId(req).catch(() => null) }) });
   } catch (err) {
     return fail(res, err, "DECISIONS");
   }

@@ -10,6 +10,7 @@ import pool from "../../db/index.js";
 import { DB_SCHEMA } from "../../config/db.js";
 import { buildGstr1, normName } from "./gstr1Builder.js";
 import { validateGstr1Payload } from "./gstr1Validator.js";
+import { lateness } from "../gstDeadlines.js";
 
 const pad2 = (n) => String(n).padStart(2, "0");
 
@@ -37,6 +38,30 @@ export function resolvePeriod({ retPeriod, frequency }) {
   };
 }
 
+
+/**
+ * Tally companies are usually one per financial year and named for it, e.g.
+ * "ACME (25-26)". A return for another year built from that company means
+ * the books are mixed across years (or the company was never rolled over).
+ * @returns {object|null} a warning issue, or null when the name has no year or it matches
+ */
+export function companyFyIssue(companyName, financialYear) {
+  const m = /\(\s*(\d{2})\s*[-–/]\s*(\d{2})\s*\)/.exec(String(companyName || ""));
+  if (!m) return null;
+  const want = String(financialYear || "").replace(/^\d{2}(\d{2})-(\d{2})$/, "$1-$2");
+  if (`${m[1]}-${m[2]}` === want) return null;
+  return {
+    severity: "warning",
+    code: "COMPANY_FY_MISMATCH",
+    message: `Company "${companyName}" is for FY ${m[1]}-${m[2]} but this return is for FY ${want}. Check the books aren't mixed across years (or that the company was rolled over) before relying on these figures`,
+  };
+}
+
+async function companyName(companyId) {
+  const { rows } = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
+  return rows[0]?.name || "";
+}
+
 export async function loadInputs(companyId, period) {
   const [vouchers, ledgers, sgs, psi, groups, overrides] = await Promise.all([
     pool.query(
@@ -49,7 +74,7 @@ export async function loadInputs(companyId, period) {
       WHERE company_id = $1
         AND deleted_at IS NULL
         AND voucher_date BETWEEN $2 AND $3
-        AND voucher_type !~* 'order'
+        AND voucher_type !~* 'order|quotation'
         AND (voucher_type ~* 'sales|credit\\s*note|debit\\s*note|invoice')
       ORDER BY voucher_date, id
       `,
@@ -151,6 +176,12 @@ export async function prepareGstr1({ companyId, gstin, retPeriod, frequency, cre
     result.stats.errors += schemaIssues.length;
   }
 
+  const fyIssue = companyFyIssue(await companyName(companyId), period.financialYear);
+  if (fyIssue) {
+    result.issues.push(fyIssue);
+    result.stats.warnings += 1;
+  }
+
   const payloadHash = crypto.createHash("sha256").update(JSON.stringify(result.payload)).digest("hex");
 
   await pool.query(
@@ -192,7 +223,13 @@ export async function getRun({ companyId, gstin, period }) {
     `,
     [companyId, gstin, period]
   );
-  return rows[0] || null;
+  const run = rows[0];
+  if (!run) return null;
+  run.deadline = lateness({
+    form: "GSTR1", retPeriod: run.ret_period, frequency: run.frequency, gstin, isNil: !!run.stats?.isNil,
+    asOf: run.stage === "FILED" && run.filed_at ? run.filed_at : new Date(),
+  });
+  return run;
 }
 
 /** Upsert in-app HSN / rate / UQC for items or ledgers. */

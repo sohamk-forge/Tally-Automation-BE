@@ -27,7 +27,7 @@ export const getGstLoginSetup = async ({ companyId }) => {
 
   const { rows: credRows } = await pool.query(
     `
-    SELECT gstin, gst_username FROM ${DB_SCHEMA}.gst_credentials
+    SELECT gstin, gst_username, signatory_pan FROM ${DB_SCHEMA}.gst_credentials
     WHERE company_id = $1
     ORDER BY (gstin = $2) DESC, updated_at DESC
     LIMIT 1
@@ -37,11 +37,14 @@ export const getGstLoginSetup = async ({ companyId }) => {
   const saved = credRows[0];
 
   const gstin = companyGstin || saved?.gstin || null;
+  const sameGstin = saved && saved.gstin === gstin;
   return {
     gstin,
     gstinSource: companyGstin ? "company_details" : saved?.gstin ? "gst_credentials" : null,
     stateCode: gstin ? whitebooks.stateCodeFromGstin(gstin) : null,
-    gstUsername: saved && saved.gstin === gstin ? saved.gst_username : null,
+    gstUsername: sameGstin ? saved.gst_username : null,
+    // Saved on the first EVC OTP request, so the filing screens can prefill it.
+    signatoryPan: sameGstin ? saved.signatory_pan || null : null,
   };
 };
 
@@ -160,7 +163,10 @@ export const verifyGstOtp = async ({ companyId, gstin, txn, otp, ipAddress }) =>
     throw err;
   }
 
-  const { authToken, refId, expiresAt } = tokenResult;
+  const { authToken, refId, expiresAt, txn: issuedTxn } = tokenResult;
+  // Log only the shape of WhiteBooks' reply (key names + types, never values) so a missing field is visible.
+  const shapeOf = (v) => (v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shapeOf(x)])) : typeof v);
+  console.log("GST authtoken response shape:", JSON.stringify(shapeOf(tokenResult.raw)), issuedTxn && issuedTxn !== txn ? "— WhiteBooks issued a new txn, using it" : "");
 
   // Only one live session per company+GSTIN — retire older ones.
   await pool.query(
@@ -174,10 +180,10 @@ export const verifyGstOtp = async ({ companyId, gstin, txn, otp, ipAddress }) =>
   await pool.query(
     `
     UPDATE ${DB_SCHEMA}.gst_auth_sessions
-    SET ref_id = $1, auth_token_enc = $2, expires_at = $3, status = 'AUTHENTICATED', updated_at = now()
+    SET ref_id = $1, auth_token_enc = $2, expires_at = $3, txn_id = $5, status = 'AUTHENTICATED', updated_at = now()
     WHERE id = $4
     `,
-    [refId, authToken ? encrypt(authToken) : null, expiresAt, session.id]
+    [refId, authToken ? encrypt(authToken) : null, expiresAt, session.id, issuedTxn || session.txn_id]
   );
 
   return { status: "AUTHENTICATED", expiresAt };
@@ -250,6 +256,38 @@ export const refreshGstSession = async ({ companyId, gstin, ipAddress }) => {
   );
 
   return { status: "AUTHENTICATED", expiresAt: result.expiresAt, txnChanged: result.txn !== session.txn_id };
+};
+
+/**
+ * Background keep-alive: refresh every AUTHENTICATED session that is within
+ * `windowMs` of expiry, so a login OTP isn't needed again just because the
+ * filing page was closed. refreshGstSession marks a session EXPIRED itself
+ * when GSTN rejects the refresh. Returns counts for logging.
+ */
+export const refreshExpiringGstSessions = async ({ windowMs = 20 * 60 * 1000 } = {}) => {
+  const { rows } = await pool.query(
+    `
+    SELECT DISTINCT ON (company_id, gstin) company_id, gstin, expires_at
+    FROM ${DB_SCHEMA}.gst_auth_sessions
+    WHERE status = 'AUTHENTICATED'
+      AND expires_at > now()
+      AND expires_at <= now() + ($1 * interval '1 millisecond')
+    ORDER BY company_id, gstin, id DESC
+    `,
+    [windowMs]
+  );
+  const out = { due: rows.length, refreshed: 0, expired: 0, failed: 0 };
+  for (const { company_id, gstin } of rows) {
+    try {
+      const r = await refreshGstSession({ companyId: company_id, gstin, ipAddress: "0.0.0.0" });
+      if (r.error) out.expired++;
+      else out.refreshed++;
+    } catch (err) {
+      out.failed++;
+      console.log(`GST session refresh failed (company ${company_id}):`, err.message);
+    }
+  }
+  return out;
 };
 
 /**
