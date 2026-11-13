@@ -8,13 +8,22 @@ import Dashboard from "supertokens-node/recipe/dashboard/index.js";
 import { ensureLocalUserProfile } from "../services/userProfile.service.js";
 import { markInviteAccepted } from "../services/invite.service.js";
 import { sendSignupOtp } from "../services/otp.service.js";
+import {
+  getPlaceholderConnectionURI,
+  networkInterceptor,
+  startSupertokensMonitor,
+} from "./supertokensFailover.js";
 
 export const initSupertokens = () => {
   supertokens.init({
     framework: "express",
     supertokens: {
-      connectionURI: process.env.SUPERTOKENS_CONNECTION_URI,
+      // Only the first host goes to the SDK; networkInterceptor redirects each
+      // core call to whichever host (SUPERTOKENS_CONNECTION_URI list, then
+      // SUPERTOKENS_FALLBACK_URI) the health monitor marks active.
+      connectionURI: getPlaceholderConnectionURI(),
       apiKey: process.env.SUPERTOKENS_API_KEY,
+      networkInterceptor,
     },
     appInfo: {
       appName: "Tally Automation",
@@ -127,4 +136,6 @@ export const initSupertokens = () => {
       Session.init({ tokenTransferMethod: "header" }),
     ],
   });
+
+  startSupertokensMonitor();
 };

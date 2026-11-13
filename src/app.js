@@ -3,6 +3,12 @@ import cors from "cors";
 import supertokens from "supertokens-node";
 import { middleware as supertokensMiddleware, errorHandler as supertokensErrorHandler } from "supertokens-node/framework/express/index.js";
 import { initSupertokens } from "./config/supertokens.js";
+import {
+  getSupertokensStatus,
+  isSupertokensConnectivityError,
+  triggerProbe as triggerSupertokensProbe,
+} from "./config/supertokensFailover.js";
+import dbPool from "./db/index.js";
 import { requireSessionOrApiKey } from "./middleware/sessionOrApiKey.middleware.js";
 import { requireCompanyAccess } from "./middleware/companyAccess.middleware.js";
 
@@ -302,6 +308,17 @@ app.use(
 );
 
 app.use(supertokensMiddleware());
+
+// Unauthenticated upstream health: which DB / SuperTokens host is active.
+// Labels only (primary / env#N / fallback) — no IPs leave the server.
+app.get("/health/upstreams", (req, res) => {
+  const db = dbPool.getStatus();
+  const supertokensStatus = getSupertokensStatus();
+  const ok =
+    db.hosts.some((h) => h.healthy) &&
+    (supertokensStatus.hosts.length <= 1 || supertokensStatus.hosts.some((h) => h.healthy));
+  res.status(ok ? 200 : 503).json({ ok, db, supertokens: supertokensStatus });
+});
 
 // The connector posts Tally's raw export XML back as JSON here. A
 // full-year voucher export outgrew the 50mb global limit (~60 MB by
@@ -748,6 +765,13 @@ app.get(
   }
 
 );
+
+// A core call failed to connect → re-check SuperTokens hosts right away
+// instead of waiting for the next monitor tick. Passes the error on unchanged.
+app.use((err, req, res, next) => {
+  if (isSupertokensConnectivityError(err)) triggerSupertokensProbe();
+  next(err);
+});
 
 app.use(supertokensErrorHandler());
 

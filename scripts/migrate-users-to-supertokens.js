@@ -11,7 +11,14 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 console.log("API_DOMAIN:", process.env.API_DOMAIN);
 console.log("FRONTEND_URL:", process.env.FRONTEND_URL);
 console.log("SUPERTOKENS_CONNECTION_URI:", process.env.SUPERTOKENS_CONNECTION_URI);
-console.log("SUPERTOKENS_API_KEY:", process.env.SUPERTOKENS_API_KEY);
+console.log("SUPERTOKENS_API_KEY set:", Boolean(process.env.SUPERTOKENS_API_KEY));
+
+// SUPERTOKENS_CONNECTION_URI may be a ';'-separated priority list — this
+// one-off script just talks to the first core.
+const SUPERTOKENS_CORE_URI = (process.env.SUPERTOKENS_CONNECTION_URI || "")
+  .split(";")[0]
+  .trim()
+  .replace(/\/+$/, "");
 import pool from "../src/db/index.js";
 import UserRoles from "supertokens-node/recipe/userroles/index.js";
 import { initSupertokens } from "../src/config/supertokens.js";
@@ -26,7 +33,7 @@ import { DB_SCHEMA } from "../src/config/db.js";
 
 const importPasswordHash = async (email, passwordHash) => {
   const response = await fetch(
-    `${process.env.SUPERTOKENS_CONNECTION_URI}/recipe/user/passwordhash/import`,
+    `${SUPERTOKENS_CORE_URI}/recipe/user/passwordhash/import`,
     {
       method: "POST",
       headers: {
