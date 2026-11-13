@@ -23,6 +23,7 @@ import {
 } from "../services/statementExtraction.js";
 import { resolveUserId } from "../utils/resolveUserId.js";
 import { readDateWindow } from "../utils/dateWindow.js";
+import { validateSplitParts, paiseToAmount } from "../utils/splitTransaction.js";
 import { assertCompanyRefs, ownedCompaniesSql, resolveOwnedCompanyByName } from "../middleware/companyAccess.middleware.js";
 
 
@@ -900,7 +901,7 @@ router.get("/statement-files", async (req, res) => {
          MAX(cv.bank_ledger) AS bank_ledger,
          to_char(MIN(cv.voucher_date), 'YYYY-MM-DD') AS start_date,
          to_char(MAX(cv.voucher_date), 'YYYY-MM-DD') AS end_date,
-         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE cv.status <> 'SPLIT')::int AS total,
          COALESCE(MAX(j.status), 'REVIEW') AS job_status,
          MAX(j.error) AS job_error
        FROM ${DB_SCHEMA}.contra_vouchers cv
@@ -955,6 +956,7 @@ router.get("/statement-transactions", async (req, res) => {
        FROM ${DB_SCHEMA}.contra_vouchers
        WHERE company_id = $1
          AND file_name IS NOT NULL
+         AND status <> 'SPLIT'
          ${fileFilterClause}
        ORDER BY
          file_name ASC,
@@ -1229,12 +1231,12 @@ router.get("/waiting-ledger", async (req, res) => {
         id, company_id, company_name, voucher_type, voucher_number,
         voucher_date, bank_ledger, amount, narration,
         instrument_number, debit_credit, status, created_at,
-        merchant_name, group_key
+        merchant_name, group_key, split_parent_id
        FROM ${DB_SCHEMA}.contra_vouchers
        WHERE status = 'WAITING_LEDGER'
          AND company_id = $1
          ${fileFilterClause}
-       ORDER BY voucher_date ASC, id ASC`,
+       ORDER BY voucher_date ASC, COALESCE(split_parent_id, id) ASC, id ASC`,
       params
     );
 
@@ -1718,6 +1720,183 @@ async function releaseClub(clubGroupId, keepDuplicateIds = []) {
     [clubGroupId, keepDuplicateIds]
   );
 }
+
+/* ===========================
+   SPLIT — one waiting bank row → 2+ rows that add up to the original
+
+   The original stays as status 'SPLIT' (hidden from every waiting list, kept
+   so undo and statement re-upload still recognise it). Each part is a normal
+   WAITING_LEDGER row that points back through split_parent_id and is pushed
+   to Tally on its own, as any other row.
+   Body: { id, parts: [{ amount, narration? }] }
+=========================== */
+const SPLIT_ROW_COLUMNS = `id, company_id, voucher_date, bank_ledger, amount, narration,
+  instrument_number, debit_credit, status, merchant_name, group_key, split_parent_id`;
+
+router.post("/split", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
+    const id = Number(req.body?.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ success: false, message: "A numeric transaction id is required" });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Lock the row so two splits (or a split and a send) can't race.
+      const found = await client.query(
+        `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE id = $1
+           AND company_id IN (${ownedCompaniesSql("$2")})
+         FOR UPDATE`,
+        [id, userId]
+      );
+      const row = found.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ success: false, message: "Transaction not found" });
+      }
+      if (row.status !== "WAITING_LEDGER") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, message: "Only transactions that are still pending can be split" });
+      }
+      if (row.split_parent_id) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, message: "This transaction is already part of a split. Undo that split first" });
+      }
+
+      const check = validateSplitParts(req.body?.parts, row.amount);
+      if (!check.ok) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ success: false, message: check.message });
+      }
+
+      await client.query(
+        `UPDATE ${DB_SCHEMA}.contra_vouchers SET status = 'SPLIT', updated_at = NOW() WHERE id = $1`,
+        [id]
+      );
+
+      const children = [];
+      for (const part of check.parts) {
+        const inserted = await client.query(
+          `INSERT INTO ${DB_SCHEMA}.contra_vouchers
+             (company_id, company_name, voucher_date, bank_ledger, bank_name, debit_credit,
+              instrument_number, file_name, statement_password, merchant_name, group_key,
+              amount, narration, status, split_parent_id)
+           SELECT company_id, company_name, voucher_date, bank_ledger, bank_name, debit_credit,
+                  instrument_number, file_name, statement_password, merchant_name, group_key,
+                  $2::numeric, COALESCE(NULLIF($3, ''), narration), 'WAITING_LEDGER', id
+           FROM ${DB_SCHEMA}.contra_vouchers
+           WHERE id = $1
+           RETURNING ${SPLIT_ROW_COLUMNS}`,
+          [id, paiseToAmount(part.paise), part.narration]
+        );
+        children.push(inserted.rows[0]);
+      }
+
+      await client.query("COMMIT");
+      return res.status(201).json({
+        success: true,
+        message: `Split into ${children.length} transactions`,
+        parentId: id,
+        children
+      });
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("Split transaction error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* UNDO a split: drop the parts, bring the original back to WAITING_LEDGER.
+   Refused once any part has left the waiting list (queued / sent / failed). */
+router.post("/split/:id/undo", async (req, res) => {
+  try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return res.status(404).json({ success: false, message: "No profile found for this account" });
+    }
+
+    const parentId = Number(req.params.id);
+    if (!Number.isInteger(parentId)) {
+      return res.status(400).json({ success: false, message: "A numeric transaction id is required" });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+
+      const found = await client.query(
+        `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE id = $1 AND status = 'SPLIT'
+           AND company_id IN (${ownedCompaniesSql("$2")})
+         FOR UPDATE`,
+        [parentId, userId]
+      );
+      const parent = found.rows[0];
+      if (!parent) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ success: false, message: "Split not found" });
+      }
+
+      const kids = await client.query(
+        `SELECT id, status FROM ${DB_SCHEMA}.contra_vouchers
+         WHERE split_parent_id = $1
+         FOR UPDATE`,
+        [parentId]
+      );
+      if (kids.rows.some(k => k.status !== "WAITING_LEDGER")) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, message: "Some parts were already sent to Tally, so this split can't be undone" });
+      }
+      const kidIds = kids.rows.map(k => String(k.id));
+
+      await client.query(`DELETE FROM ${DB_SCHEMA}.contra_vouchers WHERE split_parent_id = $1`, [parentId]);
+      const restored = await client.query(
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
+         SET status = 'WAITING_LEDGER', updated_at = NOW()
+         WHERE id = $1
+         RETURNING ${SPLIT_ROW_COLUMNS}`,
+        [parentId]
+      );
+      // Unsent ledger/voucher picks made on the parts are meaningless now
+      if (parent.file_name && kidIds.length) {
+        await client.query(
+          `DELETE FROM ${DB_SCHEMA}.bank_statement_drafts
+           WHERE company_id = $1 AND statement_key = $2 AND row_id = ANY($3::text[])`,
+          [parent.company_id, `excel:${parent.file_name}`, kidIds]
+        );
+      }
+
+      await client.query("COMMIT");
+      return res.json({
+        success: true,
+        message: "Split undone",
+        removedIds: kidIds,
+        restored: restored.rows[0]
+      });
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("Undo split error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 router.put("/:id/party-ledger", async (req, res) => {
   try {
