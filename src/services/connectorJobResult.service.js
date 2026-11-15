@@ -10,6 +10,23 @@
 // Tally had accepted it.
 import { storeLedgerEmbedding } from "./ledgerEmbedding.js";
 import { parseLastVoucherId } from "./voucherUpsert.service.js";
+import { upsertLedgerFromPush, upsertStockItemFromPush } from "./masterUpsert.service.js";
+
+// The master upsert is a convenience on top of the status update: if it fails
+// (bad data, missing column) it must not roll back the result transaction and
+// leave the connector job stuck. A savepoint keeps the failure local.
+async function upsertMasterSafely(client, label, fn) {
+  await client.query("SAVEPOINT master_upsert");
+  try {
+    const result = await fn();
+    await client.query("RELEASE SAVEPOINT master_upsert");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK TO SAVEPOINT master_upsert");
+    console.error(`⚠️ Could not write ${label} to synced table (next sync will fix it):`, err.message);
+    return null;
+  }
+}
 
 function resolveTallyOutcome(responseXml, connectorError = null) {
   let finalStatus = "failed";
@@ -176,6 +193,14 @@ export async function processConnectorJobResult(client, job) {
         );
 
         console.log(`✅ Ledger ${payload.ledger_id} marked ${finalStatus}`);
+
+        // Created in Tally: make it visible in the synced ledger table right
+        // away so it stops counting as missing without a full sync.
+        if (finalStatus === "success") {
+          await upsertMasterSafely(client, `ledger ${payload.ledger_id}`, () =>
+            upsertLedgerFromPush(client, payload.ledger_id)
+          );
+        }
         break;
       }
 
@@ -325,6 +350,14 @@ export async function processConnectorJobResult(client, job) {
         );
 
         console.log(`✅ Stock Item ${payload.stock_item_id} marked ${finalStatus}`);
+
+        // Same as ledgers: write it to stock_group_summary on the create
+        // result itself, not after the optional opening-stock alter job.
+        if (finalStatus === "success") {
+          await upsertMasterSafely(client, `stock item ${payload.stock_item_id}`, () =>
+            upsertStockItemFromPush(client, payload.stock_item_id)
+          );
+        }
         break;
       }
 

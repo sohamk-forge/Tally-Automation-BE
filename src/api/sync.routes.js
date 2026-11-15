@@ -32,6 +32,7 @@
 import { buildDeliveryNotes } from "../services/voucherUpsert.service.js";
 import { parseTallyAmount } from "../utils/tallyAmount.js";
 import { computeProfitLoss } from "../services/profitLossCalc.js";
+import { adoptPushedLedgerRow } from "../services/masterUpsert.service.js";
     import {
       createAuditLog
     } from "../utils/createAuditLog.js";
@@ -2808,6 +2809,14 @@ router.get("/all-ledgers-sync", async (req, res) => {
         "primary_phone_number", "fax_no", "email", "opening_balance", "closing_balance",
         "opening_balance_type", "closing_balance_type"
       ];
+
+      // A ledger created through the app is written to this table right after
+      // the Tally push (masterUpsert.service.js) with a placeholder GUID. Give
+      // that row the real GUID/master id first so the upsert below updates it
+      // in place instead of inserting a second copy.
+      if (originalGuid && REAL_TALLY_GUID_PATTERN.test(guid)) {
+        await adoptPushedLedgerRow(client, companyId, ledgerName, guid, masterId);
+      }
 
       const result = await upsertRecord("app_test.all_ledger_details", guid, masterId, alterId, data, columns, client);
 
