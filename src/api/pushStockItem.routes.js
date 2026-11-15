@@ -7,8 +7,13 @@ import { safeEnqueueStockItem } from "../queues/stockItem.queue.js";
 
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
+
+// The app-level guard only reads company ids from the query/body/headers, so
+// a :companyId in the PATH (the status route) must be checked here.
+router.param("companyId", companyParamGuard);
 
 
 // ============================================================
@@ -159,6 +164,34 @@ router.post(
           message:
             "gst_applicable must be 'Applicable' or 'Not Applicable'"
         });
+      }
+
+
+      // HSN/SAC, when given, is 4, 6 or 8 digits (the same rule the Create
+      // Stock Item form enforces) — the API must not trust the form alone.
+      const hsnCode = String(data.hsn_code ?? "").trim();
+
+      if (hsnCode && !/^(\d{4}|\d{6}|\d{8})$/.test(hsnCode)) {
+        return res.status(400).json({
+          status: "error",
+          message: "hsn_code must be 4, 6 or 8 digits"
+        });
+      }
+
+      // GST rates, when given, are numbers from 0 to 100.
+      for (const key of ["cgst_rate", "sgst_rate", "igst_rate"]) {
+        const raw = data[key];
+        if (raw === undefined || raw === null || raw === "") continue;
+        // Number([5]) is 5 and Number(true) is 1, so only a plain number or
+        // numeric string counts as a rate.
+        const rate =
+          typeof raw === "number" || typeof raw === "string" ? Number(raw) : NaN;
+        if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+          return res.status(400).json({
+            status: "error",
+            message: `${key} must be a number between 0 and 100`
+          });
+        }
       }
 
 

@@ -7,8 +7,13 @@ import { ledgerQueue } from "../queues/ledger.queue.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { partyGstinProblem } from "../utils/partyGstin.js";
+import { companyParamGuard } from "../middleware/companyAccess.middleware.js";
 
 const router = express.Router();
+
+// The app-level guard only reads company ids from the query/body/headers, so
+// a :companyId in the PATH (the status route) must be checked here.
+router.param("companyId", companyParamGuard);
 
 router.post(
   "/push/ledger",

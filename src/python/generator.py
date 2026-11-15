@@ -129,7 +129,14 @@ if not party_state and party_gstin:
 if not party_state and invoice.get("ledger_gstin"):
     party_state = GST_STATE_MAP.get(str(invoice.get("ledger_gstin"))[:2], "")
 
-place_of_supply = invoice.get("place_of_supply") or party_state or ""
+# Purchase: place of supply is where the goods are delivered = OUR (the buyer's)
+# state, not the supplier's. STATENAME above stays the supplier's state; Tally
+# compares the two to pick IGST vs CGST/SGST.
+company_state = (
+    invoice.get("company_state")
+    or GST_STATE_MAP.get(str(invoice.get("company_gstin") or "")[:2], "")
+)
+place_of_supply = invoice.get("place_of_supply") or company_state or party_state or ""
 
 narration = invoice.get(
     "narration",
@@ -226,8 +233,12 @@ for item in line_items:
     name   = item.get("item_name") or item.get("name", "")
     qty    = float(item.get("qty", 1))
     unit               = item.get("unit", "") 
-    rate   = float(item.get("rate", 0))
-    amount = float(item.get("amount", 0))
+    rate   = float(item.get("rate") or 0)
+    amount = float(item.get("amount") or 0)
+    # The review page sends rate 0 when the rate box was left empty, and
+    # Tally then shows a blank rate. Derive it from amount / qty instead.
+    if rate == 0 and qty > 0 and amount != 0:
+        rate = round(amount / qty, 4)
     # FIXED: Use item ledger or purchase_ledger
     ledger = item.get("ledger") or purchase_ledger
     godown = item.get("godown_name") or invoice.get("godown_name") or ""
@@ -243,10 +254,22 @@ for item in line_items:
     ail = sub(vch, "ALLINVENTORYENTRIES.LIST")
     sub(ail, "STOCKITEMNAME",    name)
     sub(ail, "ISDEEMEDPOSITIVE", "Yes")
-    sub(ail, "RATE",             f"{rate}/{unit}")
+    # With no unit, "1560.0/" and "1.0 " are malformed and Tally drops the rate;
+    # send them without the unit part so Tally uses the item's own unit.
+    sub(ail, "RATE",             f"{rate}/{unit}" if unit else f"{rate}")
     sub(ail, "AMOUNT",           str(-amount))
-    sub(ail, "ACTUALQTY",        f"{qty} {unit}")
-    sub(ail, "BILLEDQTY",        f"{qty} {unit}")
+    sub(ail, "ACTUALQTY",        f"{qty} {unit}".strip())
+    sub(ail, "BILLEDQTY",        f"{qty} {unit}".strip())
+
+    # Line-level narration -> the item's Description in Tally
+    # (BASICUSERDESCRIPTION.LIST); one element per line of text.
+    item_narration = str(item.get("narration") or "").strip()
+    if item_narration:
+        desc = sub(ail, "BASICUSERDESCRIPTION.LIST")
+        desc.set("TYPE", "String")
+        for text_line in item_narration.splitlines():
+            if text_line.strip():
+                sub(desc, "BASICUSERDESCRIPTION", text_line.strip())
 
     if godown:
         sub(ail, "GODOWNNAME", godown)

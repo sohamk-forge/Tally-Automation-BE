@@ -168,6 +168,7 @@ router.post("/invoices", async (req, res) => {
          error_message = NULL,
          user_id = EXCLUDED.user_id,
          updated_at = NOW()
+       WHERE ${DB_SCHEMA}.invoice_extractions.sync_status IS DISTINCT FROM 'success'
        RETURNING id`,
       [
         companyId,
@@ -181,6 +182,18 @@ router.post("/invoices", async (req, res) => {
         userId
       ]
     );
+
+    // The upsert above refuses to touch a row that is already 'success' (the
+    // WHERE on DO UPDATE), so no row comes back for it. Resetting a pushed
+    // invoice to 'pending' and queueing it again would post it to Tally a
+    // second time. A failed or pending invoice still updates and retries.
+    if (!insertResult.rows.length) {
+      return res.status(409).json({
+        status: "error",
+        code: "ALREADY_PUSHED",
+        message: `Invoice ${invoice_no.trim()} has already been pushed to Tally. It was not sent again.`
+      });
+    }
 
     const invoiceId = insertResult.rows[0].id;
     console.log(`✅ Purchase Invoice saved: ID ${invoiceId}`);
@@ -242,7 +255,7 @@ router.get("/invoices", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT ie.id, ie.invoice_no, ie.invoice_date, ie.vendor_name, ie.gstin, ie.sync_status, ie.error_message, ie.raw_json, ie.created_at, ie.updated_at
+      SELECT ie.id, ie.invoice_no, ie.invoice_date, ie.vendor_name, ie.gstin, ie.sync_status, ie.tally_voucher_number, ie.error_message, ie.raw_json, ie.created_at, ie.updated_at
       FROM ${DB_SCHEMA}.invoice_extractions ie
       WHERE ie.company_id = $1
         AND (

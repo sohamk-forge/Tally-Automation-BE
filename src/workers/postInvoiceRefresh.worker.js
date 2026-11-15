@@ -24,7 +24,7 @@ import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
 import { resolveConnectorForCompany } from "../services/connectorOwner.service.js";
 import { parseXMLKeepText } from "../services/parser.js";
 import { getLedgerVoucherByMasterIdXML } from "../services/xmlBuilder.js";
-import { firstVoucherNode, upsertVoucherAndRefreshBalances } from "../services/voucherUpsert.service.js";
+import { firstVoucherNode, cleanText, upsertVoucherAndRefreshBalances } from "../services/voucherUpsert.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -87,6 +87,18 @@ const worker = new Worker(
     const voucher = firstVoucherNode(await parseXMLKeepText(voucherXml, ["REFERENCE", "PARTYGSTIN"]));
     if (!voucher) {
       throw new Error(`Tally returned no voucher for master ID ${row.tally_master_id}`);
+    }
+
+    // Purchase vouchers are pushed without a number, so Tally auto-numbers them;
+    // keep the number it assigned. (Sales stores its own in finalizeSalesPrint.)
+    if (kind === "purchase") {
+      const tallyVoucherNumber = cleanText(voucher.VOUCHERNUMBER);
+      if (tallyVoucherNumber) {
+        await pool.query(
+          `UPDATE ${DB_SCHEMA}.invoice_extractions SET tally_voucher_number = $1 WHERE id = $2`,
+          [tallyVoucherNumber, invoiceId]
+        );
+      }
     }
 
     const { ledgersUpdated } = await upsertVoucherAndRefreshBalances(pool, {

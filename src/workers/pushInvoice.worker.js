@@ -83,6 +83,30 @@ async function stockItemExists(companyId, stockItemName) {
   return { exists: Boolean(matchedName), matchedName: matchedName || null };
 }
 
+// The stock item's own unit in Tally ("nos", "pcs"...), used when the invoice
+// line carries none. Synced summary first, else what was pushed from the app.
+async function lookupStockItemUnit(companyId, itemName) {
+  const name = String(itemName || "").trim();
+  if (!name) return "";
+
+  const found = await pool.query(
+    `
+    SELECT unit FROM (
+      SELECT unit, 1 AS priority FROM ${DB_SCHEMA}.stock_group_summary
+      WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER($2) AND COALESCE(TRIM(unit), '') <> ''
+      UNION ALL
+      SELECT unit_name, 2 FROM ${DB_SCHEMA}.push_stock_item
+      WHERE company_id = $1 AND LOWER(TRIM(item_name)) = LOWER($2) AND COALESCE(TRIM(unit_name), '') <> ''
+    ) u
+    ORDER BY priority
+    LIMIT 1
+    `,
+    [companyId, name]
+  );
+
+  return String(found.rows[0]?.unit || "").trim();
+}
+
 // Party ledger = the vendor's saved mapping (vendor_ledger_mappings), else
 // an exact ledger-name match. No guessing: a vendor whose Tally ledger has
 // a different name stops at "Ledger Missing" until someone maps it once.
@@ -441,8 +465,19 @@ const worker = new Worker(
         console.log(`🗺️ No vendor GSTIN — ledger state fallback for "${partyName}":`, ledgerFallback);
       }
 
+      // Place of supply on a purchase is the buyer's (our company's) state.
+      const companyDetails = await pool.query(
+        `SELECT gstin, state FROM ${DB_SCHEMA}.company_details WHERE company_id = $1 LIMIT 1`,
+        [row.company_id]
+      );
+      const companyState = String(companyDetails.rows[0]?.state || "").trim();
+      const companyGstin = String(companyDetails.rows[0]?.gstin || "").trim();
+
       let xml = await generateXmlViaQueue("purchase", {
         ...invoice,
+
+        ...(companyState ? { company_state: companyState } : {}),
+        ...(companyGstin ? { company_gstin: companyGstin } : {}),
 
         ...(ledgerFallback.state ? { vendor_state: ledgerFallback.state } : {}),
         // Used by generator.py only to derive the state code when the
@@ -456,10 +491,13 @@ const worker = new Worker(
 
         purchase_ledger: invoice.purchase_ledger || mapping.purchase_ledger,
 
-        line_items: (invoice.line_items || []).map(item => ({
+        // A blank unit produces RATE "1560.0/" and QTY "1.0 " that Tally
+        // cannot parse (rate then shows empty) — fill it from the stock item.
+        line_items: await Promise.all((invoice.line_items || []).map(async (item) => ({
           ...item,
-          unit: item.unit || ""
-        })),
+          unit: (item.unit || "").trim() ||
+            await lookupStockItemUnit(row.company_id, item.item_name || item.name)
+        }))),
 
         cgst_ledger: mapping.cgst_ledger,
         sgst_ledger: mapping.sgst_ledger,
