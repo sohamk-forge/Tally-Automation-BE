@@ -1370,7 +1370,68 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
   const notFound = [];
   const invalid = [];
 
+  /* The parts of a split are ONE bank transaction, so they go to Tally as one
+     Payment / Receipt with every part's ledger on it (same path as "club"),
+     not as one voucher per part. All parts must be sent together. Contra parts
+     can't be clubbed and are pushed individually as before. */
+  const numericIds = vouchers
+    .map(v => Number(v?.id))
+    .filter(n => Number.isInteger(n));
+  const splitInfo = new Map(); // id -> split_parent_id
+  if (numericIds.length) {
+    const sp = await db.query(
+      `SELECT id, split_parent_id FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE id = ANY($1::int[]) AND split_parent_id IS NOT NULL`,
+      [numericIds]
+    );
+    for (const r of sp.rows) splitInfo.set(Number(r.id), String(r.split_parent_id));
+  }
+
+  const splitGroups = new Map(); // parent id -> batch items
+  const rest = [];
   for (const v of vouchers) {
+    const parent = splitInfo.get(Number(v?.id));
+    const type = String(v?.voucher_type || "").toLowerCase();
+    if (parent && v.party_ledger && ["payment", "receipt"].includes(type)) {
+      if (!splitGroups.has(parent)) splitGroups.set(parent, []);
+      splitGroups.get(parent).push(v);
+    } else {
+      rest.push(v);
+    }
+  }
+
+  for (const [parentId, items] of splitGroups) {
+    const kids = await db.query(
+      `SELECT id FROM ${DB_SCHEMA}.contra_vouchers
+       WHERE split_parent_id = $1 AND status IN ('WAITING_LEDGER', 'FAILED')`,
+      [parentId]
+    );
+    const batchIds = new Set(items.map(v => Number(v.id)));
+    const missingPart = kids.rows.some(k => !batchIds.has(Number(k.id)));
+    const types = new Set(items.map(v => String(v.voucher_type).toLowerCase()));
+    if (missingPart || types.size > 1 || kids.rows.length !== items.length) {
+      const reason = types.size > 1
+        ? "All parts of a split must use the same voucher type"
+        : "All parts of a split must be sent together";
+      for (const v of items) invalid.push({ id: v.id, reason });
+      continue;
+    }
+
+    const out = await clubVoucherRows(items, forcePushFlag, userId);
+    if (out.body.success) {
+      queued.push(...out.body.ids.map(String));
+    } else if (out.body.duplicate) {
+      duplicates.push(...(out.body.duplicates || []));
+    } else if (out.status === 503) {
+      for (const v of items) tallyUnreachable.push({ id: v.id, message: out.body.message });
+    } else if (out.status === 404) {
+      for (const v of items) notFound.push(v.id);
+    } else {
+      for (const v of items) invalid.push({ id: v.id, reason: out.body.message });
+    }
+  }
+
+  for (const v of rest) {
     if (!v.id || !v.party_ledger || !v.voucher_type) {
       invalid.push({ id: v.id ?? null, reason: "Missing id, party_ledger, or voucher_type", input: v });
       continue;
@@ -1573,135 +1634,142 @@ router.put("/bulk-party-ledger", async (req, res) => {
    and keeps every member's status in step with the leader.
    Body: { vouchers: [{ id, party_ledger }], forcePush? }
 =========================== */
+const resp = (status, body) => ({ status, body });
+
+/* Core of POST /club, also used when the parts of a split are sent together.
+   Returns { status, body }. */
+async function clubVoucherRows(rawItems, forcePushFlag, userId) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+
+  if (items.length < 2) {
+    return resp(400, { success: false, message: "Select 2 or more transactions to club" });
+  }
+  const bad = items.find(v => !Number.isInteger(Number(v?.id)) || !String(v?.party_ledger || "").trim());
+  if (bad) {
+    return resp(400, { success: false, message: "Each item needs a numeric id and a party_ledger" });
+  }
+
+  const ids = items.map(v => Number(v.id));
+  if (new Set(ids).size !== ids.length) {
+    return resp(400, { success: false, message: "Duplicate ids in request" });
+  }
+  // Keyed by string: pg returns bigint ids as strings.
+  const ledgerById = new Map(items.map(v => [String(Number(v.id)), String(v.party_ledger).trim()]));
+
+  const found = await db.query(
+    `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
+     WHERE id = ANY($1::int[])
+       AND status IN ('WAITING_LEDGER', 'FAILED')
+       AND company_id IN (${ownedCompaniesSql("$2")})
+     ORDER BY id ASC`,
+    [ids, userId]
+  );
+
+  if (found.rows.length !== ids.length) {
+    const foundIds = new Set(found.rows.map(r => Number(r.id)));
+    return resp(404, {
+      success: false,
+      message: "Some transactions were not found or are already sent",
+      notFound: ids.filter(id => !foundIds.has(id))
+    });
+  }
+
+  const rows = found.rows;
+  const dateKey = (d) => (d instanceof Date ? d.toISOString().split("T")[0] : String(d).slice(0, 10));
+  const same = (fn) => new Set(rows.map(fn)).size === 1;
+
+  if (!same(r => r.company_id) || !same(r => r.bank_ledger)) {
+    return resp(400, { success: false, message: "All transactions must belong to the same company and bank ledger" });
+  }
+  if (!same(r => dateKey(r.voucher_date))) {
+    return resp(400, { success: false, message: "All selected transactions must be on the same date" });
+  }
+  if (!same(r => String(r.debit_credit || "").toUpperCase())) {
+    return resp(400, { success: false, message: "Cannot club debit and credit transactions together" });
+  }
+
+  const voucherType = String(rows[0].debit_credit || "").toUpperCase() === "CREDIT" ? "receipt" : "payment";
+  const clubGroupId = randomUUID();
+  const leaderId = rows[0].id;
+
+  // Assign ledgers + group in one transaction so a half-built club can't
+  // be picked up by the worker.
+  const client = await db.connect();
+  let updated;
+  try {
+    await client.query("BEGIN");
+    updated = [];
+    for (const r of rows) {
+      const u = await client.query(
+        `UPDATE ${DB_SCHEMA}.contra_vouchers
+         SET party_ledger   = $1,
+             voucher_type   = $2,
+             transfer_bank  = NULL,
+             force_push     = $3,
+             user_id        = $4,
+             club_group_id  = $5,
+             status         = 'PENDING',
+             updated_at     = NOW()
+         WHERE id = $6
+         RETURNING *`,
+        [ledgerById.get(String(r.id)), voucherType, forcePushFlag, userId, clubGroupId, r.id]
+      );
+      updated.push(u.rows[0]);
+    }
+    await client.query("COMMIT");
+  } catch (txErr) {
+    await client.query("ROLLBACK");
+    throw txErr;
+  } finally {
+    client.release();
+  }
+
+  // Duplicate check per row — any hit stops the whole club so the user
+  // can deselect it; the rest go back to WAITING_LEDGER untouched.
+  if (!forcePushFlag) {
+    const duplicates = [];
+    for (const v of updated) {
+      const outcome = await runDuplicateCheck(v);
+      if (outcome.tallyUnreachable) {
+        await releaseClub(clubGroupId);
+        return resp(503, { success: false, message: outcome.message });
+      }
+      if (outcome.exists) {
+        duplicates.push({ id: v.id, message: outcome.message, matches: outcome.matches });
+      }
+    }
+    if (duplicates.length) {
+      await releaseClub(clubGroupId, duplicates.map(d => d.id));
+      return resp(409, {
+        success: false,
+        duplicate: true,
+        message: `${duplicates.length} transaction(s) already exist in Tally`,
+        duplicates
+      });
+    }
+  }
+
+  const queue = await safeEnqueueVoucher(leaderId);
+
+  return resp(202, {
+    success: true,
+    message: `${rows.length} transactions queued as 1 ${voucherType} voucher`,
+    leaderId,
+    clubGroupId,
+    voucherType,
+    ids: rows.map(r => r.id),
+    queue
+  });
+}
+
 router.post("/club", async (req, res) => {
   try {
     const userId = await resolveUserId(req);
     if (!userId) {
       return res.status(404).json({ success: false, message: "No profile found for this account" });
     }
-
-    const forcePushFlag = req.body.forcePush === true;
-    const items = Array.isArray(req.body.vouchers) ? req.body.vouchers : [];
-
-    if (items.length < 2) {
-      return res.status(400).json({ success: false, message: "Select 2 or more transactions to club" });
-    }
-    const bad = items.find(v => !Number.isInteger(Number(v?.id)) || !String(v?.party_ledger || "").trim());
-    if (bad) {
-      return res.status(400).json({ success: false, message: "Each item needs a numeric id and a party_ledger" });
-    }
-
-    const ids = items.map(v => Number(v.id));
-    if (new Set(ids).size !== ids.length) {
-      return res.status(400).json({ success: false, message: "Duplicate ids in request" });
-    }
-    // Keyed by string: pg returns bigint ids as strings.
-    const ledgerById = new Map(items.map(v => [String(Number(v.id)), String(v.party_ledger).trim()]));
-
-    const found = await db.query(
-      `SELECT * FROM ${DB_SCHEMA}.contra_vouchers
-       WHERE id = ANY($1::int[])
-         AND status IN ('WAITING_LEDGER', 'FAILED')
-         AND company_id IN (${ownedCompaniesSql("$2")})
-       ORDER BY id ASC`,
-      [ids, userId]
-    );
-
-    if (found.rows.length !== ids.length) {
-      const foundIds = new Set(found.rows.map(r => Number(r.id)));
-      return res.status(404).json({
-        success: false,
-        message: "Some transactions were not found or are already sent",
-        notFound: ids.filter(id => !foundIds.has(id))
-      });
-    }
-
-    const rows = found.rows;
-    const dateKey = (d) => (d instanceof Date ? d.toISOString().split("T")[0] : String(d).slice(0, 10));
-    const same = (fn) => new Set(rows.map(fn)).size === 1;
-
-    if (!same(r => r.company_id) || !same(r => r.bank_ledger)) {
-      return res.status(400).json({ success: false, message: "All transactions must belong to the same company and bank ledger" });
-    }
-    if (!same(r => dateKey(r.voucher_date))) {
-      return res.status(400).json({ success: false, message: "All selected transactions must be on the same date" });
-    }
-    if (!same(r => String(r.debit_credit || "").toUpperCase())) {
-      return res.status(400).json({ success: false, message: "Cannot club debit and credit transactions together" });
-    }
-
-    const voucherType = String(rows[0].debit_credit || "").toUpperCase() === "CREDIT" ? "receipt" : "payment";
-    const clubGroupId = randomUUID();
-    const leaderId = rows[0].id;
-
-    // Assign ledgers + group in one transaction so a half-built club can't
-    // be picked up by the worker.
-    const client = await db.connect();
-    let updated;
-    try {
-      await client.query("BEGIN");
-      updated = [];
-      for (const r of rows) {
-        const u = await client.query(
-          `UPDATE ${DB_SCHEMA}.contra_vouchers
-           SET party_ledger   = $1,
-               voucher_type   = $2,
-               transfer_bank  = NULL,
-               force_push     = $3,
-               user_id        = $4,
-               club_group_id  = $5,
-               status         = 'PENDING',
-               updated_at     = NOW()
-           WHERE id = $6
-           RETURNING *`,
-          [ledgerById.get(String(r.id)), voucherType, forcePushFlag, userId, clubGroupId, r.id]
-        );
-        updated.push(u.rows[0]);
-      }
-      await client.query("COMMIT");
-    } catch (txErr) {
-      await client.query("ROLLBACK");
-      throw txErr;
-    } finally {
-      client.release();
-    }
-
-    // Duplicate check per row — any hit stops the whole club so the user
-    // can deselect it; the rest go back to WAITING_LEDGER untouched.
-    if (!forcePushFlag) {
-      const duplicates = [];
-      for (const v of updated) {
-        const outcome = await runDuplicateCheck(v);
-        if (outcome.tallyUnreachable) {
-          await releaseClub(clubGroupId);
-          return res.status(503).json({ success: false, message: outcome.message });
-        }
-        if (outcome.exists) {
-          duplicates.push({ id: v.id, message: outcome.message, matches: outcome.matches });
-        }
-      }
-      if (duplicates.length) {
-        await releaseClub(clubGroupId, duplicates.map(d => d.id));
-        return res.status(409).json({
-          success: false,
-          duplicate: true,
-          message: `${duplicates.length} transaction(s) already exist in Tally`,
-          duplicates
-        });
-      }
-    }
-
-    const queue = await safeEnqueueVoucher(leaderId);
-
-    return res.status(202).json({
-      success: true,
-      message: `${rows.length} transactions queued as 1 ${voucherType} voucher`,
-      leaderId,
-      clubGroupId,
-      voucherType,
-      ids: rows.map(r => r.id),
-      queue
-    });
+    const { status, body } = await clubVoucherRows(req.body.vouchers, req.body.forcePush === true, userId);
+    return res.status(status).json(body);
   } catch (err) {
     console.error("Club vouchers error:", err);
     return res.status(500).json({ success: false, message: err.message });

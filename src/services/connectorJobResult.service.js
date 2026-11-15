@@ -404,7 +404,20 @@ export async function processConnectorJobResult(client, job) {
       case "voucher": {
   const { finalStatus, errorMessage } = resolveTallyOutcome(response_xml, connectorError);
 
-  const voucherResult = await client.query(
+  // Tally saying "success" is not enough: the voucher is only SUCCESS once it
+  // has been read back from Tally and its voucher number saved
+  // (bankVoucherConfirm.service.js, chained from connector.routes.js after
+  // this commits). Until then the rows stay PENDING_CONNECTOR. No voucher ID
+  // in the reply means nothing can be confirmed, so it is FAILED right away
+  // and the user can re-push.
+  let confirmedByTally = finalStatus === "success";
+  let failMessage = errorMessage;
+  if (confirmedByTally && !parseLastVoucherId(response_xml)) {
+    confirmedByTally = false;
+    failMessage = "Tally did not return a voucher ID, so the voucher could not be confirmed. Check Tally, then re-push.";
+  }
+
+  await client.query(
     `
     UPDATE app_test.contra_vouchers
     SET
@@ -414,46 +427,17 @@ export async function processConnectorJobResult(client, job) {
       duplicate_message = NULL,
       updated_at = NOW()
     WHERE id = ANY($4::int[])
-    RETURNING *
     `,
     [
-      finalStatus === "success" ? "SUCCESS" : "FAILED",
+      confirmedByTally ? "PENDING_CONNECTOR" : "FAILED",
       response_xml || null,
-      errorMessage,
+      confirmedByTally ? null : failMessage,
       // A clubbed voucher backs several rows — all of them settle together.
       Array.isArray(payload.voucher_ids) ? payload.voucher_ids : [payload.voucher_id]
     ]
   );
 
-  console.log(`✅ Voucher ${payload.voucher_id} marked ${finalStatus.toUpperCase()}`);
-
-  // Fire-and-forget embedding on success only — same behavior as the
-  // old direct-push worker. Runs inside the same DB transaction client
-  // as the status update, but storeLedgerEmbedding talks to a separate
-  // embedding store, not this transaction, so it can't roll it back.
-  // Not awaited: the embedding call takes tens of seconds, and awaiting it
-  // held this transaction open — the UI kept seeing PENDING_CONNECTOR long
-  // after Tally had accepted the voucher.
-  if (finalStatus === "success") {
-    const rows = voucherResult.rows;
-    (async () => {
-      for (const voucher of rows) {
-        try {
-          const embedResult = await storeLedgerEmbedding({
-            companyId: voucher.company_id,
-            companyName: voucher.company_name,
-            groupKey: voucher.group_key,
-            ledgerName: voucher.party_ledger
-          });
-          if (!embedResult.stored) {
-            console.log(`ℹ️ Embedding not stored for voucher ${voucher.id}: ${embedResult.reason}`);
-          }
-        } catch (embedErr) {
-          console.error(`Embedding failed for voucher ${voucher.id}:`, embedErr.message);
-        }
-      }
-    })();
-  }
+  console.log(`✅ Voucher ${payload.voucher_id} ${confirmedByTally ? "accepted by Tally, awaiting confirmation" : "FAILED"}`);
 
   break;
 }

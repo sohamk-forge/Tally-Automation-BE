@@ -15,6 +15,7 @@ import {
 import { formatVoucherDate, checkDuplicateFromDb, toIsoDate } from "../api/voucher.js";
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveTallyOwner } from "../services/connectorOwner.service.js";
+import { guardVoucherXml, formatGuardMessage } from "../services/voucherMastersGuard.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -272,6 +273,18 @@ async function markStalePendingAsFailed() {
        AND updated_at < NOW() - INTERVAL '5 minutes'
      RETURNING id`
   );
+  // Accepted by Tally but never confirmed (backend restarted mid read-back):
+  // release them so the user can re-push instead of waiting forever.
+  const unconfirmed = await pool.query(
+    `UPDATE app_test.contra_vouchers
+     SET status = 'FAILED',
+         err_message = 'Could not confirm the voucher in Tally. Check Tally, then re-push.',
+         updated_at = NOW()
+     WHERE status = 'PENDING_CONNECTOR'
+       AND updated_at < NOW() - INTERVAL '15 minutes'
+     RETURNING id`
+  );
+  console.log(`Released ${unconfirmed.rowCount} unconfirmed vouchers as failed`);
   console.log(`Marked ${result.rowCount} stale pending vouchers as failed`);
 }
 

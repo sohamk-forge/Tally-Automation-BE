@@ -9,6 +9,7 @@ import { processConnectorJobResult } from "../services/connectorJobResult.servic
 import { resolveConnectorForCompany, getTallyStatusForKey, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
+import { confirmBankVoucherInTally } from "../services/bankVoucherConfirm.service.js";
 import { safeEnqueuePostInvoiceRefresh } from "../queues/postInvoiceRefresh.queue.js";
 
 import { DB_SCHEMA } from "../config/db.js";
@@ -460,6 +461,30 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
           `⚠️ Failed to queue post-invoice refresh for job ${jobId}:`,
           chainError.message
         );
+      }
+    }
+
+    // =========================================
+    // BANK VOUCHER CONFIRMATION
+    // Read the voucher back from Tally for its number; only then is it
+    // SUCCESS. Rows still PENDING_CONNECTOR after the result commit are the
+    // ones Tally accepted. Fire-and-forget: the connector must not wait.
+    // =========================================
+    if (job.job_type === "voucher") {
+      const voucherIds = Array.isArray(job.payload?.voucher_ids)
+        ? job.payload.voucher_ids
+        : [job.payload?.voucher_id];
+      const ids = voucherIds.map(Number).filter(Number.isInteger);
+      if (ids.length) {
+        confirmBankVoucherInTally(ids).catch(async (confirmError) => {
+          console.error(`⚠️ Bank voucher confirmation crashed for job ${jobId}:`, confirmError.message);
+          await pool.query(
+            `UPDATE ${DB_SCHEMA}.contra_vouchers
+             SET status = 'FAILED', err_message = $1, updated_at = NOW()
+             WHERE id = ANY($2::int[]) AND status = 'PENDING_CONNECTOR'`,
+            [`Could not confirm the voucher in Tally: ${confirmError.message}. Check Tally, then re-push.`, ids]
+          ).catch(() => {});
+        });
       }
     }
 
