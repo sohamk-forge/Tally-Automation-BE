@@ -131,7 +131,7 @@ export async function adoptPushedLedgerRow(client, companyId, ledgerName, realGu
 
   const result = await client.query(
     `UPDATE app_test.all_ledger_details
-        SET guid = $3, master_id = $4, alter_id = 0, updated_at = NOW()
+        SET guid = $3, master_id = $4::bigint, alter_id = 0, updated_at = NOW()
       WHERE id = (
         SELECT id FROM app_test.all_ledger_details
          WHERE company_id = $1
@@ -142,7 +142,7 @@ export async function adoptPushedLedgerRow(client, companyId, ledgerName, realGu
       )
       AND NOT EXISTS (
         SELECT 1 FROM app_test.all_ledger_details
-         WHERE company_id = $1 AND (guid = $3 OR ($4::text IS NOT NULL AND master_id::text = $4::text))
+         WHERE company_id = $1 AND (guid = $3 OR ($4::bigint IS NOT NULL AND master_id = $4::bigint))
       )`,
     [companyId, normalizeName(ledgerName), realGuid, masterId ? String(masterId) : null]
   );

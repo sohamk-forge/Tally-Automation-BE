@@ -66,6 +66,9 @@ router.post("/", async (req, res) => {
     const { company_id, name, phone_number } = req.body;
     if (!company_id) return errRes(res, 400, "company_id is required");
     if (!name)        return errRes(res, 400, "name is required");
+    if (phone_number && !/^\d{10}$/.test(String(phone_number).trim())) {
+      return errRes(res, 400, "Phone number must be 10 digits");
+    }
 
     const person = await createDeliveryPerson(Number(company_id), {
       name,

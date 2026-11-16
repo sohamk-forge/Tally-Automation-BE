@@ -72,15 +72,18 @@ const HEADER_ALIASES = {
     "chq./ref.no.", "chq/ref no.", "chq no", "chq no.",
     "ref no", "ref no.", "cheque number", "chqno", "cheque no",
     "cheque no.",       // IDFC First: "Cheque No." (with trailing period)
-    "chq /ref no."      // Kotak Mahindra: "Chq /Ref No."
+    "chq /ref no.",     // Kotak Mahindra: "Chq /Ref No."
+    "cheque. no./ref. no."  // ICICI "Detailed Statement" export
   ],
   withdrawal: [
     "withdrawal amt.", "withdrawal amt", "debit", "dr",
-    "withdrawal amount(inr)", "withdrawal amount"
+    "withdrawal amount(inr)", "withdrawal amount",
+    "withdrawal amt (inr)"   // ICICI "Detailed Statement" export
   ],
   deposit: [
     "deposit amt.", "deposit amt", "credit", "cr",
-    "deposit amount(inr)", "deposit amount"
+    "deposit amount(inr)", "deposit amount",
+    "deposit amt (inr)"      // ICICI "Detailed Statement" export
   ],
   balance: [
     "closing balance", "balance", "balance(inr)", "bal",
@@ -138,18 +141,31 @@ function pickField(normRow, aliasListKey) {
 
 function findHeaderRowIndex(sheet) {
   const range = xlsx.utils.decode_range(sheet["!ref"]);
-  for (let r = range.s.r; r <= Math.min(range.e.r, 30); r++) {
+  const dateKeys = HEADER_ALIASES.date.map(normalizeHeaderKey);
+  const amountKeys = [
+    ...HEADER_ALIASES.withdrawal,
+    ...HEADER_ALIASES.deposit,
+    ...HEADER_ALIASES.amount
+  ].map(normalizeHeaderKey);
+
+  // A real header row has BOTH a date column and an amount column. A single
+  // match is not enough: ICICI's preamble contains "Transaction Type: | DR",
+  // and "dr" alone used to be mistaken for the header row.
+  let fallback = -1;
+  for (let r = range.s.r; r <= Math.min(range.e.r, 40); r++) {
+    let hasDate = false, hasAmount = false, hits = 0;
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cell = sheet[xlsx.utils.encode_cell({ r, c })];
       if (cell && typeof cell.v === "string") {
         const val = normalizeHeaderKey(cell.v);
-        if (HEADER_ROW_DETECTORS.includes(val)) {
-          return r;
-        }
+        if (dateKeys.includes(val)) { hasDate = true; hits++; }
+        else if (amountKeys.includes(val)) { hasAmount = true; hits++; }
       }
     }
+    if (hasDate && hasAmount) return r;
+    if (hits >= 2 && fallback < 0) fallback = r;
   }
-  return 0;
+  return fallback >= 0 ? fallback : 0;
 }
 
 const MONTH_NAME_TO_NUM = {
