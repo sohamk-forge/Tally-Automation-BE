@@ -104,7 +104,9 @@ function computeItem(item, supplyType = "intrastate", gstEnabled = true) {
   if (!gstEnabled) {
     return {
       ...base,
-      gst_rate:    "0%",
+      // Keep the entered rate so reopening the quotation shows it; only the
+      // tax amounts are zeroed when the company has GST disabled.
+      gst_rate:    `${toNum(String(item.gst_rate || "0%").replace("%", ""))}%`,
       cgst_amount: 0,
       sgst_amount: 0,
       igst_amount: 0,
