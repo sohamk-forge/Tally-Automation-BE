@@ -3418,6 +3418,7 @@ router.get("/voucher-types-sync", async (req, res) => {
       rows.push({
         name,
         parent: text(vt?.PARENT),
+        numbering: text(vt?.NUMBERINGMETHOD),
         active: String(text(vt?.ISACTIVE) || "Yes").toLowerCase() !== "no"
       });
     }
@@ -3445,14 +3446,14 @@ router.get("/voucher-types-sync", async (req, res) => {
     for (const r of rows) {
       const base = rootOf(r).toLowerCase();
       const out = await client.query(
-        `INSERT INTO app_test.voucher_types (company_id, company_name, name, parent, base_type, is_active, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+        `INSERT INTO app_test.voucher_types (company_id, company_name, name, parent, base_type, is_active, numbering_method, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
          ON CONFLICT (company_id, LOWER(TRIM(name)))
          DO UPDATE SET parent = EXCLUDED.parent, base_type = EXCLUDED.base_type,
-                       is_active = EXCLUDED.is_active,
+                       is_active = EXCLUDED.is_active, numbering_method = EXCLUDED.numbering_method,
                        company_name = EXCLUDED.company_name, updated_at = NOW()
          RETURNING (xmax = 0) AS inserted`,
-        [companyId, company, r.name, r.parent, base, r.active]
+        [companyId, company, r.name, r.parent, base, r.active, r.numbering]
       );
       if (out.rows[0].inserted) inserted++; else updated++;
     }

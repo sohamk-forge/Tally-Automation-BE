@@ -16,6 +16,7 @@ import { formatVoucherDate, checkDuplicateFromDb, toIsoDate } from "../api/vouch
 import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveTallyOwner } from "../services/connectorOwner.service.js";
 import { guardVoucherXml, formatGuardMessage } from "../services/voucherMastersGuard.js";
+import { ensureVoucherNumber } from "../services/voucherNumbering.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -404,12 +405,16 @@ const worker = new Worker(
 
       // Generate XML only. Nothing gets pushed from the server.
       const ledgers = isClub ? buildClubLedgers(group) : buildLedgers(voucher, amount);
+      // Manual / "Automatic (Manual Override)" Tally types don't number
+      // themselves on import — without a number the voucher lands in Import
+      // Exceptions. Assigned once and saved, so a retry reuses it.
+      const voucherNumber = await ensureVoucherNumber(voucher);
       const payload = {
         company: voucher.company_name,
         voucher_type: voucher.voucher_type,
         // Tally voucher type name chosen in the UI; only the XML header changes.
         voucher_type_name: voucher.voucher_type_name || "",
-        voucher_number: voucher.voucher_number || "",
+        voucher_number: voucherNumber || "",
         date: formattedDate,
         party_ledger: voucher.party_ledger,
         narration: isClub

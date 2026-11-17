@@ -1493,7 +1493,7 @@ export const getVoucherTypesXML = (company) => `
         <TDLMESSAGE>
           <COLLECTION NAME="AllVoucherTypes" ISMODIFY="No">
             <TYPE>VoucherType</TYPE>
-            <FETCH>NAME, PARENT, RESERVEDNAME, ISACTIVE</FETCH>
+            <FETCH>NAME, PARENT, RESERVEDNAME, ISACTIVE, NUMBERINGMETHOD</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
