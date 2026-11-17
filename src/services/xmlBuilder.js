@@ -1474,6 +1474,34 @@ export const getGodownsXML = (company) => {
 `;
 
 };
+// Every Voucher Type master of the company (built-in + custom), with its parent.
+export const getVoucherTypesXML = (company) => `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>AllVoucherTypes</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="AllVoucherTypes" ISMODIFY="No">
+            <TYPE>VoucherType</TYPE>
+            <FETCH>NAME, PARENT, RESERVEDNAME, ISACTIVE</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+
 export const getSalesGroupXML = (company) => {
   return `
 <ENVELOPE>

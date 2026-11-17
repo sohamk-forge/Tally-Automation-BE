@@ -336,6 +336,7 @@ const worker = new Worker(
       { label: "STOCK GROUP SUMMARY", path: "/api/sync/stock-group-summary-sync" },
       { label: "UNITS", path: "/api/sync/units-sync" },
       { label: "GODOWNS", path: "/api/sync/godown-sync" },
+      { label: "VOUCHER TYPES", path: "/api/sync/voucher-types-sync" },
       { label: "PURCHASE/SALES LEDGERS", path: "/api/sync/purchase-sales-ledgers-sync" },
       { label: "PAYABLE/DEBTORS", path: "/api/sync/payable-debtors", calls: 6 },
       { label: "PARENT GROUPS", path: "/api/sync/parent-groups" },

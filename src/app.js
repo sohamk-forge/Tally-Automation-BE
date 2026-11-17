@@ -165,6 +165,9 @@ from "./api/purchaseSalesLedger.routes.js";
 import godownRoutes
 from "./api/godown.routes.js";
 
+import voucherTypesRoutes
+from "./api/voucherTypes.routes.js";
+
 import bulkSalesUploadRoutes
  from "./api/bulkSalesUpload.routes.js";
 
@@ -629,6 +632,12 @@ app.use(
   "/api",
   ...requireSessionAndCompany(),
   godownRoutes
+);
+
+app.use(
+  "/api",
+  ...requireSessionAndCompany(),
+  voucherTypesRoutes
 );
 
 app.use(

@@ -182,9 +182,11 @@ class VoucherGenerator:
             "VOUCHER"
         )
 
+        # Base type (Payment/Receipt/Contra) unless a Tally voucher type name
+        # (e.g. "Fees Receipt") was chosen; only the header changes.
         voucher_type = (
-            self.data["voucher_type"]
-            .capitalize()
+            (self.data.get("voucher_type_name") or "").strip()
+            or self.data["voucher_type"].capitalize()
         )
 
         voucher.set(

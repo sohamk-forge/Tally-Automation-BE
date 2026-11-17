@@ -378,6 +378,7 @@ const worker = new Worker(
         const dup = await checkDuplicateFromDb({
           companyId: voucher.company_id,
           voucherType: voucher.voucher_type,
+          voucherTypeName: voucher.voucher_type_name,
           voucherDate: voucherDateStr,
           partyLedger: voucher.party_ledger,
           bankLedger: voucher.bank_ledger,
@@ -406,6 +407,8 @@ const worker = new Worker(
       const payload = {
         company: voucher.company_name,
         voucher_type: voucher.voucher_type,
+        // Tally voucher type name chosen in the UI; only the XML header changes.
+        voucher_type_name: voucher.voucher_type_name || "",
         voucher_number: voucher.voucher_number || "",
         date: formattedDate,
         party_ledger: voucher.party_ledger,

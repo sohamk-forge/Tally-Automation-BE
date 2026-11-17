@@ -306,11 +306,14 @@ Uses the party_ledger_name column directly, and inspects ledger_entries
 */
 
 export async function checkDuplicateFromDb({
-  companyId, voucherType, voucherDate, partyLedger, bankLedger, amount
+  companyId, voucherType, voucherTypeName, voucherDate, partyLedger, bankLedger, amount
 }) {
-  const displayType = { payment: "Payment", receipt: "Receipt", contra: "Contra" }[
-    String(voucherType || "").toLowerCase()
-  ];
+  // A custom Tally type (e.g. "Fees Receipt") is stored under its own name in
+  // app_test.vouchers, so compare against that, not the base type.
+  const displayType = String(voucherTypeName || "").trim() ||
+    { payment: "Payment", receipt: "Receipt", contra: "Contra" }[
+      String(voucherType || "").toLowerCase()
+    ];
 
   const normParty = String(partyLedger || "").trim().toLowerCase();
   const normBank = String(bankLedger || "").trim().toLowerCase();

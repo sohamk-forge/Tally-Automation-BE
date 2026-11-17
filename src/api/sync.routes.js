@@ -25,6 +25,7 @@
             getCompanyDetailsXML,
             getCompanyGSTDetailsXML,
             getGodownsXML,
+            getVoucherTypesXML,
             getSalesGroupXML, getPurchaseGroupXML,getSalesInvoiceDetailsXML ,
         
     } from "../services/xmlBuilder.js";
@@ -88,7 +89,8 @@ const allowedTables = [
   "app_test.all_ledger_details",
   "app_test.profit_loss_summary",
   "app_test.company_details",
-  "app_test.godown_details"
+  "app_test.godown_details",
+  "app_test.voucher_types"
 ];
 
 /* ===================================================
@@ -3364,6 +3366,110 @@ router.get("/godown-sync", async (req, res) => {
   } catch (err) {
     if (client) await client.query("ROLLBACK").catch(() => {});
     console.log("❌ GODOWN SYNC ERROR:", err.message);
+    return res.status(500).json({ status: "error", message: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+/* ===================================================
+  VOUCHER TYPES SYNC
+  Pulls every Voucher Type master (built-in + custom) so the UI can offer them
+  under Receipt / Payment / Contra. The parser drops XML attributes, so the
+  name is read from LANGUAGENAME.LIST > NAME.LIST > NAME (first entry is the
+  real name, the rest are aliases).
+=================================================== */
+router.get("/voucher-types-sync", async (req, res) => {
+  const company = req.query.company;
+  if (!company) return res.status(400).json({ status: "error", message: "company query parameter required" });
+
+  let client = null;
+
+  try {
+    const userId = await requireUser(req, res);
+    if (!userId) return;
+
+    const companyId = await getCompanyId(userId, company, pool, req.query.companyId);
+    if (!companyId) throw new Error("Company not found");
+
+    const owns = await userOwnsCompany(userId, companyId, pool);
+    if (!owns) {
+      return res.status(403).json({ status: "error", message: "This company is not paired with your account." });
+    }
+
+    const xml = getVoucherTypesXML(company);
+    const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
+    const parsed = await parseXML(responseXML);
+
+    const raw = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHERTYPE || [];
+    const list = Array.isArray(raw) ? raw : [raw];
+
+    const text = (v) => {
+      if (Array.isArray(v)) v = v[0];
+      if (v && typeof v === "object") v = v._ ?? null;
+      return clean(v);
+    };
+
+    const rows = [];
+    for (const vt of list) {
+      const langList = Array.isArray(vt?.["LANGUAGENAME.LIST"]) ? vt["LANGUAGENAME.LIST"][0] : vt?.["LANGUAGENAME.LIST"];
+      const name = text(langList?.["NAME.LIST"]?.NAME) || text(vt?.$?.NAME) || text(vt?.["@NAME"]);
+      if (!name) continue;
+      rows.push({
+        name,
+        parent: text(vt?.PARENT),
+        active: String(text(vt?.ISACTIVE) || "Yes").toLowerCase() !== "no"
+      });
+    }
+
+    // Resolve each type's root built-in type by walking PARENT (a custom type
+    // can sit under another custom type). A built-in type has no parent.
+    const byName = new Map(rows.map(r => [r.name.toLowerCase(), r]));
+    const rootOf = (r) => {
+      let cur = r;
+      // Built-in types report themselves as their own PARENT, so a type whose
+      // parent is itself (or that has none) is the root.
+      for (let i = 0; i < 10; i++) {
+        if (!cur.parent || cur.parent.toLowerCase() === cur.name.toLowerCase()) return cur.name;
+        const next = byName.get(cur.parent.toLowerCase());
+        if (!next) return cur.parent;
+        cur = next;
+      }
+      return r.name;
+    };
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    let inserted = 0, updated = 0;
+    for (const r of rows) {
+      const base = rootOf(r).toLowerCase();
+      const out = await client.query(
+        `INSERT INTO app_test.voucher_types (company_id, company_name, name, parent, base_type, is_active, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+         ON CONFLICT (company_id, LOWER(TRIM(name)))
+         DO UPDATE SET parent = EXCLUDED.parent, base_type = EXCLUDED.base_type,
+                       is_active = EXCLUDED.is_active,
+                       company_name = EXCLUDED.company_name, updated_at = NOW()
+         RETURNING (xmax = 0) AS inserted`,
+        [companyId, company, r.name, r.parent, base, r.active]
+      );
+      if (out.rows[0].inserted) inserted++; else updated++;
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      status: "success",
+      source: "tally",
+      message: "Voucher types synced successfully",
+      company,
+      summary: { inserted, updated, total: rows.length }
+    });
+
+  } catch (err) {
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.log("❌ VOUCHER TYPES SYNC ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   } finally {
     if (client) client.release();

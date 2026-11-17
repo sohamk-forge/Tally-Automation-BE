@@ -267,6 +267,7 @@ async function runDuplicateCheck(voucher) {
     result = await checkDuplicateFromDb({
       companyId: voucher.company_id,
       voucherType: voucher.voucher_type,
+      voucherTypeName: voucher.voucher_type_name,
       voucherDate: voucherDateStr,
       partyLedger: voucher.party_ledger,
       bankLedger: voucher.bank_ledger,
@@ -1465,6 +1466,30 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
 
     const isContra = v.voucher_type.toLowerCase() === "contra";
 
+    // Optional Tally voucher type name (e.g. "Fees Receipt") under the base
+    // type. Only accepted if it is a synced type of this company whose root
+    // is the chosen base type; the base type still drives the ledger entries.
+    let typeName = String(v.voucher_type_name ?? "").trim() || null;
+    if (typeName && typeName.toLowerCase() === v.voucher_type.toLowerCase()) typeName = null;
+    if (typeName) {
+      const vt = await db.query(
+        `SELECT vt.name
+           FROM ${DB_SCHEMA}.voucher_types vt
+           JOIN ${DB_SCHEMA}.contra_vouchers cv ON cv.company_id = vt.company_id
+          WHERE cv.id = $1
+            AND cv.company_id IN (${ownedCompaniesSql("$3")})
+            AND LOWER(TRIM(vt.name)) = LOWER(TRIM($2))
+            AND vt.base_type = $4
+            AND vt.is_active = true`,
+        [v.id, typeName, userId, v.voucher_type.toLowerCase()]
+      );
+      if (!vt.rows.length) {
+        invalid.push({ id: v.id, reason: `Voucher type "${typeName}" is not a ${v.voucher_type} type in this company. Sync voucher types and retry.` });
+        continue;
+      }
+      typeName = vt.rows[0].name;
+    }
+
       const result = await db.query(
     `UPDATE ${DB_SCHEMA}.contra_vouchers
      SET
@@ -1473,13 +1498,14 @@ async function assignPartyLedger(vouchers, forcePushFlag, userId) {
        transfer_bank = $3,
        force_push    = $4,
        user_id       = $5,
+       voucher_type_name = $7,
        status        = 'PENDING'
      WHERE id = $6
        AND status IN ('WAITING_LEDGER', 'FAILED')
        AND company_id IN (${ownedCompaniesSql("$5")})
      RETURNING *`,
     [v.party_ledger, v.voucher_type.toLowerCase(),
-     isContra ? v.party_ledger : null, forcePushFlag, userId, v.id]
+     isContra ? v.party_ledger : null, forcePushFlag, userId, v.id, typeName]
   );
 
     if (result.rows.length === 0) {
@@ -1583,7 +1609,7 @@ router.put("/party-ledger", async (req, res) => {
     const forcePushFlag = req.body.forcePush === true;
     const vouchers = Array.isArray(req.body.vouchers)
       ? req.body.vouchers
-      : [{ id: req.body.id, party_ledger: req.body.party_ledger, voucher_type: req.body.voucher_type }];
+      : [{ id: req.body.id, party_ledger: req.body.party_ledger, voucher_type: req.body.voucher_type, voucher_type_name: req.body.voucher_type_name }];
 
     if (!vouchers.length || !vouchers[0]?.id) {
       return res.status(400).json({
@@ -1993,7 +2019,8 @@ router.put("/:id/party-ledger", async (req, res) => {
     const vouchers = [{
       id: Number(req.params.id),
       party_ledger: req.body.party_ledger,
-      voucher_type: req.body.voucher_type
+      voucher_type: req.body.voucher_type,
+      voucher_type_name: req.body.voucher_type_name
     }];
 
     const { status, body } = await assignPartyLedger(vouchers, forcePushFlag, userId);
