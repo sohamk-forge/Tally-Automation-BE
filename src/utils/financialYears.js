@@ -40,6 +40,65 @@ export function splitIntoFinancialYears(fromDate, toDate) {
   return pieces;
 }
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Splits one piece (a { fromDate, toDate, label } range, YYYYMMDD strings) into calendar months, oldest
+ * first: the first month starts on the piece's real start date and the last ends on its real end date.
+ * Used to ask Tally for a big voucher range one month at a time, so no single export has to be built for
+ * a whole year.
+ *   splitIntoMonths({ fromDate: "20230401", toDate: "20240331", label: "2023-24" }) ->
+ *     [{ fromDate: "20230401", toDate: "20230430", label: "2023-24 Apr" }, ... { ..."20240301", "20240331", "2023-24 Mar" }]
+ * Returns [piece] unchanged when its dates are not valid.
+ */
+export function splitIntoMonths(piece) {
+  const from = parseDay(piece?.fromDate);
+  const to = parseDay(piece?.toDate);
+  if (!from || !to || from > to) return [piece];
+
+  const months = [];
+  let cursor = from;
+  while (cursor <= to) {
+    const monthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
+    const pieceEnd = monthEnd < to ? monthEnd : to;
+    months.push({
+      ...piece,
+      fromDate: compact(cursor),
+      toDate: compact(pieceEnd),
+      label: `${piece.label} ${MONTH_NAMES[cursor.getUTCMonth()]}`
+    });
+    cursor = new Date(pieceEnd.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return months;
+}
+
+/**
+ * Like splitIntoMonths, but every month is cut in two: days 1-15 and 16-end (a piece that starts or ends
+ * inside a half keeps its real start / end date). Used for vouchers: Tally returned corrupted XML for a
+ * single month with ~1,600 vouchers (26 MB), so each request is kept to about half that.
+ *   splitIntoHalfMonths({ fromDate: "20230701", toDate: "20230731", label: "2023-24" }) ->
+ *     [{ fromDate: "20230701", toDate: "20230715", label: "2023-24 Jul 1-15" },
+ *      { fromDate: "20230716", toDate: "20230731", label: "2023-24 Jul 16-31" }]
+ */
+export function splitIntoHalfMonths(piece) {
+  return splitIntoMonths(piece).flatMap((month) => {
+    const from = parseDay(month.fromDate);
+    const to = parseDay(month.toDate);
+    if (!from || !to) return [month];
+
+    const mid = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 15));
+    if (from > mid || to <= mid) {
+      // the month piece lies entirely inside one half
+      return [{ ...month, label: `${month.label} ${from.getUTCDate()}-${to.getUTCDate()}` }];
+    }
+    const secondStart = new Date(mid.getTime() + 24 * 60 * 60 * 1000);
+    return [
+      { ...month, toDate: compact(mid), label: `${month.label} ${from.getUTCDate()}-15` },
+      { ...month, fromDate: compact(secondStart), label: `${month.label} 16-${to.getUTCDate()}` }
+    ];
+  });
+}
+
 /**
  * The range a sync covers. Connectors that send real dates (fromDate/toDate) get exactly that range.
  * Older connectors only send two plain years, which are read as whole financial years (1 Apr fromYear ->

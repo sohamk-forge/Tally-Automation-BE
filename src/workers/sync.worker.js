@@ -1,6 +1,8 @@
 ﻿import { Worker, UnrecoverableError } from "bullmq";
 import IORedis from "ioredis";
 import axios from "axios";
+import http from "node:http";
+import https from "node:https";
 
 import pool from "../db/index.js";
 import { SYNC_STEP_COUNT, SYNC_STEP_LABELS } from "../config/syncSteps.js";
@@ -8,8 +10,10 @@ import { failConnectorJobBusinessRecord } from "../services/connectorJobResult.s
 import { SYNC_QUEUE_NAME, safeEnqueueSync, syncQueue, getSyncJobId, PROCESSABLE_STATES } from "../queues/sync.queue.js";
 import { CONNECTOR_WAIT_TIMEOUT_MS, CONNECTOR_NOT_PICKING_UP_CODE } from "../services/connectorSync.service.js";
 import { recordTallyLicence, LICENCE_INACTIVE_MESSAGE } from "../services/tallyLicence.service.js";
-import { resolveSyncRange } from "../utils/financialYears.js";
+import { resolveSyncRange, splitIntoMonths, splitIntoHalfMonths } from "../utils/financialYears.js";
 import { recordFinancialYears } from "../services/companyFinancialYears.service.js";
+import { runPieces } from "../services/syncPieces.service.js";
+import { loadResumeKeys, pieceKey, recordPiece } from "../services/syncProgress.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -42,6 +46,10 @@ const connection = new IORedis({
 const api = axios.create({
   baseURL: process.env.BASE_URL || `http://localhost:${process.env.PORT || 5001}`,
   timeout: 300000,
+  // No kept-alive sockets for these calls to this server's own routes: reusing a socket the server was just
+  // closing during the pause between pieces caused "read ECONNRESET" and failed a whole voucher step.
+  httpAgent: new http.Agent({ keepAlive: false }),
+  httpsAgent: new https.Agent({ keepAlive: false }),
   headers: {
     "x-internal-secret": process.env.INTERNAL_SERVICE_SECRET
   }
@@ -149,7 +157,12 @@ function mergeSummaries(summaries) {
 
 // `pieces` (financial-year ranges): the route is called once per piece, oldest first, and the step reports
 // one combined result - so a three-year sync is still the same N steps in the progress loader.
-async function runSyncStep({ label, path, params, pieces, userId, results, jobLogId, connectorCalls = 1 }) {
+// Pause between two consecutive month requests to Tally, so it can finish one export before it is asked
+// for the next. Tally has crashed under rapid back-to-back requests before.
+const TALLY_MONTH_PAUSE_MS = Number(process.env.SYNC_TALLY_PAUSE_MS ?? 3000);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function runSyncStep({ label, path, params, pieces, userId, results, jobLogId, connectorCalls = 1, pauseBetweenCallsMs = 0 }) {
   console.log(`\n➡️  [${label}] STARTING`);
   console.log(`   GET ${path}`, { params, userId });
 
@@ -160,9 +173,15 @@ async function runSyncStep({ label, path, params, pieces, userId, results, jobLo
       ? pieces.map((piece) => ({ piece, params: { ...params, fromDate: piece.fromDate, toDate: piece.toDate } }))
       : [{ piece: null, params }];
 
-    const summaries = [];
-    for (const call of calls) {
-      try {
+    // Each piece is retried on a connection-type error, a piece that still fails no longer stops the pieces after
+    // it, and a rerun after a failed run skips the pieces that already completed (see syncPieces.service.js and
+    // syncProgress.service.js). Tally still gets one request at a time, with the pause between real requests.
+    const progressCompanyId = params?.companyId;
+    const resumeKeys = pieces?.length ? await loadResumeKeys(progressCompanyId, label, pieces) : new Set();
+
+    const { summaries, failedPieces, skipped } = await runPieces({
+      calls,
+      callPiece: async (call) => {
         const response = await api.get(path, {
           params: call.params,
           timeout: connectorCalls * CONNECTOR_WAIT_TIMEOUT_MS + 60000,
@@ -172,20 +191,41 @@ async function runSyncStep({ label, path, params, pieces, userId, results, jobLo
           }
         });
         if (call.piece) console.log(`   FY ${call.piece.label} (${call.piece.fromDate} -> ${call.piece.toDate}) done`);
-        summaries.push(response.data?.summary || null);
-      } catch (err) {
-        // Say which financial year failed; earlier years are already saved.
-        if (call.piece && calls.length > 1) err.message = `FY ${call.piece.label}: ${err.response?.data?.message || err.message}`;
-        throw err;
-      }
-    }
+        return response;
+      },
+      pauseMs: pauseBetweenCallsMs,
+      continueOnFailure: calls.length > 1,
+      connectorDownCode: CONNECTOR_NOT_PICKING_UP_CODE,
+      shouldSkip: resumeKeys.size ? async (piece) => resumeKeys.has(pieceKey(piece.fromDate, piece.toDate)) : null,
+      onPieceDone: pieces?.length
+        ? (piece, status, summary, errorMessage) => recordPiece(progressCompanyId, label, piece, status, summary, errorMessage, jobLogId)
+        : null,
+      log: (message) => console.log(`   ${message}`)
+    });
 
     const durationMs = Date.now() - startedAt;
+
+    if (failedPieces.length) {
+      const list = failedPieces.map((p) => `${p.label} (${String(p.error).slice(0, 80)})`).join("; ");
+      const partial = mergeSummaries(summaries) || {};
+      console.log(`❌ [${label}] ${failedPieces.length} of ${calls.length} periods failed: ${list}`);
+      results.push({
+        step: label,
+        status: "failed",
+        durationMs,
+        summary: { ...partial, failedPieces: failedPieces.length, skippedPieces: skipped },
+        error: `${failedPieces.length} of ${calls.length} periods failed: ${list}`.slice(0, 900)
+      });
+      await updateJobProgress(jobLogId, results);
+      return;
+    }
 
     // GREEN TICK
     console.log(`✅ [${label}] SYNC COMPLETED (${durationMs}ms)`);
 
-    const summary = mergeSummaries(summaries);
+    const mergedSummary = mergeSummaries(summaries);
+    // pieces skipped because the previous run already completed them are reported, never hidden
+    const summary = skipped ? { ...(mergedSummary || {}), skippedPieces: skipped } : mergedSummary;
     if (summary) {
       console.log(`   Summary:`, summary);
     }
@@ -301,10 +341,14 @@ const worker = new Worker(
       { label: "PARENT GROUPS", path: "/api/sync/parent-groups" },
       { label: "PROFIT & LOSS", path: "/api/sync/profit-loss-sync", dated: true },
       { label: "PROFIT & LOSS SUMMARY", path: "/api/sync/profit-loss-summary-sync" },
-      { label: "VOUCHERS", path: "/api/sync/voucher-sync", dated: true },
+      // monthly: Tally is asked for one calendar month at a time (one request at a time, with a pause), because a
+      // whole year of vouchers can take Tally longer than the connector's time limit to export.
+      // halfMonthly: vouchers go further, 1-15 and 16-end, because Tally returned corrupted XML for a single
+      // month of ~1,600 vouchers (26 MB).
+      { label: "VOUCHERS", path: "/api/sync/voucher-sync", dated: true, monthly: true, halfMonthly: true },
       // Must run AFTER voucher-sync - this route only UPDATEs the delivery_notes column on
       // voucher rows voucher-sync already inserted, it never inserts rows itself.
-      { label: "SALES INVOICE DELIVERY DETAILS", path: "/api/sync/sales-invoice-details-sync", dated: true }
+      { label: "SALES INVOICE DELIVERY DETAILS", path: "/api/sync/sales-invoice-details-sync", dated: true, monthly: true }
     ];
 
     try {
@@ -322,7 +366,10 @@ const worker = new Worker(
           label: step.label,
           path: step.path,
           params: { company, companyId },
-          pieces: step.dated ? pieces : undefined,
+          pieces: step.dated
+            ? (step.halfMonthly ? pieces.flatMap(splitIntoHalfMonths) : step.monthly ? pieces.flatMap(splitIntoMonths) : pieces)
+            : undefined,
+          pauseBetweenCallsMs: step.monthly ? TALLY_MONTH_PAUSE_MS : 0,
           connectorCalls: step.calls,
           userId,
           results,

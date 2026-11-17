@@ -33,6 +33,9 @@ import { buildDeliveryNotes } from "../services/voucherUpsert.service.js";
 import { parseTallyAmount } from "../utils/tallyAmount.js";
 import { computeProfitLoss } from "../services/profitLossCalc.js";
 import { adoptPushedLedgerRow } from "../services/masterUpsert.service.js";
+import { bulkSyncLedgers } from "../services/bulkLedgerSync.service.js";
+import { parseVouchersIsolated, recoverCorruptVouchers } from "../services/voucherParse.service.js";
+import { isTransientDbError, sleepMs, withDbRetry } from "../utils/transientDbError.js";
     import {
       createAuditLog
     } from "../utils/createAuditLog.js";
@@ -958,66 +961,86 @@ router.get("/voucher-sync", async (req, res) => {
     const xml = getLedgerVouchersXML(company, fromDate, toDate);
     const responseXML = await sendToTallyViaConnector(companyId, xml, "sync", userId);
     // Supplier invoice numbers / GSTINs keep their exact text (leading zeros).
-    const parsed = await parseXMLKeepText(responseXML, ["REFERENCE", "PARTYGSTIN"]);
+    // Default: every voucher is checked and parsed on its own, so a voucher Tally wrote as corrupt XML is reported
+    // (and counted as failed) instead of silently hiding every voucher after it. SYNC_LEGACY_PARSE=true restores
+    // the original whole-document parse.
+    let list;
+    let corruptVouchers = [];
+    if (process.env.SYNC_LEGACY_PARSE === "true") {
+      const parsed = await parseXMLKeepText(responseXML, ["REFERENCE", "PARTYGSTIN"]);
+      const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
+      list = Array.isArray(collection) ? collection : [collection];
+    } else {
+      const split = parseVouchersIsolated(responseXML, ["REFERENCE", "PARTYGSTIN"]);
+      list = split.vouchers;
+      corruptVouchers = split.corrupt;
 
-    const collection = parsed?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER || [];
-    const list = Array.isArray(collection) ? collection : [collection];
+      // Tally's corruption is a random glitch, so a voucher that came back corrupt usually comes back clean when
+      // Tally is asked for just that day. A few small single-day requests, one at a time with a pause; a failed
+      // retry only leaves those vouchers reported as corrupt. SYNC_RETRY_CORRUPT=false turns this off.
+      if (corruptVouchers.length && process.env.SYNC_RETRY_CORRUPT !== "false") {
+        const retry = await recoverCorruptVouchers({
+          vouchers: list,
+          corrupt: corruptVouchers,
+          textTags: ["REFERENCE", "PARTYGSTIN"],
+          fetchDay: (day) => sendToTallyViaConnector(companyId, getLedgerVouchersXML(company, day, day), "sync", userId),
+          log: (message) => console.log(`🔁 VOUCHER SYNC: ${message}`)
+        });
+        if (retry.recovered.length) list = list.concat(retry.recovered);
+        console.log(`🔁 VOUCHER SYNC: ${corruptVouchers.length} corrupt -> ${retry.stillCorrupt.length} still corrupt after retrying ${retry.days.length} day(s), ${retry.recovered.length} vouchers recovered`);
+        corruptVouchers = retry.stillCorrupt;
+      }
+    }
 
     await createAuditLog({
       action: "TALLY_RESPONSE",
       entity: "voucher-sync",
-      metadata: { company, totalRecords: list.length }
+      metadata: { company, totalRecords: list.length + corruptVouchers.length, corruptRecords: corruptVouchers.length }
     });
 
     let inserted = 0, updated = 0, ignored = 0, failed = 0;
+
+    for (const bad of corruptVouchers) {
+      failed++;
+      console.log(`⚠️ VOUCHER SYNC: voucher ${bad.number} (${bad.guid}) has corrupt XML from Tally: ${bad.reason}`);
+      await createAuditLog({
+        action: "VOUCHER_SYNC_RECORD_FAILED",
+        entity: "voucher-sync",
+        metadata: { company, error: `Corrupt XML from Tally: ${bad.reason}`, voucher: bad.number, guid: bad.guid },
+        logType: "ERROR"
+      });
+    }
     // Every real-Tally-GUID voucher successfully upserted this run — the
     // "Set B" side of the deleted-in-Tally diff below. A fallback-GUID
     // voucher is never added here, so it can never be soft-deleted by this
     // pass (see REAL_TALLY_GUID_PATTERN's comment).
     const syncedRealGuids = [];
 
-    for (const voucher of list) {
-      try {
-        const voucherNumber = clean(voucher?.VOUCHERNUMBER);
-        const originalGuid = voucher?.GUID || null;
-        if (!voucherNumber && !originalGuid) { failed++; continue; }
+    // A voucher whose XML came back corrupt still exists in Tally: count it as present so the soft-delete below
+    // never treats a voucher saved earlier as "deleted in Tally".
+    for (const bad of corruptVouchers) {
+      for (const guid of bad.guids || []) {
+        if (REAL_TALLY_GUID_PATTERN.test(guid)) syncedRealGuids.push(guid);
+      }
+    }
 
-        const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
-        const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+    // Default: vouchers are collected and written in batches of VOUCHER_BATCH_SIZE (one transaction
+    // per batch, ~60 ms per round trip made 29,000 one-at-a-time writes take hours).
+    // SYNC_LEGACY_ROW_WRITES=true keeps the original one-voucher-per-transaction writes, and a batch
+    // that fails falls back to them too, so one bad voucher still fails alone.
+    const useLegacyRowWrites = process.env.SYNC_LEGACY_ROW_WRITES === "true";
+    // 150 per batch (was 500): a smaller message is less likely to be damaged on an unreliable connection.
+    const VOUCHER_BATCH_SIZE = 150;
+    const pendingVouchers = [];
 
-        const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
-        const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
-        const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
-        // GST header fields (supplier invoice no/date, party GSTIN, place of
-        // supply, cancelled/optional flags) — used by GST filing.
-        const supplierInvoiceNo = clean(voucher?.REFERENCE) || null;
-        const supplierInvoiceDate = clean(voucher?.REFERENCEDATE)?.match(/^(\d{4})(\d{2})(\d{2})$/)
-          ? clean(voucher.REFERENCEDATE).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")
-          : null;
-        const partyGstin = clean(voucher?.PARTYGSTIN)?.toUpperCase() || null;
-        const placeOfSupply = clean(voucher?.PLACEOFSUPPLY) || null;
-        const yesNo = (v) => (clean(v) == null ? null : /^yes$/i.test(clean(v)));
-        const isCancelled = yesNo(voucher?.ISCANCELLED);
-        const isOptional = yesNo(voucher?.ISOPTIONAL);
-
-        let debitAmount = 0;
-        let creditAmount = 0;
-
-        const partyEntry = normalized.find(entry => clean(entry?.LEDGERNAME) === partyLedgerName);
-        if (partyEntry) {
-          const amount = Number(partyEntry?.AMOUNT || 0);
-          if (amount < 0) debitAmount = Math.abs(amount);
-          else creditAmount = amount;
-        }
-
-        const balance = debitAmount - creditAmount;
-
-        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
-          ignored++; continue;
-        }
-        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
-          ignored++; continue;
-        }
+    // ORIGINAL per-voucher write, moved here unchanged so it can serve as the legacy path and as the
+    // per-voucher fallback for a failed batch.
+    const writeVoucherLegacy = async (ctx) => {
+      const {
+        voucher, originalGuid, voucherNumber, voucherDate, voucherTypeName, partyLedgerName, normalized,
+        debitAmount, creditAmount, balance, supplierInvoiceNo, supplierInvoiceDate, partyGstin,
+        placeOfSupply, isCancelled, isOptional
+      } = ctx;
 
         const voucherClient = await pool.connect();
 
@@ -1124,6 +1147,226 @@ router.get("/voucher-sync", async (req, res) => {
         } finally {
           voucherClient.release();
         }
+    };
+
+    // Writes a batch of parsed vouchers with the same upsert and the same sales_items rows as
+    // writeVoucherLegacy, but in one transaction and a handful of statements.
+    const flushVoucherBatch = async (batch) => {
+      if (!batch.length) return;
+
+      const voucherRows = new Map(); // guid -> row; a repeated guid in one batch keeps the LAST one, like sequential upserts
+      const itemRows = [];
+      let repeatedGuids = 0;
+
+      for (const ctx of batch) {
+        const guid = ctx.originalGuid || generateFallbackGuid(
+          company, `${ctx.voucherDate}_${ctx.voucherTypeName}_${ctx.voucherNumber}`, "voucher"
+        );
+        ctx.guid = guid;
+
+        if (voucherRows.has(guid)) repeatedGuids++;
+        voucherRows.set(guid, {
+          guid,
+          master_id: ctx.voucher?.MASTERID || null,
+          alter_id: ctx.voucher?.ALTERID || 0,
+          company_id: companyId,
+          company_name: company,
+          voucher_date: ctx.voucherDate,
+          voucher_type: ctx.voucherTypeName,
+          voucher_number: ctx.voucherNumber,
+          party_ledger_name: ctx.partyLedgerName,
+          narration: clean(ctx.voucher?.NARRATION),
+          ledger_entries: ctx.normalized,
+          debit_amount: ctx.debitAmount,
+          credit_amount: ctx.creditAmount,
+          balance: ctx.balance,
+          supplier_invoice_no: ctx.supplierInvoiceNo,
+          supplier_invoice_date: ctx.supplierInvoiceDate,
+          party_gstin: ctx.partyGstin,
+          place_of_supply: ctx.placeOfSupply,
+          is_cancelled: ctx.isCancelled,
+          is_optional: ctx.isOptional
+        });
+
+        // sales_items has no unique key: every voucher's stock lines are inserted, as before.
+        for (const entry of ctx.normalized) {
+          const inventoryAllocations = entry?.["INVENTORYALLOCATIONS.LIST"];
+          const allocations = Array.isArray(inventoryAllocations)
+            ? inventoryAllocations
+            : inventoryAllocations ? [inventoryAllocations] : [];
+
+          for (const item of allocations) {
+            if (!item?.STOCKITEMNAME) continue;
+            const actualQty = parseFloat(String(item?.ACTUALQTY || 0).replace(/[^\d.-]/g, ""));
+            const billedQty = parseFloat(String(item?.BILLEDQTY || 0).replace(/[^\d.-]/g, ""));
+            itemRows.push({
+              company_id: companyId,
+              company_name: company,
+              voucher_number: ctx.voucherNumber,
+              description: item?.STOCKITEMNAME || null,
+              // NaN stays NaN (JSON would turn it into null); these two columns are text.
+              actual_quantity: Number.isNaN(actualQty) ? "NaN" : actualQty,
+              billed_quantity: Number.isNaN(billedQty) ? "NaN" : billedQty,
+              total_amount: Math.abs(ctx.creditAmount)
+            });
+          }
+        }
+      }
+
+      // Two attempts: a database connection that drops or garbles a large message gets one retry on a fresh
+      // connection before the batch falls back to one-voucher-at-a-time writes.
+      for (let attempt = 1; attempt <= 2; attempt++) {
+      const batchClient = await pool.connect();
+      let dropClient = false;
+      try {
+        await batchClient.query("BEGIN");
+
+        const upsert = await batchClient.query(
+          `
+          INSERT INTO app_test.vouchers (
+            guid, master_id, alter_id, company_id, company_name,
+            voucher_date, voucher_type, voucher_number, party_ledger_name,
+            narration, ledger_entries, debit_amount, credit_amount, balance,
+            supplier_invoice_no, supplier_invoice_date, party_gstin, place_of_supply, is_cancelled, is_optional,
+            created_at, updated_at
+          )
+          SELECT
+            guid, master_id, alter_id, company_id, company_name,
+            voucher_date, voucher_type, voucher_number, party_ledger_name,
+            narration, ledger_entries, debit_amount, credit_amount, balance,
+            supplier_invoice_no, supplier_invoice_date, party_gstin, place_of_supply, is_cancelled, is_optional,
+            NOW(), NOW()
+          FROM jsonb_populate_recordset(NULL::app_test.vouchers, $1::jsonb)
+          ON CONFLICT (company_id, guid) WHERE guid IS NOT NULL AND guid <> ''
+          DO UPDATE SET
+            master_id = EXCLUDED.master_id,
+            alter_id = EXCLUDED.alter_id,
+            voucher_date = EXCLUDED.voucher_date,
+            voucher_number = EXCLUDED.voucher_number,
+            voucher_type = EXCLUDED.voucher_type,
+            party_ledger_name = EXCLUDED.party_ledger_name,
+            narration = EXCLUDED.narration,
+            ledger_entries = EXCLUDED.ledger_entries,
+            debit_amount = EXCLUDED.debit_amount,
+            credit_amount = EXCLUDED.credit_amount,
+            balance = EXCLUDED.balance,
+            supplier_invoice_no = EXCLUDED.supplier_invoice_no,
+            supplier_invoice_date = EXCLUDED.supplier_invoice_date,
+            party_gstin = EXCLUDED.party_gstin,
+            place_of_supply = EXCLUDED.place_of_supply,
+            is_cancelled = EXCLUDED.is_cancelled,
+            is_optional = EXCLUDED.is_optional,
+            deleted_at = NULL,
+            updated_at = NOW()
+          RETURNING (xmax = 0) AS was_inserted
+          `,
+          [JSON.stringify([...voucherRows.values()])]
+        );
+
+        if (itemRows.length) {
+          await batchClient.query(
+            `
+            INSERT INTO app_test.sales_items (
+              company_id, company_name, voucher_number, description,
+              actual_quantity, billed_quantity, total_amount,
+              created_at, updated_at
+            )
+            SELECT
+              company_id, company_name, voucher_number, description,
+              actual_quantity, billed_quantity, total_amount,
+              NOW(), NOW()
+            FROM jsonb_populate_recordset(NULL::app_test.sales_items, $1::jsonb)
+            `,
+            [JSON.stringify(itemRows)]
+          );
+        }
+
+        await batchClient.query("COMMIT");
+
+        const newRows = upsert.rows.filter((r) => r.was_inserted).length;
+        inserted += newRows;
+        // a guid repeated inside the batch was an insert-then-update (or two updates) one by one
+        updated += (upsert.rows.length - newRows) + repeatedGuids;
+
+        for (const ctx of batch) {
+          if (ctx.originalGuid && REAL_TALLY_GUID_PATTERN.test(ctx.guid)) syncedRealGuids.push(ctx.guid);
+        }
+      } catch (batchError) {
+        await batchClient.query("ROLLBACK").catch(() => {});
+        if (isTransientDbError(batchError)) dropClient = true; // never reuse a connection that may be damaged
+        if (attempt === 1 && isTransientDbError(batchError)) {
+          console.log(`⚠️ VOUCHER SYNC: batch of ${batch.length} hit a database connection error (${batchError.message}) - retrying once`);
+          await sleepMs(2000);
+          continue;
+        }
+        console.log(`⚠️ VOUCHER SYNC: batch of ${batch.length} failed (${batchError.message}) - writing it one voucher at a time`);
+        for (const ctx of batch) {
+          await writeVoucherLegacy(ctx);
+        }
+      } finally {
+        batchClient.release(dropClient);
+      }
+      break;
+      }
+    };
+
+    for (const voucher of list) {
+      try {
+        const voucherNumber = clean(voucher?.VOUCHERNUMBER);
+        const originalGuid = voucher?.GUID || null;
+        if (!voucherNumber && !originalGuid) { failed++; continue; }
+
+        const entries = voucher?.["ALLLEDGERENTRIES.LIST"];
+        const normalized = Array.isArray(entries) ? entries : entries ? [entries] : [];
+
+        const voucherDate = clean(voucher?.DATE)?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+        const voucherTypeName = clean(voucher?.VOUCHERTYPENAME);
+        const partyLedgerName = clean(voucher?.PARTYLEDGERNAME);
+        // GST header fields (supplier invoice no/date, party GSTIN, place of
+        // supply, cancelled/optional flags) — used by GST filing.
+        const supplierInvoiceNo = clean(voucher?.REFERENCE) || null;
+        const supplierInvoiceDate = clean(voucher?.REFERENCEDATE)?.match(/^(\d{4})(\d{2})(\d{2})$/)
+          ? clean(voucher.REFERENCEDATE).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")
+          : null;
+        const partyGstin = clean(voucher?.PARTYGSTIN)?.toUpperCase() || null;
+        const placeOfSupply = clean(voucher?.PLACEOFSUPPLY) || null;
+        const yesNo = (v) => (clean(v) == null ? null : /^yes$/i.test(clean(v)));
+        const isCancelled = yesNo(voucher?.ISCANCELLED);
+        const isOptional = yesNo(voucher?.ISOPTIONAL);
+
+        let debitAmount = 0;
+        let creditAmount = 0;
+
+        const partyEntry = normalized.find(entry => clean(entry?.LEDGERNAME) === partyLedgerName);
+        if (partyEntry) {
+          const amount = Number(partyEntry?.AMOUNT || 0);
+          if (amount < 0) debitAmount = Math.abs(amount);
+          else creditAmount = amount;
+        }
+
+        const balance = debitAmount - creditAmount;
+
+        if (voucherType && !voucherTypeName?.toLowerCase().includes(voucherType.toLowerCase())) {
+          ignored++; continue;
+        }
+        if (party && !partyLedgerName?.toLowerCase().includes(party.toLowerCase())) {
+          ignored++; continue;
+        }
+
+        const voucherCtx = {
+          voucher, originalGuid, voucherNumber, voucherDate, voucherTypeName, partyLedgerName, normalized,
+          debitAmount, creditAmount, balance, supplierInvoiceNo, supplierInvoiceDate, partyGstin,
+          placeOfSupply, isCancelled, isOptional
+        };
+
+        if (useLegacyRowWrites) {
+          await writeVoucherLegacy(voucherCtx);
+        } else {
+          pendingVouchers.push(voucherCtx);
+          if (pendingVouchers.length >= VOUCHER_BATCH_SIZE) {
+            await flushVoucherBatch(pendingVouchers.splice(0));
+          }
+        }
 
       } catch (loopError) {
         failed++;
@@ -1135,6 +1378,10 @@ router.get("/voucher-sync", async (req, res) => {
         });
       }
     }
+
+    // Whatever is left of the last, partly filled batch.
+    await flushVoucherBatch(pendingVouchers.splice(0));
+
 
     // ===================================================
     //   SOFT-DELETE VOUCHERS NO LONGER IN TALLY
@@ -1150,7 +1397,9 @@ router.get("/voucher-sync", async (req, res) => {
     // ===================================================
     let softDeleted = 0;
     if (list.length > 0) {
-      const softDeleteResult = await pool.query(
+      // withDbRetry: this statement carries a long id list, and one garbled message ("malformed array literal")
+      // used to fail the whole piece. It is idempotent, so retrying it is safe.
+      const softDeleteResult = await withDbRetry(() => pool.query(
         `
         UPDATE app_test.vouchers
         SET deleted_at = NOW()
@@ -1162,7 +1411,7 @@ router.get("/voucher-sync", async (req, res) => {
         RETURNING voucher_number
         `,
         [companyId, fromDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"), toDate.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"), syncedRealGuids]
-      );
+      ), { attempts: 3, label: "voucher soft-delete" });
       softDeleted = softDeleteResult.rows.length;
 
       if (softDeleted > 0) {
@@ -1187,7 +1436,7 @@ router.get("/voucher-sync", async (req, res) => {
       source: "tally",
       message: "Vouchers synced successfully",
       company, fromDate, toDate,
-      summary: { inserted, updated, ignored, failed, softDeleted, total: list.length, executionTime },
+      summary: { inserted, updated, ignored, failed, softDeleted, total: list.length + corruptVouchers.length, xmlCount: list.length + corruptVouchers.length, executionTime },
       data: list.map((voucher) => ({
         guid: voucher?.GUID || null,
         master_id: voucher?.MASTERID || null,
@@ -2749,6 +2998,12 @@ router.get("/all-ledgers-sync", async (req, res) => {
     const syncedLedgerNames = new Set();
     const syncedLedgerGuids = new Set();
 
+    // Default: the loop below only parses each ledger and bulkSyncLedgers() applies the same rules
+    // against one snapshot of the company's rows, writing in batches. SYNC_LEGACY_ROW_WRITES=true
+    // runs the original row-by-row writes instead (identical results, many more round trips).
+    const useLegacyRowWrites = process.env.SYNC_LEGACY_ROW_WRITES === "true";
+    const ledgerRecords = [];
+
     for (const ledger of list) {
       let rawLedgerName =
         ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME ||
@@ -2810,6 +3065,15 @@ router.get("/all-ledgers-sync", async (req, res) => {
         "opening_balance_type", "closing_balance_type"
       ];
 
+      if (!useLegacyRowWrites) {
+        ledgerRecords.push({
+          ledgerName, originalGuid, guid, masterId, alterId, parentGroup,
+          openingBalance, closingBalance, openingBalanceType, closingBalanceType,
+          data: Object.fromEntries(columns.map((column, i) => [column, data[i]]))
+        });
+        continue;
+      }
+
       // A ledger created through the app is written to this table right after
       // the Tally push (masterUpsert.service.js) with a placeholder GUID. Give
       // that row the real GUID/master id first so the upsert below updates it
@@ -2868,6 +3132,18 @@ router.get("/all-ledgers-sync", async (req, res) => {
       } else {
         ignored++;
       }
+    }
+
+    if (!useLegacyRowWrites) {
+      const bulk = await bulkSyncLedgers(client, companyId, ledgerRecords, groupHierarchy, {
+        REAL_TALLY_GUID_PATTERN, tallyCompanyGuidPrefix, resolvePrimaryGroup
+      });
+      inserted += bulk.counts.inserted;
+      updated += bulk.counts.updated;
+      ignored += bulk.counts.ignored;
+      primaryGroupUpdated += bulk.counts.primaryGroupUpdated;
+      insertedLedgers.push(...bulk.insertedLedgers);
+      updatedLedgers.push(...bulk.updatedLedgers);
     }
 
     const { softDeleted, restored } = await syncMasterSoftDelete(

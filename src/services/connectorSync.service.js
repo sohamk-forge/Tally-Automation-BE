@@ -9,13 +9,14 @@
 import pool from "../db/index.js";
 import { createConnectorJob } from "./connectorJob.service.js";
 import { resolveTallyOwner } from "./connectorOwner.service.js";
+import { withDbRetry } from "../utils/transientDbError.js";
 
 const POLL_INTERVAL_MS = 250; // check every 1 second
 
 // How long one connector request may take before the caller gives up. The sync worker
 // derives each step's HTTP timeout from this (calls x this + 1 min), so the two can
 // never drift apart again.
-export const CONNECTOR_WAIT_TIMEOUT_MS = 600000; // 10 minutes
+export const CONNECTOR_WAIT_TIMEOUT_MS = 1800000; // 30 minutes (was 10: a big Tally export outlasted it)
 const TIMEOUT_MS = CONNECTOR_WAIT_TIMEOUT_MS;
 
 // A running connector polls every second, so a request still unclaimed after this long
@@ -144,17 +145,23 @@ export async function createConnectorSyncJob(
     `🔗 Connector resolved: company=${companyId}, user=${pairing.user_id}`
   );
 
-  const connectorJob = await createConnectorJob({
-    userId: pairing.user_id,
-    jobType: syncType,
-    requestXml: xml,
-    payload: {
-      company_id: companyId,
-      user_id: pairing.user_id,
-      requested_by_user_id: userId,
-      sync: true
-    }
-  });
+  // A sync job only asks Tally to read data, so repeating it after a dropped database connection is harmless
+  // (unlike the push workers' jobs, which is why createConnectorJob itself does not retry).
+  const connectorJob = await withDbRetry(
+    () =>
+      createConnectorJob({
+        userId: pairing.user_id,
+        jobType: syncType,
+        requestXml: xml,
+        payload: {
+          company_id: companyId,
+          user_id: pairing.user_id,
+          requested_by_user_id: userId,
+          sync: true
+        }
+      }),
+    { attempts: 3, label: "create sync connector job" }
+  );
 
   console.log(
     `🔄 Sync connector job created: ${connectorJob.id} (${syncType}) user=${pairing.user_id}`
@@ -217,8 +224,11 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
   while (Date.now() - startTime < CONNECTOR_WAIT_TIMEOUT_MS) {
     await sleep(POLL_INTERVAL_MS);
 
-    const result = await pool.query(
-      `
+    // One dropped database connection between two polls must not end the whole step.
+    const result = await withDbRetry(
+      () =>
+        pool.query(
+          `
       SELECT cj.status, cj.response_xml, cj.error_message, cj.user_id AS owner_user_id,
              EXTRACT(EPOCH FROM (NOW() - cj.created_at)) * 1000 AS age_ms
       FROM app_test.connector_jobs cj
@@ -233,7 +243,9 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
           )
         )
       `,
-      [connectorJobId, userId]
+          [connectorJobId, userId]
+        ),
+      { attempts: 4, label: `poll connector job ${connectorJobId}` }
     );
 
     const job = result.rows[0];
