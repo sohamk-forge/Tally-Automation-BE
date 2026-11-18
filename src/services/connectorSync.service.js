@@ -297,7 +297,7 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
     `
     UPDATE app_test.connector_jobs
     SET status = 'failed', error_message = $2, completed_at = NOW(), updated_at = NOW()
-    WHERE id = $1 AND status IN ('pending', 'processing')
+    WHERE id = $1 AND status IN ('pending', 'processing', 'unknown')
     `,
     [connectorJobId, timeoutMessage]
   );

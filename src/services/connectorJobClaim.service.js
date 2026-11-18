@@ -16,6 +16,96 @@ import { failConnectorJobBusinessRecord } from "./connectorJobResult.service.js"
 //                            instead of blocking on them
 // ─────────────────────────────────────────────────────────────────────────────
 
+// A claimed job's lease. The connector's 1s heartbeat extends it (see
+// extendConnectorJobLeases), so it only lapses when the connector is gone.
+const LEASE_INTERVAL = "5 minutes";
+// How long an 'unknown' job (lease lapsed, no result) waits for the connector's
+// outbox to deliver the result before it is failed. Longer than the connector's
+// 30-minute Tally timeout.
+const UNKNOWN_GRACE_INTERVAL = "35 minutes";
+
+/**
+ * Heartbeat hook: keep the leases of this user's in-flight jobs alive.
+ * Only touches rows whose lease is under 4 minutes away, so this writes at most
+ * about once a minute per job instead of every second.
+ */
+export async function extendConnectorJobLeases({ userId }) {
+  await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET lease_expires_at = NOW() + INTERVAL '${LEASE_INTERVAL}'
+    WHERE user_id = $1
+      AND status = 'processing'
+      AND (lease_expires_at IS NULL OR lease_expires_at < NOW() + INTERVAL '4 minutes')
+    `,
+    [userId]
+  );
+}
+
+/**
+ * Lease reaper. Never re-queues a job (Tally may already have imported it):
+ *   processing + lease lapsed -> 'unknown' (sync jobs: 'failed', nothing to protect)
+ *   unknown + past grace       -> 'failed', and the business record is failed
+ * A late result from the connector's outbox is still accepted for both states.
+ * Pass userId to limit to one connector, omit for all (cron).
+ */
+export async function reapExpiredConnectorJobs({ userId = null } = {}) {
+  const lapsed = `
+    status = 'processing'
+    AND COALESCE(lease_expires_at, claimed_at + INTERVAL '${LEASE_INTERVAL}') < NOW()
+    AND ($1::bigint IS NULL OR user_id = $1)`;
+
+  await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET status = 'failed',
+        error_message = 'Connector processing timeout - no result received',
+        completed_at = NOW(), updated_at = NOW()
+    WHERE job_type = 'sync' AND ${lapsed}
+    `,
+    [userId]
+  );
+
+  const unknown = await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET status = 'unknown',
+        error_message = 'No result received yet - waiting for connector to report',
+        updated_at = NOW()
+    WHERE ${lapsed}
+    RETURNING id
+    `,
+    [userId]
+  );
+  if (unknown.rows.length > 0) {
+    console.warn("⚠️ CONNECTOR JOBS LEASE LAPSED -> unknown:", unknown.rows.map((j) => j.id));
+  }
+
+  const expired = await pool.query(
+    `
+    UPDATE app_test.connector_jobs
+    SET status = 'failed',
+        error_message = 'No result received from connector - check Tally for this entry before retrying',
+        completed_at = NOW(), updated_at = NOW()
+    WHERE status = 'unknown'
+      AND claimed_at < NOW() - INTERVAL '${UNKNOWN_GRACE_INTERVAL}'
+      AND ($1::bigint IS NULL OR user_id = $1)
+    RETURNING id, job_type, payload
+    `,
+    [userId]
+  );
+  for (const job of expired.rows) {
+    await failConnectorJobBusinessRecord(
+      pool,
+      job,
+      "No result received from connector - check Tally for this entry before retrying"
+    );
+  }
+  if (expired.rows.length > 0) {
+    console.warn("⚠️ UNKNOWN CONNECTOR JOBS PAST GRACE MARKED FAILED:", expired.rows.map((j) => j.id));
+  }
+}
+
 export async function claimPendingConnectorJobs({ userId }) {
   // Validate input
   if (!userId) {
@@ -23,6 +113,8 @@ export async function claimPendingConnectorJobs({ userId }) {
       "userId is required (from connector_pairing_token.user_id)"
     );
   }
+
+  await reapExpiredConnectorJobs({ userId });
 
   const client = await pool.connect();
 
@@ -37,33 +129,8 @@ await client.query("BEGIN");
 // (connector crash, network issue, Tally timeout, etc.),
 // don't leave the job stuck in "processing" forever.
 
-const staleJobs = await client.query(
-  `
-  UPDATE app_test.connector_jobs
-  SET
-    status = 'failed',
-    error_message = 'Connector processing timeout - no result received',
-    completed_at = NOW(),
-    updated_at = NOW()
-  WHERE user_id = $1
-    AND status = 'processing'
-    AND claimed_at IS NOT NULL
-    AND claimed_at < NOW() - INTERVAL '5 minutes'
-  RETURNING
-    id,
-    job_type,
-    payload
-  `,
-  [userId]
-);
-
-if (staleJobs.rows.length > 0) {
-  console.warn("⚠️ STALE CONNECTOR JOBS MARKED FAILED:", {
-    userId,
-    count: staleJobs.rows.length,
-    jobIds: staleJobs.rows.map(job => job.id)
-  });
-}
+// Stale handling now lives in reapExpiredConnectorJobs (lease based), run
+// before this transaction and by the reaper cron.
 
 // =====================================================
 // NOW CLAIM NEW PENDING JOBS
@@ -83,6 +150,9 @@ const result = await client.query(
   SET
     status = 'processing',
     claimed_at = NOW(),
+    lease_expires_at = NOW() + INTERVAL '${LEASE_INTERVAL}',
+    attempt_count = COALESCE(cj.attempt_count, 0) + 1,
+    last_attempt_at = NOW(),
     updated_at = NOW()
   FROM claimed_jobs
   WHERE cj.id = claimed_jobs.id
@@ -101,17 +171,6 @@ const result = await client.query(
 
     // Commit transaction
     await client.query("COMMIT");
-
-    // Push the timeout failure through to each job's business record
-    // (e.g. invoice_extractions) — done after COMMIT on the pool, not this
-    // transaction's client, so one failing update can't poison the claim.
-    for (const staleJob of staleJobs.rows) {
-      await failConnectorJobBusinessRecord(
-        pool,
-        staleJob,
-        "Connector processing timeout - no result received"
-      );
-    }
 
     // ⚠️ UPDATE ... FROM does not guarantee RETURNING preserves CTE ORDER BY
     // Re-sort to keep API response consistent (oldest jobs first)

@@ -10,10 +10,13 @@ const db = knex({
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     ssl: false,
+    keepAlive: true,
+    application_name: 'tally-be-knex',
   },
   pool: {
     min: 0,
-    max: 10,
+    max: Number(process.env.KNEX_POOL_MAX) || 3,
+    idleTimeoutMillis: 10000,
   },
 });
 

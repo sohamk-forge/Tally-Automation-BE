@@ -4,7 +4,7 @@ import pool from "../db/index.js";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
-import { claimPendingConnectorJobs } from "../services/connectorJobClaim.service.js";
+import { claimPendingConnectorJobs, extendConnectorJobLeases } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
 import { resolveConnectorForCompany, getTallyStatusForKey, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
@@ -224,7 +224,13 @@ router.get("/api-keys", verifySession(), async (req, res) => {
 // The connector's 1-second heartbeat. verifyConnectorApiKey does all the work: it saves last_seen_at and
 // the Tally up/down report that comes in the headers. Kept separate from /jobs because the connector
 // pauses job polling while it is busy with a slow Tally job, but must still be seen as alive.
-router.post("/ping", verifyConnectorApiKey, (req, res) => {
+router.post("/ping", verifyConnectorApiKey, async (req, res) => {
+  // A live heartbeat keeps its claimed jobs' leases alive (long Tally imports).
+  try {
+    await extendConnectorJobLeases({ userId: req.connectorMachine.userId });
+  } catch (err) {
+    console.error("extendConnectorJobLeases failed:", err.message);
+  }
   res.status(200).json({ status: "ok" });
 });
 
@@ -326,7 +332,9 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
     await client.query("BEGIN");
     transactionStarted = true;
 
-    await client.query(
+    // The status guard makes concurrent replays of the same result safe: only
+    // the first one to reach here updates the job and its business record.
+    const updateResult = await client.query(
       `
       UPDATE ${DB_SCHEMA}.connector_jobs
       SET
@@ -338,6 +346,7 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
         updated_at = NOW()
       WHERE id = $5
         AND user_id = $6
+        AND status NOT IN ('completed', 'success')
       `,
       [
         status,
@@ -348,6 +357,15 @@ router.post("/jobs/result", verifyConnectorApiKey, async (req, res) => {
         userId
       ]
     );
+
+    if (updateResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+      return res.status(200).json({
+        status: "success",
+        message: "Job result already recorded"
+      });
+    }
 
     if (job.job_type !== "sync") {
       await processConnectorJobResult(client, {

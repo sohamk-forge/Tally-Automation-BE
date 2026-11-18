@@ -13,6 +13,7 @@ import { resolveMappedLedger } from "../services/vendorLedgerMapping.service.js"
 import { checkPurchaseExcelInvoice } from "../services/purchaseExcelBilling.js";
 import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 import { guardVoucherXml, buildInvoiceFailure } from "../services/voucherMastersGuard.js";
+import { isNonGstCompany } from "../services/companyGstStatus.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -147,11 +148,19 @@ async function validatePurchaseInvoice(invoice, mapping, companyId) {
   const missingStockItems = [];
   const missingStockItemDetails = {};
 
+  // Non-GST companies (no GSTIN from Tally) have no CGST/SGST/IGST to validate.
+  const nonGst = await isNonGstCompany(companyId);
+  const taxLedgers = nonGst
+    ? []
+    : [
+        { field: "cgst_ledger", value: mapping.cgst_ledger },
+        { field: "sgst_ledger", value: mapping.sgst_ledger },
+        { field: "igst_ledger", value: mapping.igst_ledger },
+      ];
+
   const ledgersToValidate = [
     { field: "purchase_ledger", value: invoice.purchase_ledger || mapping.purchase_ledger },
-    { field: "cgst_ledger", value: mapping.cgst_ledger },
-    { field: "sgst_ledger", value: mapping.sgst_ledger },
-    { field: "igst_ledger", value: mapping.igst_ledger },
+    ...taxLedgers,
 
     ...(Number(invoice.tds_amount || 0) !== 0 ? [{ field: "tds_ledger", value: mapping.tds_ledger }] : []),
     ...(Number(invoice.cess_amount || 0) !== 0 ? [{ field: "cess_ledger", value: mapping.cess_ledger }] : []),
@@ -679,7 +688,7 @@ async function markStalePendingInvoicesAsFailed() {
          SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
          WHERE cj.job_type = 'purchase_invoice'
            AND cj.payload->>'invoice_id' = invoice_extractions.id::text
-           AND cj.status IN ('pending', 'processing')
+           AND cj.status IN ('pending', 'processing', 'unknown')
        )
      RETURNING id`
   );
@@ -694,7 +703,7 @@ async function enqueuePendingInvoiceJobs() {
          SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
          WHERE cj.job_type = 'purchase_invoice'
            AND cj.payload->>'invoice_id' = ie.id::text
-           AND cj.status IN ('pending', 'processing')
+           AND cj.status IN ('pending', 'processing', 'unknown')
        )
      ORDER BY ie.id ASC`
   );

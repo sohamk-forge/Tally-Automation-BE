@@ -10,6 +10,7 @@ import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../services/connectorOwner.service.js";
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
+import { isNonGstCompany } from "../services/companyGstStatus.service.js";
 import { getSalesVoucherExistsXML, getLedgerVoucherByMasterIdXML } from "../services/xmlBuilder.js";
 import { firstVoucherNode, cleanText, tallyDateToIso } from "../services/voucherUpsert.service.js";
 import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
@@ -163,11 +164,19 @@ async function validateSalesInvoice(invoice, mapping, companyId) {
   // sales_ledger, cgst_ledger, sgst_ledger, igst_ledger are always required.
   // tds_ledger / cess_ledger / rounded_off_ledger are only required when the
   // invoice actually carries a nonzero amount for that component.
+  // Non-GST companies (no GSTIN from Tally) have no CGST/SGST/IGST to validate.
+  const nonGst = await isNonGstCompany(companyId);
+  const taxLedgers = nonGst
+    ? []
+    : [
+        { field: "cgst_ledger", value: mapping.cgst_ledger },
+        { field: "sgst_ledger", value: mapping.sgst_ledger },
+        { field: "igst_ledger", value: mapping.igst_ledger },
+      ];
+
   const ledgersToValidate = [
     { field: "sales_ledger", value: mapping.sales_ledger },
-    { field: "cgst_ledger", value: mapping.cgst_ledger },
-    { field: "sgst_ledger", value: mapping.sgst_ledger },
-    { field: "igst_ledger", value: mapping.igst_ledger },
+    ...taxLedgers,
 
     ...(Number(invoice.tds_amount || 0) !== 0
       ? [{ field: "tds_ledger", value: mapping.tds_ledger }]
@@ -907,7 +916,7 @@ async function markStalePendingSalesAsFailed() {
          SELECT 1 FROM ${DB_SCHEMA}.connector_jobs cj
          WHERE cj.job_type = 'sales_invoice'
            AND cj.payload->>'invoice_id' = s.id::text
-           AND cj.status IN ('pending', 'processing')
+           AND cj.status IN ('pending', 'processing', 'unknown')
        )
      RETURNING s.id`
   );

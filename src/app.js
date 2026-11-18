@@ -27,6 +27,7 @@ initSupertokens();
 
 import "./cron/dailySync.cron.js";
 import "./cron/gstSessionRefresh.cron.js";
+import "./cron/reclaimStuckJobs.cron.js";
 
 
 
@@ -281,6 +282,7 @@ const allowedOrigins = [
   "http://100.91.212.45:5173",  // add every Tailscale IP you test from
   "http://103.215.115.12:5173",
   "http://100.117.140.105:5173",
+  "http://192.168.0.7:5173",
 ];
 
 // Logs every incoming request before anything else touches it — including

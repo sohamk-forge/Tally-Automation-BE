@@ -1474,6 +1474,42 @@ export const getGodownsXML = (company) => {
 `;
 
 };
+// Live read of the voucher numbers of ONE voucher type in a date range
+// (a financial year), so the next number is based on what Tally has right now
+// (incl. vouchers entered directly in Tally after the last sync).
+export const getVoucherNumbersByTypeXML = (company, typeName, fromDate, toDate) => `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VchNumbersByType</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>${escapeXml(fromDate)}</SVFROMDATE>
+        <SVTODATE>${escapeXml(toDate)}</SVTODATE>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <SYSTEM TYPE="Formulae" NAME="VchTypeMatch">
+            $VoucherTypeName = "${tdlText(typeName)}"
+          </SYSTEM>
+          <COLLECTION NAME="VchNumbersByType">
+            <TYPE>Voucher</TYPE>
+            <FILTERS>VchTypeMatch</FILTERS>
+            <FETCH>VOUCHERNUMBER</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+
 // Every Voucher Type master of the company (built-in + custom), with its parent.
 export const getVoucherTypesXML = (company) => `
 <ENVELOPE>
@@ -1745,6 +1781,45 @@ export const getSalesVoucherExistsXML = (company, referenceNo) => {
       $VoucherTypeName = "Sales" AND $Reference = "${tdlText(referenceNo)}"
      </SYSTEM>
      <COLLECTION NAME="SalesRefCheck">
+      <TYPE>Voucher</TYPE>
+      <FILTERS>RefMatch</FILTERS>
+      <FETCH>VOUCHERNUMBER</FETCH>
+      <FETCH>REFERENCE</FETCH>
+      <FETCH>DATE</FETCH>
+      <FETCH>MASTERID</FETCH>
+     </COLLECTION>
+    </TDLMESSAGE>
+   </TDL>
+  </DESC>
+ </BODY>
+</ENVELOPE>
+  `;
+};
+
+// Same check for any voucher type (Sales / Purchase): does a voucher of that
+// type with this Reference exist? Used to resolve connector jobs whose result
+// never arrived, so we learn whether Tally actually imported them.
+export const getVoucherReferenceExistsXML = (company, referenceNo, voucherTypeName) => {
+  return `
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>VoucherRefCheck</ID>
+ </HEADER>
+ <BODY>
+  <DESC>
+   <STATICVARIABLES>
+    <SVCURRENTCOMPANY>${escapeXml(company)}</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+   </STATICVARIABLES>
+   <TDL>
+    <TDLMESSAGE>
+     <SYSTEM TYPE="Formulae" NAME="RefMatch">
+      $VoucherTypeName = "${tdlText(voucherTypeName)}" AND $Reference = "${tdlText(referenceNo)}"
+     </SYSTEM>
+     <COLLECTION NAME="VoucherRefCheck">
       <TYPE>Voucher</TYPE>
       <FILTERS>RefMatch</FILTERS>
       <FETCH>VOUCHERNUMBER</FETCH>

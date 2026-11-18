@@ -470,6 +470,27 @@ export async function processConnectorJobResult(client, job) {
     ]
   );
 
+  // A failed push of a Manual / Manual Override type (whose number the app
+  // assigned) may have been rejected for a duplicate voucher number — someone
+  // entered that number in Tally after we read it. Drop the saved number so the
+  // re-push reads Tally's numbers again and takes the next free one.
+  if (!confirmedByTally) {
+    await client.query(
+      `
+      UPDATE app_test.contra_vouchers cv
+      SET voucher_number = NULL
+      FROM app_test.voucher_types vt
+      WHERE cv.id = ANY($1::int[])
+        AND cv.voucher_type_name IS NOT NULL
+        AND vt.company_id = cv.company_id
+        AND LOWER(TRIM(vt.name)) = LOWER(TRIM(cv.voucher_type_name))
+        AND vt.numbering_method IS NOT NULL
+        AND LOWER(TRIM(vt.numbering_method)) <> 'automatic'
+      `,
+      [Array.isArray(payload.voucher_ids) ? payload.voucher_ids : [payload.voucher_id]]
+    );
+  }
+
   console.log(`✅ Voucher ${payload.voucher_id} ${confirmedByTally ? "accepted by Tally, awaiting confirmation" : "FAILED"}`);
 
   break;

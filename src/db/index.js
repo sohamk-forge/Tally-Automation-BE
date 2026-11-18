@@ -10,9 +10,14 @@ const pool = createFailoverPool({
     user: process.env.DB_USER || "postgres",
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME || "tally_dashboard",
-    max: 20,                          // was 5 — too low for bulk workloads
-    min: 2,                           // keep warm connections ready
-    idleTimeoutMillis: 30000,
+    // The server has a hard max_connections (~100) shared by every backend,
+    // connector and tool; 20 per process exhausted it. Override with DB_POOL_MAX.
+    max: Number(process.env.DB_POOL_MAX) || 10,
+    min: 0,                           // don't hold slots while idle
+    idleTimeoutMillis: 10000,
+    keepAlive: true,                  // lets the OS notice dead peers (no zombie connections)
+    keepAliveInitialDelayMillis: 10000,
+    application_name: "tally-be",
     connectionTimeoutMillis: 15000,   // was 2000 — too tight under load
     allowExitOnIdle: false,
   },

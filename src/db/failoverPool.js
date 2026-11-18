@@ -222,14 +222,28 @@ export function createFailoverPool({
     }
   }
 
+  // A blip where every host refuses for a few seconds (restart, connection
+  // limit) should not surface as a 500: wait and retry before giving up.
+  const ALL_DOWN_RETRY_DELAYS_MS = [500, 1500, 3000];
+
   async function connect() {
     try {
       return await getPool(activeIndex).connect();
     } catch (err) {
       if (!isConnectionError(err)) throw err;
       logger.error(`[db-failover] connect failed on ${describe(activeIndex)}: ${err.message}`);
-      await failover(); // throws if every host is down
-      return getPool(activeIndex).connect();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await failover(); // throws if every host is down
+          return await getPool(activeIndex).connect();
+        } catch (retryErr) {
+          const wait = ALL_DOWN_RETRY_DELAYS_MS[attempt];
+          if (wait === undefined || !isConnectionError(retryErr) && !/all DB hosts unreachable/.test(retryErr.message)) {
+            throw retryErr;
+          }
+          await new Promise((r) => setTimeout(r, wait));
+        }
+      }
     }
   }
 

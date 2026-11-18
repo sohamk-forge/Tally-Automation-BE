@@ -28,6 +28,11 @@ export default {
         process.env.DB_NAME ||
         "tally_dashboard",
 
+      // Detect dead peers so the server can drop half-open connections, and
+      // make this process identifiable in pg_stat_activity.
+      keepAlive: true,
+      application_name: "tally-be-knex",
+
     },
 
   migrations: {
@@ -50,9 +55,11 @@ export default {
 
     pool: {
 
-      min: 1,
+      min: 0,
 
-      max: 5,
+      max: Number(process.env.KNEX_POOL_MAX) || 3,
+
+      idleTimeoutMillis: 10000,
 
     },
 

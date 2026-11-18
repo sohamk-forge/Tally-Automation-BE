@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import app from "./app.js";
+import pool from "./db/index.js";
 import { resumeExtractionJobs } from "./services/statementExtraction.js";
 import { backfillGroupKeyEmbeddings } from "./services/ledgerEmbedding.js";
 
@@ -14,22 +15,41 @@ const server = app.listen(PORT, () => {
   );
 });
 
+let shuttingDown = false;
+
+async function closeDbPool() {
+  try {
+    await pool.end();
+    console.log("DB pool closed");
+  } catch (err) {
+    console.error("DB pool close failed:", err.message);
+  }
+}
+
 function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`${signal} received. Shutting down...`);
 
-  server.close((error) => {
+  // Never hang a restart (nodemon/pm2) on a stuck keep-alive socket or pool.
+  setTimeout(() => process.exit(1), 8000).unref();
+
+  server.close(async (error) => {
     if (error) {
       console.error(
         "HTTP server shutdown failed:",
         error
       );
-
-      process.exit(1);
+    } else {
+      console.log("HTTP server closed");
     }
 
-    console.log("HTTP server closed");
-    process.exit(0);
+    // Close DB connections cleanly so the server doesn't keep orphaned
+    // backends around after every restart.
+    await closeDbPool();
+    process.exit(error ? 1 : 0);
   });
+  server.closeIdleConnections?.();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

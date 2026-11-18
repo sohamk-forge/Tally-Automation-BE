@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
+import { getNumberingProfile } from "../services/voucherNumberingProfile.service.js";
 
 const router = express.Router();
 
@@ -33,6 +34,26 @@ router.get("/voucher-types", async (req, res) => {
     return res.status(200).json({ status: "success", company_id, voucherTypes: grouped });
   } catch (err) {
     console.log("GET VOUCHER TYPES ERROR:", err.message);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =================================
+   GET /api/voucher-types/numbering-profile?company_id=1
+   How each voucher type (sales, purchase, receipt, payment, contra, journal)
+   is numbered: Tally's setting plus what the synced vouchers actually look
+   like (format, gaps, duplicates). Mounted behind requireSessionAndCompany.
+================================= */
+router.get("/voucher-types/numbering-profile", async (req, res) => {
+  try {
+    const { company_id } = req.query;
+    if (!company_id) {
+      return res.status(400).json({ status: "error", message: "company_id is required" });
+    }
+    const profile = await getNumberingProfile(company_id);
+    return res.status(200).json({ status: "success", company_id, profile });
+  } catch (err) {
+    console.log("NUMBERING PROFILE ERROR:", err.message);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
