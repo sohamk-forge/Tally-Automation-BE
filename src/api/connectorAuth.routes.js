@@ -3,9 +3,13 @@ import crypto from "crypto";
 import pool from "../db/index.js";
 import { hashApiKey } from "../middleware/apiKey.middleware.js";
 import { recordTallyLicence } from "../services/tallyLicence.service.js";
+import { recordPairedMachine } from "../services/connectorMachine.service.js";
 
 import { DB_SCHEMA } from "../config/db.js";
 const router = express.Router();
+
+// A four-digit year (number or string), or undefined: null, empty and junk values are never saved as a year.
+const parseYear = (v) => (v !== undefined && v !== null && /^\d{4}$/.test(String(v).trim()) ? Number(v) : undefined);
 
 router.post("/pair", async (req, res) => {
 
@@ -16,7 +20,9 @@ router.post("/pair", async (req, res) => {
     const {
       token,
       machine_id,
-      company_name
+      company_name,
+      from_year,
+      to_year
     } = req.body;
 
     // Validate token
@@ -304,6 +310,17 @@ router.post("/pair", async (req, res) => {
     } catch (claimErr) {
       console.error("connector_machines claim failed (non-fatal):", claimErr.message);
     }
+
+    // Save the machine's company and year range. The connector app sends them with this call so it never needs
+    // database access of its own (older connectors that do not send the years simply keep what is stored).
+    await recordPairedMachine({
+      userId: user.id,
+      companyId,
+      machineId: machine_id,
+      companyName: company_name,
+      fromYear: parseYear(from_year),
+      toYear: parseYear(to_year)
+    });
 
     // A connector was just paired: ask its Tally whether the licence is active. Fire-and-forget (the
     // connector only starts polling once it has this response), and nothing here may fail the pairing.
