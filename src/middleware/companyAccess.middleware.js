@@ -284,6 +284,8 @@ export async function resolveOwnedCompanyByName(req, name) {
 /**
  * SQL fragment restricting a company_id column to the caller's companies,
  * for UPDATE/SELECT statements keyed by a record id.
+ * Includes companies the user is a member of (admin / accountant / staff),
+ * since members work through the admin's connector and hold no pairing token.
  * Usage: `... AND company_id IN (${ownedCompaniesSql("$3")})` with userId as $3.
  */
 export const ownedCompaniesSql = (userParam) => `
@@ -291,5 +293,11 @@ export const ownedCompaniesSql = (userParam) => `
   FROM ${DB_SCHEMA}.connector_pairing_tokens
   WHERE user_id = ${userParam}
     AND is_used = TRUE
+    AND company_id IS NOT NULL
+  UNION
+  SELECT company_id
+  FROM ${DB_SCHEMA}.company_members
+  WHERE user_id = ${userParam}
+    AND role IN ('admin', 'accountant', 'staff')
     AND company_id IS NOT NULL
 `;
