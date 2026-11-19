@@ -234,7 +234,7 @@ import gstr1PrepareRoutes from "./api/gstr1Prepare.routes.js";
 import imsRoutes from "./api/ims.routes.js";
 import gstr3bRoutes from "./api/gstr3b.routes.js";
 
-import ledgerPdfRoutes from "./api/ledgerPdf.routes.js";
+import ledgerPdfRoutes from "./api/ledgerpdf.routes.js";
 
 import pdfServiceProxy from "./api/pdfServiceProxy.routes.js";
 
@@ -263,6 +263,8 @@ const allowedOrigins = [
   "http://192.168.0.7:5173",
   "http://100.91.212.45:5173",  // add every Tailscale IP you test from
   "http://103.215.115.12:5173",
+  "http://192.168.0.9:5173",
+  "http://100.120.115.44:5173",
 ];
 
 // Logs every incoming request before anything else touches it — including

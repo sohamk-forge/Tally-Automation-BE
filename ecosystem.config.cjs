@@ -11,5 +11,15 @@ module.exports = {
       kill_timeout: 15000,
       time: true,
     },
+    {
+      name: "tally-monitor",
+      cwd: __dirname,
+      script: "monitor/monitor.js",
+      exec_mode: "fork",
+      instances: 1,
+      env: { NODE_ENV: "production" },
+      max_memory_restart: "300M",
+      time: true,
+    },
   ],
 };

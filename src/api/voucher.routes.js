@@ -74,11 +74,13 @@ const HEADER_ALIASES = {
   ],
   withdrawal: [
     "withdrawal amt.", "withdrawal amt", "debit", "dr",
-    "withdrawal amount(inr)", "withdrawal amount"
+    "withdrawal amount(inr)", "withdrawal amount",
+    "withdrawal amt (inr)"   // ICICI "Detailed Statement" export (.xlsx)
   ],
   deposit: [
     "deposit amt.", "deposit amt", "credit", "cr",
-    "deposit amount(inr)", "deposit amount"
+    "deposit amount(inr)", "deposit amount",
+    "deposit amt (inr)"      // ICICI "Detailed Statement" export (.xlsx)
   ],
   balance: [
     "closing balance", "balance", "balance(inr)", "bal",
@@ -136,18 +138,26 @@ function pickField(normRow, aliasListKey) {
 
 function findHeaderRowIndex(sheet) {
   const range = xlsx.utils.decode_range(sheet["!ref"]);
+  // Pick the row with the MOST header-like cells (earliest on a tie), not the
+  // first row with any match: ICICI "Detailed Statement" has a preamble line
+  // "Transaction type: DR" whose lone "DR" cell matches a header alias.
+  let bestRow = 0;
+  let bestScore = 0;
   for (let r = range.s.r; r <= Math.min(range.e.r, 30); r++) {
+    let score = 0;
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cell = sheet[xlsx.utils.encode_cell({ r, c })];
       if (cell && typeof cell.v === "string") {
         const val = normalizeHeaderKey(cell.v);
-        if (HEADER_ROW_DETECTORS.includes(val)) {
-          return r;
-        }
+        if (HEADER_ROW_DETECTORS.includes(val)) score++;
       }
     }
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = r;
+    }
   }
-  return 0;
+  return bestRow;
 }
 
 const MONTH_NAME_TO_NUM = {

@@ -815,8 +815,8 @@ router.get("/group-summary-bank", async (req, res) => {
         ledger?.$?.NAME ||
         ledger?.["@NAME"] ||
         ledger?.NAME ||
-        ledger?.MAILINGNAME ||
-        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME
+        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME ||
+        ledger?.MAILINGNAME
       );
       if (!ledgerName) continue;
 
@@ -2669,8 +2669,8 @@ router.get("/all-ledgers-sync", async (req, res) => {
 
     for (const ledger of list) {
       let rawLedgerName =
-        ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME || ledger?.MAILINGNAME ||
-        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME;
+        ledger?.$?.NAME || ledger?.["@NAME"] || ledger?.NAME ||
+        ledger?.["LANGUAGENAME.LIST"]?.["NAME.LIST"]?.NAME || ledger?.MAILINGNAME;
 
       if (Array.isArray(rawLedgerName)) rawLedgerName = rawLedgerName[0];
 
