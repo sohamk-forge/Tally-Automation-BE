@@ -3782,8 +3782,8 @@ router.get("/company-details", async (req, res) => {
     await client.query(
       `
       INSERT INTO app_test.company_details
-      (company_id, company_name, address, state, email, gstin, last_synced_at, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())
+      (company_id, company_name, address, state, email, gstin, gst_enabled, gst_registration_type, last_synced_at, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())
       ON CONFLICT (company_id)
       DO UPDATE SET
         company_name = EXCLUDED.company_name,
@@ -3791,10 +3791,14 @@ router.get("/company-details", async (req, res) => {
         state = EXCLUDED.state,
         email = EXCLUDED.email,
         gstin = EXCLUDED.gstin,
+        gst_enabled = EXCLUDED.gst_enabled,
+        gst_registration_type = EXCLUDED.gst_registration_type,
         last_synced_at = NOW(),
         updated_at = NOW()
       `,
-      [companyId, name, address, gstState || state, email, gstin]
+      // GST company = has a GSTIN, the same test isNonGstCompany uses for the
+      // sales/purchase push, so quotations/challans and pushes agree.
+      [companyId, name, address, gstState || state, email, gstin, Boolean(String(gstin || "").trim()), registrationType || null]
     );
 
     await client.query("COMMIT");

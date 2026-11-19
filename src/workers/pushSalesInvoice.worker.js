@@ -11,6 +11,8 @@ import { resolveConnectorForCompany, getConnectorOfflineMessage } from "../servi
 import { generateXmlViaQueue } from "../queues/xmlGeneration.queue.js";
 import { findBestItemMatch } from "../utils/fuzzyItemMatch.js";
 import { isNonGstCompany } from "../services/companyGstStatus.service.js";
+import { checkCompanyReady } from "../services/companyProfile.service.js";
+import { ensureInvoiceVoucherNumber } from "../services/voucherNumbering.service.js";
 import { getSalesVoucherExistsXML, getLedgerVoucherByMasterIdXML } from "../services/xmlBuilder.js";
 import { firstVoucherNode, cleanText, tallyDateToIso } from "../services/voucherUpsert.service.js";
 import { sendToTallyViaConnector } from "../services/connectorSync.service.js";
@@ -383,6 +385,18 @@ const worker = new Worker(
     );
 
     try {
+      // The company profile (GST or not, how the Sales type is numbered) must be known from the
+      // first sync. Without it the push would guess, so stop here and say what to sync.
+      const ready = await checkCompanyReady(row.company_id, { typeName: "Sales", needsGst: true, companyName: row.company_name });
+      if (!ready.ok) {
+        console.warn("⚠️ Sales invoice not pushed — company profile incomplete", { ...logCtx, problems: ready.problems });
+        await pool.query(
+          `UPDATE ${DB_SCHEMA}.sales_invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify({ message: ready.message, reason: "profile_not_ready" }), salesId]
+        );
+        return { salesId, status: "failed", error: ready.message };
+      }
+
       // Fixed: sales_ledger / sales_parent_group live in a SEPARATE table,
       // company_sales_ledger_mappings — not company_ledger_mappings (which
       // only has cgst/sgst/igst/tds/cess/rounded_off/purchase_ledger, no
@@ -726,8 +740,18 @@ const worker = new Worker(
         };
       }
 
+      // A Manual / "Automatic (Manual Override)" Sales type needs a voucher number. The invoice number
+      // from the upload already goes out as the voucher number (sales_generator.py); only an invoice
+      // with none, that is not an edit of an existing voucher, gets one from the app.
+      const assignedVoucherNumber =
+        !String(row.invoice_no || "").trim() && !alterTarget?.voucher_number
+          ? await ensureInvoiceVoucherNumber({ table: "sales_invoice_extractions", row, typeName: "Sales" })
+          : "";
+
       let xml = await generateXmlViaQueue("sales", {
         ...invoice,
+
+        voucher_number: assignedVoucherNumber || undefined,
 
         company: row.company_name,
 

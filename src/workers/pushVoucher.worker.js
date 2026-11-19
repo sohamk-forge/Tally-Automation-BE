@@ -17,6 +17,7 @@ import { createConnectorJob } from "../services/connectorJob.service.js";
 import { resolveTallyOwner } from "../services/connectorOwner.service.js";
 import { guardVoucherXml, formatGuardMessage } from "../services/voucherMastersGuard.js";
 import { ensureVoucherNumber } from "../services/voucherNumbering.service.js";
+import { checkCompanyReady } from "../services/companyProfile.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -355,6 +356,20 @@ const worker = new Worker(
     }
     const isClub = group.length > 1;
     const memberIds = group.map(v => v.id);
+
+    // How this voucher type numbers itself must be known from the first sync. Without it the
+    // push would guess (and a Manual type would land in Import Exceptions), so stop and say why.
+    // A row with no chosen Tally type uses the built-in one (Payment / Receipt / Contra).
+    const builtInTypeName = String(voucher.voucher_type || "").trim().replace(/^./, c => c.toUpperCase());
+    const ready = await checkCompanyReady(voucher.company_id, {
+      typeName: String(voucher.voucher_type_name || "").trim() || builtInTypeName,
+      companyName: voucher.company_name
+    });
+    if (!ready.ok) {
+      console.warn(`⚠️ Voucher ${voucherId} not pushed — company profile incomplete`, ready.problems);
+      await setStatusForIds(memberIds, "FAILED", ready.message);
+      return { voucherId, status: "failed", error: ready.message };
+    }
 
     console.log("");
     console.log("================================");

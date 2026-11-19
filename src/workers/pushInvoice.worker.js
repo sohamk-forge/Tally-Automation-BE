@@ -14,6 +14,8 @@ import { checkPurchaseExcelInvoice } from "../services/purchaseExcelBilling.js";
 import { pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 import { guardVoucherXml, buildInvoiceFailure } from "../services/voucherMastersGuard.js";
 import { isNonGstCompany } from "../services/companyGstStatus.service.js";
+import { checkCompanyReady } from "../services/companyProfile.service.js";
+import { ensureInvoiceVoucherNumber } from "../services/voucherNumbering.service.js";
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -362,6 +364,18 @@ const worker = new Worker(
     );
 
     try {
+      // The company profile (GST or not, how the Purchase type is numbered) must be known from the
+      // first sync. Without it the push would guess, so stop here and say what to sync.
+      const ready = await checkCompanyReady(row.company_id, { typeName: "Purchase", needsGst: true, companyName: row.company_name });
+      if (!ready.ok) {
+        console.warn(`⚠️ Purchase invoice ${row.invoice_no} not pushed — company profile incomplete`, ready.problems);
+        await pool.query(
+          `UPDATE app_test.invoice_extractions SET sync_status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify({ message: ready.message, reason: "profile_not_ready" }), invoiceId]
+        );
+        return { invoiceId, status: "failed", error: ready.message };
+      }
+
       const mappingResult = await pool.query(
         `SELECT * FROM app_test.company_ledger_mappings WHERE company_id = $1`,
         [row.company_id]
@@ -482,8 +496,14 @@ const worker = new Worker(
       const companyState = String(companyDetails.rows[0]?.state || "").trim();
       const companyGstin = String(companyDetails.rows[0]?.gstin || "").trim();
 
+      // A Manual / "Automatic (Manual Override)" Purchase type needs the app's own voucher number
+      // (the supplier's invoice number stays in REFERENCE). Automatic types get "" and Tally numbers it.
+      const assignedVoucherNumber = await ensureInvoiceVoucherNumber({ table: "invoice_extractions", row, typeName: "Purchase" });
+
       let xml = await generateXmlViaQueue("purchase", {
         ...invoice,
+
+        voucher_number: assignedVoucherNumber || undefined,
 
         ...(companyState ? { company_state: companyState } : {}),
         ...(companyGstin ? { company_gstin: companyGstin } : {}),

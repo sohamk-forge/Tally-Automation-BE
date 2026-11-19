@@ -79,12 +79,25 @@ async function markJobRunning(jobLogId) {
 // least one step failed); raw_response gets the full step-by-step JSON for
 // drill-down. raw_response is otherwise unused by any active code path
 // (its only other reader/writer, connectorJob.routes.js, isn't mounted).
+// The steps that make up a company's profile: GST or non-GST, and how its voucher types are numbered.
+// The rest of the sync still runs when one fails (partial progress is meaningful), but the job
+// says plainly that the profile is incomplete so nobody pushes on a guess.
+const PROFILE_STEPS = ["COMPANY DETAILS", "VOUCHER TYPES"];
+
+export function profileGaps(results = []) {
+  return PROFILE_STEPS.filter((label) => results.find((r) => r.step === label)?.status !== "success");
+}
+
 async function markJobCompleted(jobLogId, results = []) {
   const failedSteps = results.filter((r) => r.status === "failed");
+  const gaps = profileGaps(results);
 
-  const errorMessage = failedSteps.length > 0
+  const failedText = failedSteps.length > 0
     ? `${failedSteps.length}/${results.length} steps failed: ${failedSteps.map((r) => `${r.step} (${r.error})`).join("; ")}`
     : null;
+  const errorMessage = gaps.length > 0
+    ? `Company profile incomplete (${gaps.join(" + ")} not synced, so GST status or voucher numbering is unknown). ${failedText || ""}`.trim()
+    : failedText;
 
   await pool.query(
     `
@@ -329,14 +342,16 @@ const worker = new Worker(
     // The steps, in the order they must run. `calls` = connector requests the route makes in a
     // row (used for its timeout); `dated` = the route also takes the financial-year dates.
     const SYNC_STEPS = [
+      // The company profile steps come first: GST or non-GST (company details) and how each voucher
+      // type is numbered (voucher types). Everything pushed later depends on both.
       { label: "COMPANY DETAILS", path: "/api/sync/company-details", calls: 2 },
+      { label: "VOUCHER TYPES", path: "/api/sync/voucher-types-sync" },
       { label: "ALL LEDGERS", path: "/api/sync/all-ledgers-sync", calls: 2 },
       { label: "BANK ACCOUNTS", path: "/api/sync/group-summary-bank" },
       { label: "STOCK GROUP GST DETAILS", path: "/api/sync/stock-group-gst-sync" },
       { label: "STOCK GROUP SUMMARY", path: "/api/sync/stock-group-summary-sync" },
       { label: "UNITS", path: "/api/sync/units-sync" },
       { label: "GODOWNS", path: "/api/sync/godown-sync" },
-      { label: "VOUCHER TYPES", path: "/api/sync/voucher-types-sync" },
       { label: "PURCHASE/SALES LEDGERS", path: "/api/sync/purchase-sales-ledgers-sync" },
       { label: "PAYABLE/DEBTORS", path: "/api/sync/payable-debtors", calls: 6 },
       { label: "PARENT GROUPS", path: "/api/sync/parent-groups" },

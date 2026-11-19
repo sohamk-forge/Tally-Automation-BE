@@ -271,6 +271,16 @@ else:
 
 if alter_voucher_number and alter_voucher_date:
     sub(vch, "VOUCHERNUMBER", alter_voucher_number)
+elif str(invoice_no).strip():
+    # Manual numbering: the invoice number from the Excel (SAP document /
+    # dealer invoice number) becomes the Tally voucher number instead of
+    # letting Tally auto-number. REFERENCE below still carries it too, so the
+    # existing duplicate/exists checks (which match on Reference) keep working.
+    sub(vch, "VOUCHERNUMBER", str(invoice_no).strip())
+elif str(invoice.get("voucher_number") or "").strip():
+    # No invoice number on the row, but the Sales type is Manual / Automatic (Manual Override):
+    # the app assigned the next number in the company's series.
+    sub(vch, "VOUCHERNUMBER", str(invoice.get("voucher_number")).strip())
 
 sub(vch, "DATE",            date)
 sub(vch, "VCHSTATUSDATE",   date)

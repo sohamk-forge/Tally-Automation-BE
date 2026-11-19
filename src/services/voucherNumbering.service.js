@@ -4,6 +4,8 @@ import { sendToTallyViaConnector } from "./connectorSync.service.js";
 import { resolveTallyOwner } from "./connectorOwner.service.js";
 import { getVoucherNumbersByTypeXML } from "./xmlBuilder.js";
 import { parseXML } from "./parser.js";
+import { normalizeNumbering, modeNeedsAppNumber } from "./companyProfileRules.js";
+import { nextAfter, pickInvoiceNumber } from "./voucherNumberRules.js";
 
 /*
   Voucher numbers for Tally voucher types that don't number themselves on
@@ -19,27 +21,12 @@ import { parseXML } from "./parser.js";
 */
 
 export function needsAppNumber(numberingMethod) {
-  const m = String(numberingMethod || "").trim().toLowerCase();
-  if (!m) return false; // unknown (not re-synced yet): leave Tally to number it
-  return m !== "automatic";
+  // Manual and "Automatic (Manual Override)" need a number from the app. Automatic, the built-in
+  // "Default" and "None" don't, and an unknown/empty value is left to Tally as before.
+  return modeNeedsAppNumber(normalizeNumbering(numberingMethod));
 }
 
-function parseNumber(str) {
-  const m = /^(.*?)(\d+)(\D*)$/.exec(String(str ?? "").trim());
-  if (!m) return null;
-  return { prefix: m[1], digits: m[2], suffix: m[3], value: Number(m[2]) };
-}
-
-export function nextAfter(numbers) {
-  let best = null;
-  for (const n of numbers) {
-    const p = parseNumber(n);
-    if (p && (!best || p.value > best.value)) best = p;
-  }
-  if (!best) return "1";
-  const next = String(best.value + 1).padStart(best.digits.length, "0");
-  return `${best.prefix}${next}${best.suffix}`;
-}
+export { nextAfter };
 
 // Indian financial year (1 Apr - 31 Mar) containing the voucher date, as the
 // YYYYMMDD strings Tally wants. Numbering restarts per financial year.
@@ -154,6 +141,77 @@ export async function ensureVoucherNumber(voucher) {
     );
     await client.query("COMMIT");
     console.log(`[VOUCHER] ${voucher.id}: assigned ${typeName} voucher no. ${number} (${live ? `live from Tally, ${live.length} existing` : "from last sync"})`);
+    return number;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/*
+  The same for sales and purchase invoices. Their rows have no voucher_number column, so the
+  number the app assigns is kept inside raw_json as assigned_voucher_number (a retry reuses it).
+  Returns "" when the Tally type numbers itself, otherwise the number to send as VOUCHERNUMBER.
+  The supplier's own invoice number is a different thing: it stays in REFERENCE.
+*/
+const INVOICE_TABLES = new Set(["sales_invoice_extractions", "invoice_extractions"]);
+
+export async function ensureInvoiceVoucherNumber({ table, row, typeName }) {
+  if (!INVOICE_TABLES.has(table)) throw new Error(`ensureInvoiceVoucherNumber: unsupported table "${table}"`);
+  if (!typeName) return "";
+
+  const vt = await pool.query(
+    `SELECT numbering_method FROM ${DB_SCHEMA}.voucher_types
+      WHERE company_id = $1 AND LOWER(TRIM(name)) = LOWER($2)`,
+    [row.company_id, typeName]
+  );
+  if (!vt.rows.length || !needsAppNumber(vt.rows[0].numbering_method)) return "";
+
+  // Taken before the DB lock so nothing is held open while the connector answers.
+  const live = await fetchLiveNumbers(
+    { id: row.id, company_id: row.company_id, user_id: row.user_id, voucher_date: row.invoice_date, company_name: row.company_name },
+    typeName
+  );
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`vchno:${row.company_id}:${typeName.toLowerCase()}`]);
+
+    const current = await client.query(
+      `SELECT raw_json->>'assigned_voucher_number' AS n FROM ${DB_SCHEMA}.${table} WHERE id = $1`,
+      [row.id]
+    );
+    const existing = String(current.rows[0]?.n || "").trim();
+
+    const synced = live
+      ? []
+      : (await client.query(
+          `SELECT voucher_number FROM ${DB_SCHEMA}.vouchers
+            WHERE company_id = $1 AND LOWER(TRIM(voucher_type)) = LOWER($2)
+              AND deleted_at IS NULL AND voucher_number IS NOT NULL`,
+          [row.company_id, typeName]
+        )).rows.map(r => r.voucher_number);
+    const assigned = (await client.query(
+      `SELECT raw_json->>'assigned_voucher_number' AS n FROM ${DB_SCHEMA}.${table}
+        WHERE company_id = $1 AND raw_json->>'assigned_voucher_number' IS NOT NULL`,
+      [row.company_id]
+    )).rows.map(r => r.n);
+
+    const { number, reused } = pickInvoiceNumber({ existing, live, synced, assigned });
+
+    if (!reused) {
+      await client.query(
+        `UPDATE ${DB_SCHEMA}.${table}
+            SET raw_json = jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{assigned_voucher_number}', to_jsonb($1::text)), updated_at = NOW()
+          WHERE id = $2`,
+        [number, row.id]
+      );
+    }
+    await client.query("COMMIT");
+    console.log(`[VOUCHER] ${table} ${row.id}: ${reused ? "reusing" : "assigned"} ${typeName} voucher no. ${number}${live ? " (live from Tally)" : " (from last sync)"}`);
     return number;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

@@ -201,7 +201,11 @@ sub(vch, "DATE",                        date)
 sub(vch, "VCHSTATUSDATE",               date)
 sub(vch, "REFERENCEDATE",               ref_date)
 sub(vch, "VOUCHERTYPENAME",             "Purchase")
-# sub(vch, "VOUCHERNUMBER",               voucher_number)
+# Only sent when the app assigned one (a Manual / Automatic (Manual Override) Purchase type);
+# an Automatic type is left to Tally. The supplier's invoice number stays in REFERENCE.
+_voucher_number = str(invoice.get("voucher_number") or "").strip()
+if _voucher_number:
+    sub(vch, "VOUCHERNUMBER", _voucher_number)
 sub(vch, "REFERENCE",                   reference)
 sub(vch, "PARTYNAME",       party_name)
 sub(vch, "PARTYLEDGERNAME", party_name)

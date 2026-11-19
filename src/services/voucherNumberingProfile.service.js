@@ -1,6 +1,7 @@
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 import { needsAppNumber } from "./voucherNumbering.service.js";
+import { normalizeNumbering } from "./companyProfileRules.js";
 
 /*
   Numbering profile: for each voucher type of a company, how is it numbered?
@@ -107,6 +108,7 @@ export async function getNumberingProfile(companyId) {
     voucher_type: t.name,
     base_type: t.base_type,
     numbering_method: t.numbering_method || null,
+    numbering_mode: normalizeNumbering(t.numbering_method),
     needs_app_number: needsAppNumber(t.numbering_method),
     ...analyzeNumbers(byType.get(t.name.trim().toLowerCase()) || [])
   }));
