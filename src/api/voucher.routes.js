@@ -757,19 +757,22 @@ router.post("/regroup-statement", async (req, res) => {
 });
 
 /* Bulk-delete uploaded (Excel) statements. A file is skipped, not deleted,
-   if any of its vouchers are already pushed / being pushed to Tally. */
+   if any of its vouchers are being pushed to Tally (PENDING). Files already
+   pushed (SUCCESS) are only removed when the user confirmed with force: true
+   (the vouchers stay in Tally; only the app's statement records are removed). */
 router.delete("/statement-files", async (req, res) => {
   try {
-    const { company_id, file_names } = req.body || {};
+    const { company_id, file_names, force } = req.body || {};
     if (!company_id || !Array.isArray(file_names) || file_names.length === 0) {
       return res.status(400).json({ success: false, message: "company_id and file_names are required" });
     }
 
+    const lockStatuses = force === true ? ["PENDING"] : ["SUCCESS", "PENDING"];
     const locked = await db.query(
       `SELECT DISTINCT file_name FROM ${DB_SCHEMA}.contra_vouchers
        WHERE company_id = $1 AND file_name = ANY($2)
-         AND status IN ('SUCCESS', 'PENDING')`,
-      [company_id, file_names]
+         AND status = ANY($3)`,
+      [company_id, file_names, lockStatuses]
     );
     const skipped = locked.rows.map((r) => r.file_name);
     const deletable = file_names.filter((f) => !skipped.includes(f));
