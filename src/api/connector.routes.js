@@ -6,7 +6,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
 import { claimPendingConnectorJobs, extendConnectorJobLeases } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
-import { resolveConnectorForCompany, getTallyStatusForKey, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
+import { resolveConnectorForCompany, getTallyStatusForKey, getCompanyOpenState, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
 import { confirmBankVoucherInTally } from "../services/bankVoucherConfirm.service.js";
@@ -93,13 +93,19 @@ router.get("/current", verifySession(), async (req, res) => {
           message: "Connector is offline"
         });
       }
+      const tallyStatus = await getTallyStatusForKey(live.api_key_id);
+
+      // Is the company selected on the website the one open in TallyPrime? null = cannot tell.
+      const companyOpen = await getCompanyOpenState(scopedCompanyId, tallyStatus);
+
       return res.status(200).json({
         status: "success",
         data: {
           connected: true,
           machine_id: live.machine_id,
           last_seen_at: live.last_seen_at,
-          ...(await getTallyStatusForKey(live.api_key_id))
+          ...tallyStatus,
+          company_open: companyOpen
         }
       });
     }

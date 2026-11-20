@@ -252,16 +252,16 @@ export const TALLY_STATUS_FRESH_MS = (Number(process.env.TALLY_STATUS_FRESH_SECO
 //   tally_connected null  -> unknown (never reported, or report too old)
 // Never throws — a status badge must not break the routes that show it.
 export const getTallyStatusForKey = async (apiKeyId) => {
-  const unknown = { tally_connected: null, tally_checked_at: null, tally_licensed: null, tally_licence_checked_at: null };
+  const unknown = { tally_connected: null, tally_checked_at: null, tally_licensed: null, tally_licence_checked_at: null, tally_company: null };
   if (!apiKeyId) return unknown;
 
-  // The licence column came later: on a database that has not run that migration yet, read the
-  // rest without it instead of losing the Tally up/down status as well.
-  const read = (withLicence) =>
+  // The licence and company columns came later: on a database that has not run those migrations yet,
+  // read the rest without them instead of losing the Tally up/down status as well.
+  const read = (withLicence, withCompany) =>
     pool.query(
       `
       SELECT tally_connected,
-             tally_checked_at,${withLicence ? "\n             tally_licensed,\n             tally_licence_checked_at," : ""}
+             tally_checked_at,${withLicence ? "\n             tally_licensed,\n             tally_licence_checked_at," : ""}${withCompany ? "\n             tally_company," : ""}
              EXTRACT(EPOCH FROM (NOW() - tally_checked_at)) * 1000 AS age_ms
       FROM ${DB_SCHEMA}.connector_api_keys
       WHERE id = $1
@@ -270,10 +270,15 @@ export const getTallyStatusForKey = async (apiKeyId) => {
     );
 
   try {
-    const result = await read(true).catch((err) => {
-      if (err.code !== "42703") throw err; // 42703 = column does not exist
-      return read(false);
-    });
+    const result = await read(true, true)
+      .catch((err) => {
+        if (err.code !== "42703") throw err; // 42703 = column does not exist
+        return read(true, false);
+      })
+      .catch((err) => {
+        if (err.code !== "42703") throw err;
+        return read(false, false);
+      });
 
     const row = result.rows[0];
     if (!row || row.tally_connected === null || row.tally_checked_at === null) return unknown;
@@ -285,12 +290,32 @@ export const getTallyStatusForKey = async (apiKeyId) => {
       // Licence is checked at sync start and at pairing, not continuously: show the last answer while
       // Tally itself is reporting in and up, with the time it was asked.
       tally_licensed: fresh && row.tally_connected === true ? (row.tally_licensed ?? null) : null,
-      tally_licence_checked_at: fresh && row.tally_connected === true ? (row.tally_licence_checked_at ?? null) : null
+      tally_licence_checked_at: fresh && row.tally_connected === true ? (row.tally_licence_checked_at ?? null) : null,
+      // The company open in Tally, only while Tally is reporting in and up (same freshness as the status).
+      tally_company: fresh && row.tally_connected === true ? (row.tally_company ?? null) : null
     };
   } catch (err) {
     console.error("Tally status lookup failed:", err.message);
     return unknown;
   }
+};
+
+// Tally company names compared the way a person would: case, extra spaces and the & / "and" spelling aside.
+export const normalizeCompanyName = (name) =>
+  String(name ?? "").toLowerCase().replace(/&/g, " and ").replace(/\s+/g, " ").trim();
+
+// true / false = the selected company is / is not the one open in Tally; null = cannot tell.
+export const isCompanyOpenInTally = (selectedName, openName) => {
+  if (!selectedName || !openName) return null;
+  return normalizeCompanyName(selectedName) === normalizeCompanyName(openName);
+};
+
+// Is the company selected on the website the one open in TallyPrime? true / false, or null when it
+// cannot be told (the connector did not report an open company). `tallyStatus` is getTallyStatusForKey().
+export const getCompanyOpenState = async (companyId, tallyStatus) => {
+  if (!companyId || !tallyStatus?.tally_company) return null;
+  const co = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
+  return isCompanyOpenInTally(co.rows[0]?.name, tallyStatus.tally_company);
 };
 
 // The connector device that is online for this user (scoped to one company
