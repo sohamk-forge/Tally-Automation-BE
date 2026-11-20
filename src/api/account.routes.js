@@ -3,7 +3,7 @@ import supertokens from "supertokens-node";
 import { deleteUser } from "supertokens-node";
 import { verifySession } from "supertokens-node/recipe/session/framework/express/index.js";
 import { getLocalUserId } from "../utils/getLocalUserId.js";
-import { getHasPassword, setPasswordForUser } from "../services/account.service.js";
+import { changePasswordForUser, getHasPassword, setPasswordForUser } from "../services/account.service.js";
 import pool from "../db/index.js";
 import { DB_SCHEMA } from "../config/db.js";
 
@@ -73,6 +73,47 @@ router.post("/set-password", verifySession(), async (req, res) => {
     return res.json({ status: "success", message: "Password set. Please sign in again." });
   } catch (err) {
     console.log("SET PASSWORD ERROR:", err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/* =========================================
+   CHANGE PASSWORD
+   For users who already have a password. Verifies the current password,
+   then updates it. The current session stays signed in.
+========================================= */
+router.post("/change-password", verifySession(), async (req, res) => {
+  try {
+    const supertokensUserId = req.session.getUserId();
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ status: "error", message: "Current and new password are required" });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ status: "error", message: "Password must be at least 8 characters" });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ status: "error", message: "New password must be different from the current one" });
+    }
+
+    const supertokensUser = await supertokens.getUser(supertokensUserId);
+    const email = supertokensUser?.emails?.[0];
+    if (!email) {
+      return res.status(400).json({ status: "error", message: "Could not resolve account email" });
+    }
+
+    const result = await changePasswordForUser(email, currentPassword, newPassword);
+    if (result.error === "WRONG_CURRENT_PASSWORD") {
+      return res.status(400).json({ status: "error", message: "Current password is incorrect" });
+    }
+    if (result.error) {
+      return res.status(400).json({ status: "error", message: result.error });
+    }
+
+    return res.json({ status: "success", message: "Password changed" });
+  } catch (err) {
+    console.log("CHANGE PASSWORD ERROR:", err);
     return res.status(500).json({ status: "error", message: err.message });
   }
 });
