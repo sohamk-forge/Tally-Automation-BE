@@ -35,7 +35,26 @@ const readTallyReport = (req) => {
     }
   }
 
-  return { connected: connected === "true", ageMs: Math.min(Math.round(ageMs), 10 * 60 * 1000), company };
+  // x-tally-companies = URL-encoded JSON array of every company loaded in Tally (absent = unknown).
+  let loaded = null;
+  const rawLoaded = req.headers["x-tally-companies"];
+  if (typeof rawLoaded === "string" && rawLoaded) {
+    try {
+      const arr = JSON.parse(decodeURIComponent(rawLoaded));
+      if (Array.isArray(arr)) {
+        const names = arr.filter((n) => typeof n === "string").map((n) => n.trim().slice(0, 300)).filter(Boolean).slice(0, 40);
+        loaded = names.length ? names : null;
+      }
+    } catch {
+      loaded = null; // malformed: treat as unknown
+    }
+  }
+
+  // Stored in the one tally_company column: the plain active name (older connectors), or JSON
+  // {"active", "loaded"} when the connector also reports every loaded company.
+  const stored = loaded ? JSON.stringify({ active: company, loaded }) : company;
+
+  return { connected: connected === "true", ageMs: Math.min(Math.round(ageMs), 10 * 60 * 1000), company: stored };
 };
 
 export const verifyConnectorApiKey = async (req, res, next) => {

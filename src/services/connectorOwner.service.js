@@ -250,9 +250,25 @@ export const TALLY_STATUS_FRESH_MS = (Number(process.env.TALLY_STATUS_FRESH_SECO
 //   tally_connected true  -> Tally answered on its port
 //   tally_connected false -> connector is up but Tally did not answer
 //   tally_connected null  -> unknown (never reported, or report too old)
+// connector_api_keys.tally_company holds either the plain name of the company open in Tally (older
+// connectors) or JSON {"active": name|null, "loaded": [names]} when the connector reports every loaded company.
+const parseStoredCompany = (value) => {
+  if (!value) return { tally_company: null, tally_companies: null };
+  if (value.startsWith("{")) {
+    try {
+      const o = JSON.parse(value);
+      const loaded = Array.isArray(o.loaded) ? o.loaded.filter((n) => typeof n === "string" && n) : null;
+      return { tally_company: o.active || null, tally_companies: loaded?.length ? loaded : null };
+    } catch {
+      /* not JSON after all: fall through and treat as a plain name */
+    }
+  }
+  return { tally_company: value, tally_companies: null };
+};
+
 // Never throws — a status badge must not break the routes that show it.
 export const getTallyStatusForKey = async (apiKeyId) => {
-  const unknown = { tally_connected: null, tally_checked_at: null, tally_licensed: null, tally_licence_checked_at: null, tally_company: null };
+  const unknown = { tally_connected: null, tally_checked_at: null, tally_licensed: null, tally_licence_checked_at: null, tally_company: null, tally_companies: null };
   if (!apiKeyId) return unknown;
 
   // The licence and company columns came later: on a database that has not run those migrations yet,
@@ -291,8 +307,11 @@ export const getTallyStatusForKey = async (apiKeyId) => {
       // Tally itself is reporting in and up, with the time it was asked.
       tally_licensed: fresh && row.tally_connected === true ? (row.tally_licensed ?? null) : null,
       tally_licence_checked_at: fresh && row.tally_connected === true ? (row.tally_licence_checked_at ?? null) : null,
-      // The company open in Tally, only while Tally is reporting in and up (same freshness as the status).
-      tally_company: fresh && row.tally_connected === true ? (row.tally_company ?? null) : null
+      // The company open in Tally and every company loaded in it, only while Tally is reporting in and up
+      // (same freshness as the status).
+      ...(fresh && row.tally_connected === true
+        ? parseStoredCompany(row.tally_company)
+        : { tally_company: null, tally_companies: null })
     };
   } catch (err) {
     console.error("Tally status lookup failed:", err.message);
@@ -310,12 +329,18 @@ export const isCompanyOpenInTally = (selectedName, openName) => {
   return normalizeCompanyName(selectedName) === normalizeCompanyName(openName);
 };
 
-// Is the company selected on the website the one open in TallyPrime? true / false, or null when it
-// cannot be told (the connector did not report an open company). `tallyStatus` is getTallyStatusForKey().
+// Is the company selected on the website loaded in TallyPrime? true / false, or null when it cannot
+// be told. A connector that reports every loaded company is matched against that list (any loaded
+// company can be worked on); an older one only reports the active company, which is compared instead.
+// `tallyStatus` is getTallyStatusForKey().
 export const getCompanyOpenState = async (companyId, tallyStatus) => {
-  if (!companyId || !tallyStatus?.tally_company) return null;
+  const loaded = tallyStatus?.tally_companies;
+  const hasList = Array.isArray(loaded) && loaded.length > 0;
+  if (!companyId || (!hasList && !tallyStatus?.tally_company)) return null;
   const co = await pool.query(`SELECT name FROM ${DB_SCHEMA}.companies WHERE id = $1`, [companyId]);
-  return isCompanyOpenInTally(co.rows[0]?.name, tallyStatus.tally_company);
+  const name = co.rows[0]?.name;
+  if (hasList) return name ? loaded.some((n) => isCompanyOpenInTally(name, n) === true) : null;
+  return isCompanyOpenInTally(name, tallyStatus.tally_company);
 };
 
 // The connector device that is online for this user (scoped to one company

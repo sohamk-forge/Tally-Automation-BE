@@ -6,7 +6,7 @@ import { getLocalUserId } from "../utils/getLocalUserId.js";
 import { verifyConnectorApiKey } from "../middleware/apiKey.middleware.js";
 import { claimPendingConnectorJobs, extendConnectorJobLeases } from "../services/connectorJobClaim.service.js";
 import { processConnectorJobResult } from "../services/connectorJobResult.service.js";
-import { resolveConnectorForCompany, getTallyStatusForKey, getCompanyOpenState, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
+import { resolveTallyOwner, findLiveConnectorKey, getTallyStatusForKey, getCompanyOpenState, CONNECTOR_ONLINE_WINDOW } from "../services/connectorOwner.service.js";
 import { safeEnqueueAlterStockItem } from "../queues/alterStockItem.queue.js";
 import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
 import { confirmBankVoucherInTally } from "../services/bankVoucherConfirm.service.js";
@@ -82,11 +82,15 @@ router.get("/current", verifySession(), async (req, res) => {
       });
     }
 
-    // Optional company scope: the same check pushes use, so the UI badge
-    // and the push gate can never disagree about "live".
+    // Optional company scope. "connected" is machine-level: one Tally machine serves all of the
+    // owner's companies, so every company shows the connector as live while it is online (before,
+    // only the company the key was last paired/synced for did). Which company is actually open in
+    // TallyPrime is reported separately as company_open. The push gate (resolveConnectorForCompany)
+    // is unchanged and still requires a key paired to the company.
     const scopedCompanyId = Number(req.query.company_id);
     if (scopedCompanyId) {
-      const live = await resolveConnectorForCompany(scopedCompanyId, user_id);
+      const owner = await resolveTallyOwner(scopedCompanyId, user_id);
+      const live = await findLiveConnectorKey(owner.ownerUserId);
       if (!live) {
         return res.status(404).json({
           status: "error",
