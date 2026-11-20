@@ -335,6 +335,21 @@ function findBankOrCashLine(ledgerEntries) {
  *   purchase/sales voucher types (the ones with itemized inventory lines).
  */
 export function normalizeVoucherRow(row, companyInfo, hsnMap = {}) {
+  // The XML sync stores a ledger whose name is all digits (e.g. a customer called "11486152") as a
+  // JSON number. Every name helper below calls string methods on it, so make the names strings first.
+  if (Array.isArray(row.ledger_entries)) {
+    row = {
+      ...row,
+      ledger_entries: row.ledger_entries.map((e) => {
+        if (!e || typeof e !== "object") return e;
+        const fixed = { ...e };
+        for (const k of ["LEDGERNAME", "ledgerName"]) {
+          if (typeof fixed[k] === "number") fixed[k] = String(fixed[k]);
+        }
+        return fixed;
+      }),
+    };
+  }
   const templateKey = detectTemplateKey(row.voucher_type);
 
   const base = {

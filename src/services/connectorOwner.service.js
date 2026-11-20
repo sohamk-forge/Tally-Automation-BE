@@ -228,6 +228,40 @@ export const resolveConnectorForCompany = async (
   }
 
   // =====================================================
+  // FALLBACK: the owner's live connector, even if its key is paired to another company.
+  //
+  // One Tally machine serves all of the owner's companies, and jobs are claimed by user, not key, so
+  // a company that is loaded in that Tally can be pushed to through it. Refused only when the
+  // connector reports the company is NOT loaded in Tally (company_open === false); unknown (null,
+  // older connector) is allowed, as it was before company tracking existed for paired keys.
+  // =====================================================
+
+  const fallback = await findLiveConnectorKey(owner.ownerUserId);
+  if (fallback) {
+    const tallyStatus = await getTallyStatusForKey(fallback.api_key_id);
+    const companyOpen = await getCompanyOpenState(companyId, tallyStatus);
+    if (companyOpen !== false) {
+      console.log("✅ OWNER CONNECTOR SELECTED (machine-level fallback):", {
+        actingUserId,
+        companyId,
+        connectorUserId: owner.ownerUserId,
+        machineId: fallback.machine_id,
+        apiKeyId: fallback.api_key_id,
+        companyOpen
+      });
+      return {
+        user_id: owner.ownerUserId,
+        api_key_id: fallback.api_key_id,
+        machine_id: fallback.machine_id,
+        company_id: companyId,
+        last_seen_at: fallback.last_seen_at,
+        pairing_id: null,
+        pairing_created_at: null
+      };
+    }
+  }
+
+  // =====================================================
   // OWNER CONNECTOR NOT FOUND / OFFLINE
   // =====================================================
 
