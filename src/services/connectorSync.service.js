@@ -230,6 +230,7 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
         pool.query(
           `
       SELECT cj.status, cj.response_xml, cj.error_message, cj.user_id AS owner_user_id,
+             cj.payload->>'company_id' AS company_id,
              EXTRACT(EPOCH FROM (NOW() - cj.created_at)) * 1000 AS age_ms
       FROM app_test.connector_jobs cj
       WHERE cj.id = $1
@@ -274,7 +275,8 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
     if (
       job.status === "pending" &&
       Number(job.age_ms) > UNCLAIMED_LIMIT_MS &&
-      !(await connectorIsBusy(job.owner_user_id))
+      !(await connectorIsBusy(job.owner_user_id)) &&
+      !(await anotherCompanyHoldsConnector(job.owner_user_id, job.company_id))
     ) {
       const failed = await pool.query(
         `
@@ -305,6 +307,33 @@ export async function waitForConnectorSyncJob(connectorJobId, userId) {
 }
 
 // True while this user's connector has a job it claimed recently and has not reported on.
+// The connector hands out one company's jobs at a time (see claimPendingConnectorJobs). A job of
+// this company that is still pending because ANOTHER company's sync is running between its steps is
+// waiting its turn, not unclaimed - same recent-activity guard as the claim, so a crashed sync
+// cannot keep this waiting forever.
+async function anotherCompanyHoldsConnector(userId, companyId) {
+  if (!companyId) return false;
+  const result = await pool.query(
+    `
+    SELECT 1
+    FROM app_test.job_logs jl
+    WHERE jl.job_type = 'manual_sync'
+      AND jl.status = 'running'
+      AND jl.payload->>'companyId' IS NOT NULL
+      AND jl.payload->>'companyId' <> $2
+      AND EXISTS (
+        SELECT 1 FROM app_test.connector_jobs cj
+        WHERE cj.user_id = $1
+          AND cj.payload->>'company_id' = jl.payload->>'companyId'
+          AND cj.updated_at > NOW() - INTERVAL '10 minutes'
+      )
+    LIMIT 1
+    `,
+    [userId, String(companyId)]
+  );
+  return result.rows.length > 0;
+}
+
 async function connectorIsBusy(userId) {
   const result = await pool.query(
     `

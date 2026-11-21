@@ -138,11 +138,58 @@ await client.query("BEGIN");
 
 const result = await client.query(
   `
-  WITH claimed_jobs AS (
+  -- ONE COMPANY AT A TIME per connector (= per Tally). Tally answers one request at a time, so
+  -- syncs/pushes of different companies running together only slow each other down (and can hit the
+  -- timeouts). "busy" = companies with work in flight: jobs the connector is processing right now
+  -- (priority 0), or a manual sync that is running between its steps (priority 1, only while its
+  -- connector jobs show activity in the last 10 minutes, so a crashed sync cannot block forever).
+  -- The first one to start leads; only its pending jobs are handed out. When nothing is in flight,
+  -- the oldest pending company leads. Jobs without a company (e.g. company discovery) are never held.
+  WITH busy AS (
+    SELECT payload->>'company_id' AS cid, 0 AS prio, MIN(claimed_at) AS since
+    FROM app_test.connector_jobs
+    WHERE user_id = $1
+      AND status = 'processing'
+      AND payload->>'company_id' IS NOT NULL
+      AND COALESCE(lease_expires_at, claimed_at + INTERVAL '5 minutes') > NOW()
+    GROUP BY payload->>'company_id'
+    UNION ALL
+    SELECT jl.payload->>'companyId', 1, jl.started_at
+    FROM app_test.job_logs jl
+    WHERE jl.job_type = 'manual_sync'
+      AND jl.status = 'running'
+      AND jl.started_at IS NOT NULL
+      AND jl.payload->>'companyId' IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM app_test.connector_jobs cj
+        WHERE cj.user_id = $1
+          AND cj.payload->>'company_id' = jl.payload->>'companyId'
+          AND cj.updated_at > NOW() - INTERVAL '10 minutes'
+      )
+  ),
+  lead AS (
+    SELECT cid FROM busy ORDER BY prio, since ASC LIMIT 1
+  ),
+  first_pending AS (
+    SELECT payload->>'company_id' AS cid
+    FROM app_test.connector_jobs
+    WHERE user_id = $1
+      AND status = 'pending'
+      AND payload->>'company_id' IS NOT NULL
+    ORDER BY created_at ASC
+    LIMIT 1
+  ),
+  allowed AS (
+    SELECT cid FROM lead
+    UNION ALL
+    SELECT cid FROM first_pending WHERE NOT EXISTS (SELECT 1 FROM lead)
+  ),
+  claimed_jobs AS (
     SELECT id
     FROM app_test.connector_jobs
     WHERE user_id = $1
       AND status = 'pending'
+      AND (payload->>'company_id' IS NULL OR payload->>'company_id' IN (SELECT cid FROM allowed))
     ORDER BY created_at ASC
     FOR UPDATE SKIP LOCKED
   )
