@@ -10,6 +10,7 @@ import { findTopItemMatches } from "../utils/fuzzyItemMatch.js";
 import { requestedCompanyId, companyMatchSql } from "../utils/requestCompanyId.js";
 import { normName, pushedLedgerStillInTally, pushedStockItemStillInTally } from "../utils/masterSoftDelete.js";
 import { findCompanyLedger } from "../services/vendorLedgerMapping.service.js";
+import { safeEnqueueSalesPrint } from "../queues/salesPrint.queue.js";
 
 const router = express.Router();
 
@@ -916,6 +917,86 @@ router.get("/sales-invoices/:id/print-status", async (req, res) => {
         voucher_number: row.tally_voucher_number,
         voucher_row_id: row.voucher_row_id
       }
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+/*
+  POST /sales-invoices/:id/print
+  Print an invoice that is already saved in Tally, from the Sales Invoices list.
+  Re-reads the voucher from Tally through the same finalize job the Create screen
+  uses (sales-print queue). Poll GET /sales-invoices/:id/print-status afterwards
+  until print_status is 'ready' (voucher_row_id set) or 'failed'.
+*/
+router.post("/sales-invoices/:id/print", async (req, res) => {
+  try {
+    const userId = req.session
+      ? await getLocalUserId(req.session.getUserId())
+      : req.connectorMachine?.userId;
+
+    if (!userId) {
+      return res.status(401).json({ status: "error", message: "Unauthenticated" });
+    }
+
+    const invoiceId = Number(req.params.id);
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+      return res.status(400).json({ status: "error", message: "Invalid invoice id" });
+    }
+
+    // Same ownership rule as print-status: the caller must be paired to the invoice's company.
+    const found = await pool.query(
+      `
+      SELECT s.id, s.sync_status, s.tally_master_id, s.print_status, s.voucher_row_id
+      FROM app_test.sales_invoice_extractions s
+      JOIN app_test.connector_pairing_tokens cpt ON cpt.company_id = s.company_id
+      WHERE s.id = $1
+        AND cpt.user_id = $2
+        AND cpt.is_used = TRUE
+      LIMIT 1
+      `,
+      [invoiceId, userId]
+    );
+
+    const row = found.rows[0];
+    if (!row) {
+      return res.status(404).json({ status: "error", message: "Invoice not found" });
+    }
+
+    if (row.sync_status !== "success" || !row.tally_master_id) {
+      return res.status(409).json({
+        status: "error",
+        message: "Only invoices that are saved in Tally can be printed."
+      });
+    }
+
+    // Already read back from Tally: the print-status poll returns it straight away.
+    if (row.print_status === "ready" && row.voucher_row_id) {
+      return res.status(200).json({
+        status: "success",
+        data: { invoice_id: row.id, print_status: "ready" }
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE app_test.sales_invoice_extractions
+      SET print_requested = TRUE,
+          print_status = 'fetching',
+          print_error = NULL,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [invoiceId]
+    );
+
+    await safeEnqueueSalesPrint(invoiceId);
+
+    return res.status(202).json({
+      status: "success",
+      data: { invoice_id: row.id, print_status: "fetching" }
     });
   } catch (err) {
     console.error(err);
